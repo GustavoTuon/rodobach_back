@@ -11,6 +11,8 @@ import {
 import { getLancamentosFinanceiros } from "../services/financeiroLancamentosService.js";
 import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
+import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
+import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 
 export const financeiroRouter = Router();
 
@@ -70,6 +72,103 @@ financeiroRouter.get("/financeiro/custos", async (req, res, next) => {
     });
 
     res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/demonstrativo", async (req, res, next) => {
+  try {
+    const data = await getDemonstrativoFinanceiro({
+      period: req.query.period || req.query.periodo,
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      empresa: req.query.empresa,
+      centro: req.query.centro,
+      conta: req.query.conta,
+      search: req.query.search,
+    });
+
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function loadDreEmpresarial(req) {
+  return getDreEmpresarial({
+    period: req.query.period || req.query.periodo,
+    startDate: req.query.startDate || req.query.dataInicio,
+    endDate: req.query.endDate || req.query.dataFim,
+    mesAno: req.query.mesAno,
+    empresa: req.query.empresa,
+    centro: req.query.centro,
+    conta: req.query.conta,
+    placa: req.query.placa,
+    cliente: req.query.cliente,
+    tipo: req.query.tipo,
+    status: req.query.status,
+    search: req.query.search,
+  });
+}
+
+financeiroRouter.get("/financeiro/dre-empresarial", async (req, res, next) => {
+  try {
+    res.json(await loadDreEmpresarial(req));
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/resumo", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, summary: data.summary, structure: data.structure, sources: data.sources });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/evolucao", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, monthly: data.monthly });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/rankings", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, categories: data.categories, accounts: data.accounts, management: data.management });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/centros", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, centers: data.centers });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/placas", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, plates: data.plates });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/dre-empresarial/lancamentos", async (req, res, next) => {
+  try {
+    const data = await loadDreEmpresarial(req);
+    res.json({ period: data.period, rows: data.rows });
   } catch (error) {
     next(error);
   }
