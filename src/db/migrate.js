@@ -1,0 +1,54 @@
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
+import { config, quoteIdent } from "../config.js";
+import { pool } from "./pool.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const sqlDir = path.resolve(__dirname, "../../sql");
+
+export async function runMigrations() {
+  const client = await pool.connect();
+
+  try {
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(config.db.schema)}`);
+    await client.query(`SET search_path TO ${quoteIdent(config.db.schema)}`);
+
+    const files = (await fs.readdir(sqlDir))
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+
+    for (const file of files) {
+      const sql = await fs.readFile(path.join(sqlDir, file), "utf8");
+      if (file === "004_analise_clientes.sql") {
+        console.log(`skipped ${file} (arquivo de consultas parametrizadas, nao e migracao)`);
+        continue;
+      }
+
+      await client.query("BEGIN");
+      await client.query(sql);
+      await client.query("COMMIT");
+      console.log(`applied ${file}`);
+    }
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runMigrations()
+    .then(async () => {
+      console.log("database ready");
+      await pool.end();
+    })
+    .catch(async (error) => {
+      console.error(error);
+      await pool.end();
+      process.exit(1);
+    });
+}
