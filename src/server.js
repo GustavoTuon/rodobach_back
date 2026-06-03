@@ -20,6 +20,14 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "1mb" }));
 
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "rodobach-api" });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "rodobach-api" });
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT NOW() AS now");

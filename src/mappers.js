@@ -83,6 +83,42 @@ export function mapViagem(row, rotas = []) {
   };
 }
 
+const PROCESS_SITUACOES = new Set(["em_transito", "entregue", "cancelado"]);
+
+function hasValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== "" && Number(value) !== 0;
+}
+
+export function calcularSituacaoViagem(input = {}) {
+  if (PROCESS_SITUACOES.has(input.situacao)) return input.situacao;
+
+  const hasCarga = [
+    input.cliente,
+    input.material,
+    input.peso,
+    input.valorCliente,
+    input.origem,
+    input.destino,
+  ].some(hasValue);
+
+  if (hasCarga && (!hasValue(input.placa) || !hasValue(input.motorista))) {
+    return "aguardando_veiculo";
+  }
+
+  const hasDadosOperacionais = [
+    input.placa,
+    input.motorista,
+    input.cliente,
+    input.material,
+    input.valorCliente,
+    input.valorMotorista,
+    input.origem,
+    input.destino,
+  ].every(hasValue);
+
+  return hasDadosOperacionais ? "aguardando_cte" : "faltando_dados";
+}
+
 function mapParada(row) {
   return {
     id: row.id,
@@ -106,7 +142,7 @@ export function viagemParams(input) {
   return [
     input.numero || null,
     input.placa || null,
-    input.situacao || "faltando_dados",
+    calcularSituacaoViagem(input),
     input.data || new Date().toISOString().slice(0, 10),
     input.origem || "",
     (input.ufOrigem || "").slice(0, 2).toUpperCase(),

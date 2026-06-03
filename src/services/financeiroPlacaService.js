@@ -1,3 +1,7 @@
+// financeiroPlacaService.js
+// RECEITA: logistica.conhecimentos (statuscon=2 EMITIDO), data = dataemissaocon, valor = valorfretecon
+// CUSTO:   financeiro.pagar (sem alteração)
+
 import { clientPool } from "../db/clientPool.js";
 
 const MONTH_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
@@ -41,29 +45,47 @@ function monthLabel(mes) {
   return `${MONTH_LABELS[idx]}/${String(year).slice(2)}`;
 }
 
-const STATUS_REC = `CASE WHEN statusrec::text ILIKE '%cancel%' THEN 'cancelado' WHEN COALESCE(valorabertorec,0)>0 AND datavencimentorec::date<CURRENT_DATE THEN 'vencido' WHEN COALESCE(valorabertorec,0)>0 THEN 'aberto' ELSE 'pago' END`;
 const STATUS_PAG = `CASE WHEN statuspag::text ILIKE '%cancel%' THEN 'cancelado' WHEN COALESCE(valorabertopag,0)>0 AND datavencimentopag::date<CURRENT_DATE THEN 'vencido' WHEN COALESCE(valorabertopag,0)>0 THEN 'aberto' ELSE 'pago' END`;
 
 const SEM_CENTRO = "Sem centro de custo";
 
-function financeiroBaseSql({ tableName, tableAlias, companyColumn, dateColumn, valueColumn, openColumn, statusSql, vehicleColumn, centersColumn, accountsColumn }) {
+function normalizeTipoProprietario(value) {
+  const tipo = String(value || "frota").toLowerCase();
+  return ["frota", "terceiros", "todos"].includes(tipo) ? tipo : "frota";
+}
+
+function proprietarioWhere(tipoProprietario) {
+  if (tipoProprietario === "terceiros") return "AND v.tipopropriedadevei = 'T'";
+  if (tipoProprietario === "todos") return "";
+  return "AND COALESCE(v.tipopropriedadevei::text, '') <> 'T'";
+}
+
+function lancamentoWhere(tipoProprietario) {
+  return tipoProprietario === "todos" ? "" : "AND COALESCE(vei_doc.placavei, vei_cc.placavei) IS NOT NULL";
+}
+
+function financeiroBaseSql({ tableName, tableAlias, companyColumn, dateColumn, valueColumn, openColumn, statusSql, vehicleColumn, centersColumn, accountsColumn, tipoProprietario }) {
+  const filtroProprietario = proprietarioWhere(tipoProprietario);
+  const filtroLancamento = lancamentoWhere(tipoProprietario);
+
   return `
     SELECT
       CASE
-        WHEN NULLIF(TRIM(vei_cc.placavei::text),'') IS NOT NULL THEN 'plate:' || UPPER(TRIM(vei_cc.placavei::text))
+        WHEN NULLIF(TRIM(COALESCE(vei_doc.placavei, vei_cc.placavei)::text),'') IS NOT NULL THEN 'plate:' || UPPER(TRIM(COALESCE(vei_doc.placavei, vei_cc.placavei)::text))
         WHEN NULLIF(TRIM(${tableAlias}.${vehicleColumn}::text),'') IS NOT NULL THEN 'plate:' || UPPER(TRIM(${tableAlias}.${vehicleColumn}::text))
         WHEN centro.codigo IS NOT NULL THEN 'cc:' || ${tableAlias}.${companyColumn}::text || ':' || centro.codigo::text
         ELSE 'none'
       END AS group_key,
       COALESCE(
+        NULLIF(TRIM(vei_doc.placavei::text),''),
         NULLIF(TRIM(vei_cc.placavei::text),''),
         NULLIF(TRIM(${tableAlias}.${vehicleColumn}::text),''),
         NULLIF(TRIM(ccs.nomeccs::text),''),
         '${SEM_CENTRO}'
       ) AS label,
-      NULLIF(TRIM(vei_cc.placavei::text),'') AS placa_veiculo,
-      NULLIF(TRIM(vei_cc.nomevei::text),'') AS nome_veiculo,
-      centro.codigo::int AS centro_codigo,
+      NULLIF(TRIM(COALESCE(vei_doc.placavei, vei_cc.placavei)::text),'') AS placa_veiculo,
+      NULLIF(TRIM(COALESCE(vei_doc.nomevei, vei_cc.nomevei)::text),'') AS nome_veiculo,
+      COALESCE(vei_doc.centro_codigo, vei_cc.centro_codigo, centro.codigo::int) AS centro_codigo,
       NULLIF(TRIM(ccs.nomeccs::text),'') AS nome_centro_custo,
       ${tableAlias}.${dateColumn}::date AS data_vencimento,
       ${tableAlias}.${valueColumn} AS valor_documento,
@@ -88,6 +110,20 @@ function financeiroBaseSql({ tableName, tableAlias, companyColumn, dateColumn, v
       SELECT
         v.placavei,
         v.nomevei,
+        v.centrocustovei::int AS centro_codigo
+      FROM frotas.veiculos v
+      WHERE NULLIF(TRIM(${tableAlias}.${vehicleColumn}::text),'') IS NOT NULL
+        AND UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(${tableAlias}.${vehicleColumn}::text))
+        AND NULLIF(TRIM(v.placavei::text),'') IS NOT NULL
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+        ${filtroProprietario}
+      ORDER BY (v.empresavei = ${tableAlias}.${companyColumn}) DESC, v.empresavei
+      LIMIT 1
+    ) vei_doc ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        v.placavei,
+        v.nomevei,
         c.nomeccs,
         v.centrocustovei::int AS centro_codigo
       FROM frotas.veiculos v
@@ -96,47 +132,103 @@ function financeiroBaseSql({ tableName, tableAlias, companyColumn, dateColumn, v
        AND c.codigoccs = v.centrocustovei
       WHERE v.centrocustovei = centro.codigo
         AND NULLIF(TRIM(v.placavei::text),'') IS NOT NULL
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+        ${filtroProprietario}
       ORDER BY (v.empresavei = ${tableAlias}.${companyColumn}) DESC, v.empresavei
       LIMIT 1
     ) vei_cc ON true
     WHERE ${tableAlias}.${dateColumn}::date >= $1::date
       AND ${tableAlias}.${dateColumn}::date <= $2::date
+      ${filtroLancamento}
   `;
 }
 
-const RECEBER_BASE = financeiroBaseSql({
-  tableName: "receber",
-  tableAlias: "rec",
-  companyColumn: "empresarec",
-  dateColumn: "datavencimentorec",
-  valueColumn: "valorduplicatarec",
-  openColumn: "valorabertorec",
-  statusSql: STATUS_REC,
-  vehicleColumn: "veiculorec",
-  centersColumn: "centrosdecustorec",
-  accountsColumn: "contasfinanceirasrec",
-});
+// ── Nova receita: logistica.conhecimentos ─────────────────────────────────────
+// statuscon=2 (EMITIDO), data = dataemissaocon, valor = valorfretecon
+// veiculocon contém a placa diretamente.
+// Proprietário determinado via frotas.veiculos.tipopropriedadevei.
 
-const PAGAR_BASE = financeiroBaseSql({
-  tableName: "pagar",
-  tableAlias: "pag",
-  companyColumn: "empresapag",
-  dateColumn: "datavencimentopag",
-  valueColumn: "valorduplicatapag",
-  openColumn: "valorabertopag",
-  statusSql: STATUS_PAG,
-  vehicleColumn: "veiculopag",
-  centersColumn: "centrosdecustopag",
-  accountsColumn: "contasfinanceiraspag",
-});
+function proprietarioWhereVeiculos(tipoProprietario) {
+  if (tipoProprietario === "terceiros") return "AND v.tipopropriedadevei = 'T'";
+  if (tipoProprietario === "todos") return "";
+  // frota: tudo que não for terceiro (inclui 'P', null, etc.)
+  return "AND COALESCE(v.tipopropriedadevei::text,'') <> 'T'";
+}
 
-export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {}) {
+function receberConhecimentosSql(tipoProprietario) {
+  const filtroVeiculos = proprietarioWhereVeiculos(tipoProprietario);
+  // Para frota/terceiros: exige que o veículo seja encontrado no cadastro de frotas com o tipo correto.
+  // Para todos: inclui qualquer conhecimento com placa, mesmo sem cadastro em frotas.veiculos.
+  const filtroEncontrado = tipoProprietario === "todos" ? "" : "AND vei.placavei IS NOT NULL";
+
+  return `
+    SELECT
+      'plate:' || UPPER(TRIM(con.veiculocon::text)) AS group_key,
+      UPPER(TRIM(con.veiculocon::text)) AS label,
+      UPPER(TRIM(con.veiculocon::text)) AS placa_veiculo,
+      NULLIF(TRIM(COALESCE(vei.nomevei, '')::text), '') AS nome_veiculo,
+      vei.centro_codigo AS centro_codigo,
+      ccs.nomeccs AS nome_centro_custo,
+      con.dataemissaocon::date AS data_vencimento,
+      con.valorfretecon AS valor_documento,
+      0::numeric AS valor_aberto,
+      'pago'::text AS status_calculado
+    FROM logistica.conhecimentos con
+    LEFT JOIN LATERAL (
+      SELECT
+        v.placavei,
+        NULLIF(TRIM(v.nomevei::text), '') AS nomevei,
+        v.centrocustovei::int AS centro_codigo,
+        v.empresavei
+      FROM frotas.veiculos v
+      WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
+        AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+        ${filtroVeiculos}
+      ORDER BY v.empresavei
+      LIMIT 1
+    ) vei ON true
+    LEFT JOIN LATERAL (
+      SELECT c.nomeccs
+      FROM financeiro.centroscustos c
+      WHERE c.codigoccs = vei.centro_codigo
+      LIMIT 1
+    ) ccs ON true
+    WHERE NULLIF(TRIM(con.veiculocon::text), '') IS NOT NULL
+      AND con.statuscon = 2
+      AND con.dataemissaocon::date >= $1::date
+      AND con.dataemissaocon::date <= $2::date
+      ${filtroEncontrado}
+  `;
+}
+
+function buildBases(tipoProprietario) {
+  return {
+    receber: receberConhecimentosSql(tipoProprietario),
+    pagar: financeiroBaseSql({
+      tableName: "pagar",
+      tableAlias: "pag",
+      companyColumn: "empresapag",
+      dateColumn: "datavencimentopag",
+      valueColumn: "valorduplicatapag",
+      openColumn: "valorabertopag",
+      statusSql: STATUS_PAG,
+      vehicleColumn: "veiculopag",
+      centersColumn: "centrosdecustopag",
+      accountsColumn: "contasfinanceiraspag",
+      tipoProprietario,
+    }),
+  };
+}
+
+export async function getFinanceiroPorPlaca({ period, startDate, endDate, tipoProprietario } = {}) {
   const p = resolvePeriod(period, startDate, endDate);
+  const tipo = normalizeTipoProprietario(tipoProprietario);
+  const { receber: receberBase, pagar: pagarBase } = buildBases(tipo);
   const vals = [p.startDate, p.endDate];
 
-  const [rec, pag, recMon, pagMon, validation] = await Promise.all([
-    clientPool.query(`
-      WITH base AS (${RECEBER_BASE})
+  const rec = await clientPool.query(`
+      WITH base AS (${receberBase})
       SELECT
         group_key,
         label,
@@ -152,10 +244,10 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
       FROM base
       GROUP BY group_key, label
       ORDER BY receita DESC
-    `, vals),
+    `, vals);
 
-    clientPool.query(`
-      WITH base AS (${PAGAR_BASE})
+  const pag = await clientPool.query(`
+      WITH base AS (${pagarBase})
       SELECT
         group_key,
         label,
@@ -171,10 +263,10 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
       FROM base
       GROUP BY group_key, label
       ORDER BY custo DESC
-    `, vals),
+    `, vals);
 
-    clientPool.query(`
-      WITH base AS (${RECEBER_BASE})
+  const recMon = await clientPool.query(`
+      WITH base AS (${receberBase})
       SELECT
         group_key,
         label,
@@ -183,10 +275,10 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
       FROM base
       GROUP BY group_key, label, mes
       ORDER BY label, mes
-    `, vals),
+    `, vals);
 
-    clientPool.query(`
-      WITH base AS (${PAGAR_BASE})
+  const pagMon = await clientPool.query(`
+      WITH base AS (${pagarBase})
       SELECT
         group_key,
         label,
@@ -195,18 +287,21 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
       FROM base
       GROUP BY group_key, label, mes
       ORDER BY label, mes
-    `, vals),
+    `, vals);
 
-    clientPool.query(`
+    // Validação: compara totais brutos vs. agrupados
+  const validation = await clientPool.query(`
       WITH
-      rec_base AS (${RECEBER_BASE}),
-      pag_base AS (${PAGAR_BASE})
+      rec_base AS (${receberBase}),
+      pag_base AS (${pagarBase})
       SELECT
         (
-          SELECT COALESCE(SUM(rec.valorduplicatarec), 0)
-          FROM financeiro.receber rec
-          WHERE rec.datavencimentorec::date >= $1::date
-            AND rec.datavencimentorec::date <= $2::date
+          SELECT COALESCE(SUM(con.valorfretecon), 0)
+          FROM logistica.conhecimentos con
+          WHERE con.statuscon = 2
+            AND con.dataemissaocon::date >= $1::date
+            AND con.dataemissaocon::date <= $2::date
+            AND NULLIF(TRIM(con.veiculocon::text), '') IS NOT NULL
         ) AS receita_bruta_tabela,
         (
           SELECT COALESCE(SUM(valor_documento), 0)
@@ -224,9 +319,11 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
         ) AS custo_base_agrupavel,
         (
           SELECT COUNT(*)
-          FROM financeiro.receber rec
-          WHERE rec.datavencimentorec::date >= $1::date
-            AND rec.datavencimentorec::date <= $2::date
+          FROM logistica.conhecimentos con
+          WHERE con.statuscon = 2
+            AND con.dataemissaocon::date >= $1::date
+            AND con.dataemissaocon::date <= $2::date
+            AND NULLIF(TRIM(con.veiculocon::text), '') IS NOT NULL
         ) AS receita_lancamentos_tabela,
         (
           SELECT COUNT(*)
@@ -242,8 +339,7 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
           SELECT COUNT(*)
           FROM pag_base
         ) AS custo_linhas_agrupaveis
-    `, vals),
-  ]);
+    `, vals);
 
   // Build monthly map per plate
   const monthMap = {};
@@ -328,8 +424,9 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
   const receitaBase = r2(diagnostic.receita_base_agrupavel);
   const custoBase = r2(diagnostic.custo_base_agrupavel);
 
-  console.info("[financeiro/por-placa] validacao", {
+  console.info("[financeiro/por-placa] validacao (receita=conhecimentos, custo=financeiro.pagar)", {
     period: p,
+    tipoProprietario: tipo,
     receita: {
       brutoTabela: r2(diagnostic.receita_bruta_tabela),
       baseAgrupavel: receitaBase,
@@ -351,7 +448,7 @@ export async function getFinanceiroPorPlaca({ period, startDate, endDate } = {})
   });
 
   return {
-    period: p,
+    period: { ...p, tipoProprietario: tipo },
     totals: {
       receita: totReceita,
       custo: totCusto,

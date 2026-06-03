@@ -195,6 +195,7 @@ financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
       period: req.query.period || req.query.periodo,
       startDate: req.query.startDate || req.query.dataInicio,
       endDate: req.query.endDate || req.query.dataFim,
+      tipoProprietario: req.query.tipoProprietario,
     });
     res.json(data);
   } catch (error) {

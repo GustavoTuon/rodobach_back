@@ -119,6 +119,18 @@ function mapClientOption(row) {
     documento: row.document || "",
     contato: row.contact || "",
     condicaoPagamento: row.payment_condition || "",
+    vendedorCodigo: row.seller_code || null,
+    vendedor: row.seller_name || "",
+  };
+}
+
+function mapSellerOption(row) {
+  const nome = row.name || row.fantasy || "";
+  return {
+    codigo: row.code || null,
+    nome,
+    label: nome,
+    fantasia: row.fantasy || "",
   };
 }
 
@@ -131,14 +143,38 @@ async function loadClientOptions(search = "") {
       fantasiacli AS fantasy,
       cnpjcpfcli AS document,
       NULL::text AS contact,
-      condicaopagamentocli AS payment_condition
-    FROM gerais.clientes
-    WHERE NULLIF(TRIM(nomecli::text), '') IS NOT NULL
-      AND ($1::text = '%%' OR CONCAT_WS(' ', nomecli, fantasiacli, cnpjcpfcli, codigocli::text) ILIKE $1)
-    ORDER BY COALESCE(NULLIF(fantasiacli, ''), nomecli)
+      condicaopagamentocli AS payment_condition,
+      clientes.vendedorcli AS seller_code,
+      pessoas.nomepes AS seller_name
+    FROM gerais.clientes clientes
+    LEFT JOIN gerais.pessoas pessoas
+      ON pessoas.codigorepresentantepes = clientes.vendedorcli
+     AND pessoas.ativopes::text = 'S'
+    WHERE NULLIF(TRIM(clientes.nomecli::text), '') IS NOT NULL
+      AND ($1::text = '%%' OR CONCAT_WS(' ', clientes.nomecli, clientes.fantasiacli, clientes.cnpjcpfcli, clientes.codigocli::text) ILIKE $1)
+    ORDER BY COALESCE(NULLIF(clientes.fantasiacli, ''), clientes.nomecli)
     LIMIT 80
   `, [like]);
   return rows.map(mapClientOption);
+}
+
+async function loadSellerOptions(search = "") {
+  const like = `%${String(search || "").trim()}%`;
+  const { rows } = await clientPool.query(`
+    SELECT DISTINCT
+      representantes.codigorep AS code,
+      pessoas.nomepes AS name,
+      pessoas.fantasiapes AS fantasy
+    FROM logistica.representantes representantes
+    INNER JOIN gerais.pessoas pessoas
+      ON pessoas.codigorepresentantepes = representantes.codigorep
+    WHERE NULLIF(TRIM(pessoas.nomepes::text), '') IS NOT NULL
+      AND pessoas.ativopes::text = 'S'
+      AND ($1::text = '%%' OR CONCAT_WS(' ', pessoas.nomepes, pessoas.fantasiapes, representantes.codigorep::text) ILIKE $1)
+    ORDER BY pessoas.nomepes
+    LIMIT 80
+  `, [like]);
+  return rows.map(mapSellerOption);
 }
 
 async function loadVehicleOptions(search = "") {
@@ -262,11 +298,12 @@ viagensRouter.get("/viagens/opcoes", async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
     const local = await loadLocalOptions();
-    const [clientes, placas, motoristas, locais] = await Promise.all([
+    const [clientes, placas, motoristas, locais, vendedores] = await Promise.all([
       loadClientOptions(q).catch(() => []),
       loadVehicleOptions(q).catch(() => []),
       loadDriverOptions(q).catch(() => []),
       loadLocationOptions(q).catch(() => []),
+      loadSellerOptions(q).catch(() => []),
     ]);
 
     res.json({
@@ -275,12 +312,12 @@ viagensRouter.get("/viagens/opcoes", async (req, res, next) => {
       tomadores: uniq([...clientes.map((c) => c.nome), ...(local.tomadores ?? [])]),
       placas: uniq([...placas.map((p) => p.placa), ...(local.placas ?? [])]),
       motoristas: uniq([...motoristas.map((m) => m.nome), ...(local.motoristas ?? [])]),
-      vendedores: local.vendedores ?? [],
+      vendedores: uniq(vendedores.map((v) => v.nome)),
       origens: uniq([...(local.origens ?? []), ...locais]),
       destinos: uniq([...(local.destinos ?? []), ...locais]),
       paradas: uniq([...(local.paradas ?? []), ...(local.destinos ?? []), ...locais]),
       materiais: local.materiais ?? [],
-      detalhes: { clientes, placas, motoristas },
+      detalhes: { clientes, placas, motoristas, vendedores },
     });
   } catch (error) {
     next(error);
@@ -311,6 +348,14 @@ viagensRouter.get("/viagens/opcoes/clientes", async (req, res, next) => {
   }
 });
 
+viagensRouter.get("/viagens/opcoes/vendedores", async (req, res, next) => {
+  try {
+    res.json(await loadSellerOptions(req.query.q || ""));
+  } catch (error) {
+    next(error);
+  }
+});
+
 viagensRouter.get("/viagens", async (req, res, next) => {
   try {
     const params = [];
@@ -319,6 +364,36 @@ viagensRouter.get("/viagens", async (req, res, next) => {
     if (req.query.situacao && req.query.situacao !== "todos") {
       params.push(req.query.situacao);
       where.push(`situacao = $${params.length}`);
+    }
+
+    if (req.query.cliente) {
+      params.push(`%${String(req.query.cliente).trim().toLowerCase()}%`);
+      where.push(`lower(coalesce(cliente, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.origem) {
+      params.push(`%${String(req.query.origem).trim().toLowerCase().split("/")[0]}%`);
+      where.push(`lower(coalesce(cidade_origem, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.destino) {
+      params.push(`%${String(req.query.destino).trim().toLowerCase().split("/")[0]}%`);
+      where.push(`lower(coalesce(cidade_destino, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.material) {
+      params.push(`%${String(req.query.material).trim().toLowerCase()}%`);
+      where.push(`lower(coalesce(material, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.dataInicio) {
+      params.push(String(req.query.dataInicio).slice(0, 10));
+      where.push(`data >= $${params.length}`);
+    }
+
+    if (req.query.dataFim) {
+      params.push(String(req.query.dataFim).slice(0, 10));
+      where.push(`data <= $${params.length}`);
     }
 
     if (req.query.search) {
