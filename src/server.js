@@ -3,23 +3,28 @@ import express from "express";
 import { config, tableName } from "./config.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/pool.js";
-import { freteRouter } from "./routes/frete.js";
+import { requireAuth } from "./middleware/auth.js";
+import { authRouter } from "./routes/auth.js";
 import { financeiroRouter } from "./routes/financeiro.js";
+import { freteRouter } from "./routes/frete.js";
+import { usuariosRouter } from "./routes/usuarios.js";
 import { viagensRouter } from "./routes/viagens.js";
 
 const app = express();
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || config.frontendOrigins.includes(origin)) {
-      callback(null, true);
-      return;
+    if (!origin) return callback(null, true);
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+    if (isLocalhost || config.frontendOrigins.includes(origin)) {
+      return callback(null, true);
     }
     callback(new Error(`Origin not allowed: ${origin}`));
   },
 }));
 app.use(express.json({ limit: "1mb" }));
 
+// ── Rotas públicas ────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({ ok: true, service: "rodobach-api" });
 });
@@ -60,6 +65,12 @@ app.get("/api/health/viagens", async (_req, res) => {
   }
 });
 
+// Autenticação (login não requer token)
+app.use("/api", authRouter);
+
+// ── Rotas protegidas (JWT obrigatório a partir daqui) ─────────────────────────
+app.use("/api", requireAuth);
+
 app.post("/api/admin/migrate", async (_req, res, next) => {
   try {
     await runMigrations();
@@ -72,7 +83,9 @@ app.post("/api/admin/migrate", async (_req, res, next) => {
 app.use("/api", freteRouter);
 app.use("/api", financeiroRouter);
 app.use("/api", viagensRouter);
+app.use("/api", usuariosRouter);
 
+// ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ error: `Rota nao encontrada: ${req.method} ${req.path}` });
 });

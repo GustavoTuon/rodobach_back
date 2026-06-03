@@ -1,7 +1,8 @@
+import bcrypt from "bcryptjs";
 import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import { config, quoteIdent } from "../config.js";
+import { config, quoteIdent, tableName } from "../config.js";
 import { pool } from "./pool.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +31,8 @@ export async function runMigrations() {
       await client.query("COMMIT");
       console.log(`applied ${file}`);
     }
+
+    await seedAdminUser(client);
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -37,6 +40,24 @@ export async function runMigrations() {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+async function seedAdminUser(client) {
+  try {
+    const { rows } = await client.query(
+      `SELECT COUNT(*) AS count FROM ${tableName("usuarios")}`
+    );
+    if (parseInt(rows[0].count, 10) > 0) return;
+
+    const hash = await bcrypt.hash("rodobach123", 10);
+    await client.query(
+      `INSERT INTO ${tableName("usuarios")} (login, senha, email) VALUES ($1, $2, $3)`,
+      ["diogo.arcenio", hash, "diogoleonardoa@gmail.com"]
+    );
+    console.log("Admin criado — login: diogo.arcenio / senha: rodobach123");
+  } catch (err) {
+    console.warn("Seed de usuário ignorado:", err.message);
   }
 }
 
