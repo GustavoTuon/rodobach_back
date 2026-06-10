@@ -205,7 +205,9 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
 
     if (motNeg !== "" || cliNeg !== "") {
       const motSimNum = readNum(motNeg, valorMot);
-      const encSimAdic = seguroCarga + seguroRC + pedagioNum + patronalCusto;
+      const rpaSim = operacao === "tac" ? calcRpaCharges(motSimNum) : null;
+      const patronalSimCusto = rpaSim?.patronalInss ?? 0;
+      const encSimAdic = seguroCarga + seguroRC + pedagioNum + patronalSimCusto;
       const custSimOp  = round(motSimNum + encSimAdic);
       let cliSimNum;
 
@@ -227,6 +229,8 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
         margemPercent:   margemSim,
         encargosAdicionais: round(encSimAdic),
         custoOperacional:   custSimOp,
+        rpa:             rpaSim,
+        patronalInss:    patronalSimCusto,
       };
     }
 

@@ -7,6 +7,7 @@ import { requireAuth } from "./middleware/auth.js";
 import { authRouter } from "./routes/auth.js";
 import { financeiroRouter } from "./routes/financeiro.js";
 import { freteRouter } from "./routes/frete.js";
+import { localidadesRouter } from "./routes/localidades.js";
 import { usuariosRouter } from "./routes/usuarios.js";
 import { viagensRouter } from "./routes/viagens.js";
 import { pneusRouter } from "./routes/pneus.js";
@@ -82,6 +83,7 @@ app.post("/api/admin/migrate", async (_req, res, next) => {
 });
 
 app.use("/api", freteRouter);
+app.use("/api", localidadesRouter);
 app.use("/api", financeiroRouter);
 app.use("/api", viagensRouter);
 app.use("/api", usuariosRouter);

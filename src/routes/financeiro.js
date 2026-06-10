@@ -11,6 +11,11 @@ import {
 import { getLancamentosFinanceiros } from "../services/financeiroLancamentosService.js";
 import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
+import {
+  getCustosVeiculoDetalhe,
+  getCustosVeiculos,
+  getCustosVeiculosFiltros,
+} from "../services/custosVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 
@@ -196,6 +201,52 @@ financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
       startDate: req.query.startDate || req.query.dataInicio,
       endDate: req.query.endDate || req.query.dataFim,
       tipoProprietario: req.query.tipoProprietario,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos", async (req, res, next) => {
+  try {
+    const data = await getCustosVeiculos({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      centro: req.query.centro,
+      tipoCusto: req.query.tipoCusto,
+      situacao: req.query.situacao,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
+      limit: req.query.limit,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/filtros", async (_req, res, next) => {
+  try {
+    res.json(await getCustosVeiculosFiltros());
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/:placa", async (req, res, next) => {
+  try {
+    const data = await getCustosVeiculoDetalhe(req.params.placa, {
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      centro: req.query.centro,
+      tipoCusto: req.query.tipoCusto,
+      situacao: req.query.situacao,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
     });
     res.json(data);
   } catch (error) {
