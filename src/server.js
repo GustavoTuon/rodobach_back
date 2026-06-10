@@ -10,6 +10,8 @@ import { freteRouter } from "./routes/frete.js";
 import { usuariosRouter } from "./routes/usuarios.js";
 import { viagensRouter } from "./routes/viagens.js";
 import { pneusRouter } from "./routes/pneus.js";
+import { manutencaoRouter } from "./routes/manutencao.js";
+import { whatsappRouter } from "./routes/whatsapp.js";
 
 const app = express();
 
@@ -86,6 +88,8 @@ app.use("/api", financeiroRouter);
 app.use("/api", viagensRouter);
 app.use("/api", usuariosRouter);
 app.use("/api", pneusRouter);
+app.use("/api", manutencaoRouter);
+app.use("/api", whatsappRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {

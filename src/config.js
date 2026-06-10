@@ -30,6 +30,17 @@ export const config = {
     ssl: String(process.env.DB_SSL || "false").toLowerCase() === "true",
     connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000),
   },
+  veiculosDb: {
+    host: process.env.VEICULOS_DB_HOST,
+    port: Number(process.env.VEICULOS_DB_PORT || 5432),
+    database: process.env.VEICULOS_DB_NAME,
+    user: process.env.VEICULOS_DB_USER,
+    password: process.env.VEICULOS_DB_PASSWORD,
+    ssl: false,
+    max: 2,
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: 30000,
+  },
   clientDb: {
     host: process.env.CLIENT_DB_HOST || process.env.DB_HOST,
     port: Number(process.env.CLIENT_DB_PORT || process.env.DB_PORT || 5432),

@@ -37,6 +37,7 @@ authRouter.post("/auth/login", async (req, res, next) => {
       clientes: user.perm_clientes,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
+      manutencao: user.perm_manutencao,
       dashboard: user.perm_dashboard,
       vehicles: user.perm_vehicles,
       alerts: user.perm_alerts,

@@ -21,8 +21,9 @@ export async function runMigrations() {
 
     for (const file of files) {
       const sql = await fs.readFile(path.join(sqlDir, file), "utf8");
-      if (file === "004_analise_clientes.sql") {
-        console.log(`skipped ${file} (arquivo de consultas parametrizadas, nao e migracao)`);
+      const SKIP_FILES = new Set(["004_analise_clientes.sql", "validate_financeiro_por_placa.sql"]);
+      if (SKIP_FILES.has(file)) {
+        console.log(`skipped ${file} (arquivo de consulta, nao e migracao)`);
         continue;
       }
 

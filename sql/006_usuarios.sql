@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
   perm_clientes         BOOLEAN NOT NULL DEFAULT TRUE,
   perm_pneus            BOOLEAN NOT NULL DEFAULT TRUE,
   perm_settings         BOOLEAN NOT NULL DEFAULT TRUE,
+  perm_manutencao       BOOLEAN NOT NULL DEFAULT TRUE,
 
   -- Permissões de telas ocultas (para uso futuro)
   perm_dashboard    BOOLEAN NOT NULL DEFAULT FALSE,
