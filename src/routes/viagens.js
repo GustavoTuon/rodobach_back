@@ -12,15 +12,16 @@ const viagemColumns = `
   material, peso_kg, motorista, valor_motorista, vendedor, tomador_servico,
   condicao_pagamento, numero_motorista, cnh_motorista, antt_veiculo,
   conta_deposito, chave_pix, doc_placas, doc_antt, doc_conta_deposito,
-  doc_chave_pix, doc_cnh_motorista, doc_comprovante_residencia,
-  doc_numero_motorista, observacoes
+  doc_chave_pix, doc_cnh_motorista, doc_consulta_motorista, doc_comprovante_residencia,
+  doc_numero_motorista, rota_maps_url, observacoes
 `;
 
-const insertPlaceholders = Array.from({ length: 32 }, (_, index) => `$${index + 1}`).join(", ");
+const insertPlaceholders = Array.from({ length: 34 }, (_, index) => `$${index + 1}`).join(", ");
 const updateAssignments = viagemColumns
   .split(",")
   .map((column, index) => `${column.trim()} = $${index + 1}`)
   .join(", ");
+const viagemParamCount = viagemColumns.split(",").length;
 
 async function getViagemById(client, id) {
   const { rows } = await client.query(`
@@ -38,7 +39,14 @@ async function getViagemById(client, id) {
     ORDER BY ordem, id
   `, [id]);
 
-  return mapViagem(rows[0], rotas);
+  const { rows: documentos } = await client.query(`
+    SELECT *
+    FROM ${tableName("cadastro_cotacao_frete_documentos")}
+    WHERE cotacao_id = $1
+    ORDER BY id
+  `, [id]);
+
+  return mapViagem(rows[0], rotas, documentos);
 }
 
 async function replaceParadas(client, viagemId, paradas = []) {
@@ -63,6 +71,66 @@ async function replaceParadas(client, viagemId, paradas = []) {
   }
 }
 
+function userAudit(user = {}) {
+  return {
+    id: Number.isFinite(Number(user.id)) ? Number(user.id) : null,
+    login: user.login || user.email || null,
+  };
+}
+
+function normalizeDocumentoFinanceiro(documento = {}) {
+  return {
+    id: Number(documento.id) || null,
+    tipo: String(documento.tipo || documento.tipoDocumento || "CT-e").trim() || "CT-e",
+    numero: String(documento.numero || documento.numeroDocumento || "").trim(),
+    chave: String(documento.chave || documento.chaveDocumento || "").trim(),
+    link: String(documento.link || documento.linkDocumento || "").trim(),
+    observacoes: String(documento.observacoes || documento.obs || "").trim(),
+  };
+}
+
+async function replaceDocumentosFinanceiros(client, viagemId, documentos = [], user = {}) {
+  const normalized = (Array.isArray(documentos) ? documentos : [])
+    .map(normalizeDocumentoFinanceiro)
+    .filter((doc) => doc.tipo || doc.numero || doc.chave || doc.link || doc.observacoes);
+  const ids = normalized.map((doc) => doc.id).filter(Boolean);
+  const audit = userAudit(user);
+
+  if (ids.length) {
+    await client.query(`
+      DELETE FROM ${tableName("cadastro_cotacao_frete_documentos")}
+      WHERE cotacao_id = $1 AND id <> ALL($2::int[])
+    `, [viagemId, ids]);
+  } else {
+    await client.query(`DELETE FROM ${tableName("cadastro_cotacao_frete_documentos")} WHERE cotacao_id = $1`, [viagemId]);
+  }
+
+  for (const doc of normalized) {
+    if (doc.id) {
+      const { rowCount } = await client.query(`
+        UPDATE ${tableName("cadastro_cotacao_frete_documentos")}
+        SET tipo_documento = $3,
+            numero_documento = $4,
+            chave_documento = $5,
+            link_documento = $6,
+            observacoes = $7,
+            atualizado_por_id = $8,
+            atualizado_por_login = $9,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE cotacao_id = $1 AND id = $2
+      `, [viagemId, doc.id, doc.tipo, doc.numero || null, doc.chave || null, doc.link || null, doc.observacoes || null, audit.id, audit.login]);
+      if (rowCount) continue;
+    }
+
+    await client.query(`
+      INSERT INTO ${tableName("cadastro_cotacao_frete_documentos")} (
+        cotacao_id, tipo_documento, numero_documento, chave_documento, link_documento, observacoes,
+        criado_por_id, criado_por_login, atualizado_por_id, atualizado_por_login
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $7, $8)
+    `, [viagemId, doc.tipo, doc.numero || null, doc.chave || null, doc.link || null, doc.observacoes || null, audit.id, audit.login]);
+  }
+}
+
 function uniq(values = []) {
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
@@ -79,10 +147,15 @@ function accountText(row = {}) {
 }
 
 function mapVehicleOption(row) {
+  const propriedade = String(row.ownership_type || "").trim().toUpperCase();
+  const ownershipType = propriedade === "T" || propriedade === "TERCEIRO" ? "TERCEIRO" : "FROTA";
   return {
     placa: row.plate || "",
     label: [row.plate, row.name].filter(Boolean).join(" · "),
     veiculo: row.name || "",
+    tipoPropriedade: row.ownership_type || "",
+    ownershipType,
+    vehicleOwnershipType: ownershipType,
     cidadePlaca: row.plate_city || "",
     ufPlaca: row.plate_uf || "",
     motoristaCodigo: row.driver_code || null,
@@ -183,6 +256,7 @@ async function loadVehicleOptions(search = "") {
     SELECT
       veiculos.placavei AS plate,
       veiculos.nomevei AS name,
+      veiculos.tipopropriedadevei AS ownership_type,
       veiculos.municipioplacavei AS plate_city,
       veiculos.ufplacavei AS plate_uf,
       veiculos.motoristavei AS driver_code,
@@ -434,6 +508,7 @@ viagensRouter.get("/viagens", async (req, res, next) => {
 
     const ids = rows.map((row) => row.id);
     const rotasByViagem = new Map(ids.map((id) => [id, []]));
+    const documentosByViagem = new Map(ids.map((id) => [id, []]));
 
     if (ids.length) {
       const { rows: rotas } = await pool.query(`
@@ -446,9 +521,20 @@ viagensRouter.get("/viagens", async (req, res, next) => {
       for (const rota of rotas) {
         rotasByViagem.get(rota.cotacao_id)?.push(rota);
       }
+
+      const { rows: documentos } = await pool.query(`
+        SELECT *
+        FROM ${tableName("cadastro_cotacao_frete_documentos")}
+        WHERE cotacao_id = ANY($1::int[])
+        ORDER BY cotacao_id, id
+      `, [ids]);
+
+      for (const documento of documentos) {
+        documentosByViagem.get(documento.cotacao_id)?.push(documento);
+      }
     }
 
-    res.json(rows.map((row) => mapViagem(row, rotasByViagem.get(row.id) || [])));
+    res.json(rows.map((row) => mapViagem(row, rotasByViagem.get(row.id) || [], documentosByViagem.get(row.id) || [])));
   } catch (error) {
     next(error);
   }
@@ -483,6 +569,7 @@ viagensRouter.post("/viagens", async (req, res, next) => {
     `, viagemParams(req.body));
 
     await replaceParadas(client, rows[0].id, req.body.paradas);
+    await replaceDocumentosFinanceiros(client, rows[0].id, req.body.documentosFinanceiros, req.user);
     const viagem = await getViagemById(client, rows[0].id);
     await client.query("COMMIT");
     res.status(201).json(viagem);
@@ -503,7 +590,7 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
     const { rowCount } = await client.query(`
       UPDATE ${tableName("cadastro_cotacao_frete")}
       SET ${updateAssignments}, atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = $33
+      WHERE id = $${viagemParamCount + 1}
     `, [...viagemParams(req.body), id]);
 
     if (!rowCount) {
@@ -513,6 +600,7 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
     }
 
     await replaceParadas(client, id, req.body.paradas);
+    await replaceDocumentosFinanceiros(client, id, req.body.documentosFinanceiros, req.user);
     const viagem = await getViagemById(client, id);
     await client.query("COMMIT");
     res.json(viagem);

@@ -11,6 +11,7 @@ import {
 import { getLancamentosFinanceiros } from "../services/financeiroLancamentosService.js";
 import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
+import { getRentabilidadeClientes } from "../services/rentabilidadeClientesService.js";
 import {
   getCustosVeiculoDetalhe,
   getCustosVeiculos,
@@ -194,6 +195,24 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
   }
 });
 
+financeiroRouter.get("/clientes/rentabilidade", async (req, res, next) => {
+  try {
+    const data = await getRentabilidadeClientes({
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      origem: req.query.origem,
+      destino: req.query.destino,
+      material: req.query.material || req.query.produto,
+      statusMargem: req.query.statusMargem || req.query.tipoCliente || req.query.status,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
   try {
     const data = await getFinanceiroPorPlaca({
@@ -220,6 +239,9 @@ financeiroRouter.get("/financeiro/custos-veiculos", async (req, res, next) => {
       fornecedor: req.query.fornecedor,
       empresa: req.query.empresa,
       proprietario: req.query.proprietario,
+      valorMin: req.query.valorMin,
+      valorMax: req.query.valorMax,
+      search: req.query.search,
       limit: req.query.limit,
     });
     res.json(data);
@@ -247,6 +269,9 @@ financeiroRouter.get("/financeiro/custos-veiculos/:placa", async (req, res, next
       fornecedor: req.query.fornecedor,
       empresa: req.query.empresa,
       proprietario: req.query.proprietario,
+      valorMin: req.query.valorMin,
+      valorMax: req.query.valorMax,
+      search: req.query.search,
     });
     res.json(data);
   } catch (error) {

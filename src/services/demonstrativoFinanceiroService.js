@@ -51,6 +51,12 @@ function classifyGroup(row) {
   const mask = String(row.mascara || "");
 
   if (row.origem === "receita") return "Receita Bruta";
+  if (mask.startsWith("2")) return "Impostos";
+  if (mask.startsWith("4")) return "Custos de Transporte";
+  if (mask.startsWith("6.1")) return "Despesas com Pessoal";
+  if (mask.startsWith("6.2")) return "Despesas Administrativas";
+  if (mask.startsWith("6.4")) return "Despesas Financeiras";
+  if (mask.startsWith("6.5")) return "Financiamento de Veiculos";
   if (name.includes("icms") || name.includes("iss") || name.includes("pis") || name.includes("cofins") || name.includes("irpj") || name.includes("csll") || name.includes("inss") || name.includes("sest")) return "Impostos";
   if (name.includes("combust") || name.includes("pedagio") || name.includes("borracha") || name.includes("manutenc") || name.includes("seguro") || mask.startsWith("4.")) return "Custos de Transporte";
   if (name.includes("salario") || name.includes("folha") || name.includes("ferias") || name.includes("rescis") || name.includes("pro labore")) return "Despesas com Pessoal";
@@ -74,13 +80,13 @@ export async function getDemonstrativoFinanceiro({
   period,
   startDate,
   endDate,
-  empresa = 2,
+  empresa,
   centro,
   conta,
   search,
 } = {}) {
   const resolved = resolvePeriod({ period, startDate, endDate });
-  const empresaCod = Number(empresa) || 2;
+  const empresaCod = empresa ? Number(empresa) || null : null;
   const centroCod = centro ? Number(centro) : null;
   const contaCod = conta ? Number(conta) : null;
   const searchText = search ? String(search).trim() : null;
@@ -99,7 +105,7 @@ export async function getDemonstrativoFinanceiro({
       SELECT
         'receita'::text AS origem,
         rec.empresarec AS empresa,
-        rec.datavencimentorec::date AS data_base,
+        rec.dataemissaorec::date AS data_base,
         vlr.centrocusto,
         vlr.contafinanceira,
         vlr.valorliquido AS valor
@@ -109,10 +115,11 @@ export async function getDemonstrativoFinanceiro({
        AND rec.serierec = vlr.serie
        AND rec.duplicatarec = vlr.duplicata
        AND rec.parcelarec = vlr.parcela
-      INNER JOIN params p ON p.empresa = rec.empresarec
+      CROSS JOIN params p
       WHERE rec.statusrec IN (1, 2)
-        AND rec.datavencimentorec::date >= p.data_inicio
-        AND rec.datavencimentorec::date <= p.data_fim
+        AND (p.empresa IS NULL OR rec.empresarec = p.empresa)
+        AND rec.dataemissaorec::date >= p.data_inicio
+        AND rec.dataemissaorec::date <= p.data_fim
         AND (p.centro IS NULL OR vlr.centrocusto = p.centro)
         AND (p.conta IS NULL OR vlr.contafinanceira = p.conta)
 
@@ -121,7 +128,7 @@ export async function getDemonstrativoFinanceiro({
       SELECT
         'custo_despesa'::text AS origem,
         pag.empresapag AS empresa,
-        pag.datavencimentopag::date AS data_base,
+        pag.dataemissaopag::date AS data_base,
         vlp.centrocusto,
         vlp.contafinanceira,
         vlp.valorliquido * -1 AS valor
@@ -132,10 +139,11 @@ export async function getDemonstrativoFinanceiro({
        AND pag.duplicatapag = vlp.duplicata
        AND pag.parcelapag = vlp.parcela
        AND pag.fornecedorpag = vlp.fornecedor
-      INNER JOIN params p ON p.empresa = pag.empresapag
+      CROSS JOIN params p
       WHERE pag.statuspag IN (1, 2)
-        AND pag.datavencimentopag::date >= p.data_inicio
-        AND pag.datavencimentopag::date <= p.data_fim
+        AND (p.empresa IS NULL OR pag.empresapag = p.empresa)
+        AND pag.dataemissaopag::date >= p.data_inicio
+        AND pag.dataemissaopag::date <= p.data_fim
         AND (p.centro IS NULL OR vlp.centrocusto = p.centro)
         AND (p.conta IS NULL OR vlp.contafinanceira = p.conta)
 
@@ -149,10 +157,11 @@ export async function getDemonstrativoFinanceiro({
         mfr.contafinanceira,
         mfr.valor
       FROM financeiro.movimentacaofinanceirarateadasinalizada mfr
-      INNER JOIN params p ON p.empresa = mfr.empresa
+      CROSS JOIN params p
       WHERE mfr.data::date >= p.data_inicio
         AND mfr.data::date <= p.data_fim
         AND NOT mfr.duplicatagerada
+        AND (p.empresa IS NULL OR mfr.empresa = p.empresa)
         AND (p.centro IS NULL OR mfr.centrocusto = p.centro)
         AND (p.conta IS NULL OR mfr.contafinanceira = p.conta)
     ),
@@ -250,7 +259,7 @@ export async function getDemonstrativoFinanceiro({
     acc.lancamentos += row.lancamentos;
     return acc;
   }, { receita: 0, custos: 0, movimentacoes: 0, lancamentos: 0 });
-  summary.lucro = summary.receita - summary.custos + summary.movimentacoes;
+  summary.lucro = summary.receita - summary.custos;
   summary.margem = summary.receita > 0 ? (summary.lucro / summary.receita) * 100 : 0;
 
   const monthlyMap = new Map();

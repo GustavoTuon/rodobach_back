@@ -7,17 +7,21 @@ CREATE TABLE IF NOT EXISTS usuarios (
 
   -- Permissões de telas ativas
   perm_simulador        BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_diarias          BOOLEAN NOT NULL DEFAULT TRUE,
   perm_viagens          BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_custos           BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_receita          BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_demonstrativo    BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_dre_empresarial  BOOLEAN NOT NULL DEFAULT TRUE,
-  perm_placa            BOOLEAN NOT NULL DEFAULT TRUE,
+  perm_custos_veiculos  BOOLEAN NOT NULL DEFAULT TRUE,
   perm_clientes         BOOLEAN NOT NULL DEFAULT TRUE,
+  perm_clientes_lucro   BOOLEAN NOT NULL DEFAULT TRUE,
   perm_pneus            BOOLEAN NOT NULL DEFAULT TRUE,
   perm_settings         BOOLEAN NOT NULL DEFAULT TRUE,
   perm_manutencao       BOOLEAN NOT NULL DEFAULT TRUE,
+
+  -- Permissoes legadas/removidas ficam desativadas por padrao.
+  perm_diarias          BOOLEAN NOT NULL DEFAULT FALSE,
+  perm_custos           BOOLEAN NOT NULL DEFAULT FALSE,
+  perm_receita          BOOLEAN NOT NULL DEFAULT FALSE,
+  perm_demonstrativo    BOOLEAN NOT NULL DEFAULT FALSE,
+  perm_dre_empresarial  BOOLEAN NOT NULL DEFAULT TRUE,
+  perm_placa            BOOLEAN NOT NULL DEFAULT FALSE,
 
   -- Permissões de telas ocultas (para uso futuro)
   perm_dashboard    BOOLEAN NOT NULL DEFAULT FALSE,

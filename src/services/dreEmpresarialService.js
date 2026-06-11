@@ -82,51 +82,57 @@ function extractPlate(...values) {
 }
 
 function buildSummary(rows) {
+  // Soma com sinal preservado e so entao inverte o sinal das categorias de
+  // dedução, garantindo que o "Resultado Final" seja sempre a soma
+  // líquida de todos os lançamentos (igual ao "Total Geral" do
+  // Demonstrativo por Conta Financeira).
   const sumCategory = (category) => rows
     .filter((row) => row.categoriaDre === category)
-    .reduce((total, row) => total + Math.abs(n(row.valor)), 0);
+    .reduce((total, row) => total + n(row.valor), 0);
 
   const receitaBruta = sumCategory("RECEITA BRUTA");
-  const impostos = sumCategory("IMPOSTOS / DEDUCOES");
+  const impostos = -sumCategory("IMPOSTOS / DEDUCOES");
+  const custosTransporte = -sumCategory("CUSTOS DE TRANSPORTE");
+  const custosFrota = -sumCategory("CUSTOS COM FROTA");
+  const despesasPessoal = -sumCategory("DESPESAS COM PESSOAL");
+  const despesasAdministrativas = -sumCategory("DESPESAS ADMINISTRATIVAS");
+  const despesasFinanceiras = -sumCategory("DESPESAS FINANCEIRAS");
+  const despesasOperacionais = -sumCategory("DESPESAS OPERACIONAIS");
+
   const receitaLiquida = receitaBruta - impostos;
-  const custosTransporte = sumCategory("CUSTOS DE TRANSPORTE");
-  const custosFrota = sumCategory("CUSTOS COM FROTA");
   const lucroBruto = receitaLiquida - custosTransporte - custosFrota;
-  const despesasPessoal = sumCategory("DESPESAS COM PESSOAL");
-  const despesasAdministrativas = sumCategory("DESPESAS ADMINISTRATIVAS");
-  const despesasFinanceiras = sumCategory("DESPESAS FINANCEIRAS");
-  const despesasOperacionais = sumCategory("DESPESAS OPERACIONAIS");
   const resultadoFinal = lucroBruto - despesasPessoal - despesasAdministrativas - despesasFinanceiras - despesasOperacionais;
   const totalCustos = custosTransporte + custosFrota + despesasPessoal + despesasAdministrativas + despesasFinanceiras + despesasOperacionais;
   const margemLucro = receitaBruta > 0 ? (resultadoFinal / receitaBruta) * 100 : 0;
 
   const cards = {
-    receitaBruta,
-    impostos,
-    receitaLiquida,
-    custosTransporte,
-    custosFrota,
-    despesasOperacionais,
-    despesasAdministrativas,
-    despesasPessoal,
-    despesasFinanceiras,
-    resultadoFinal,
-    margemLucro,
-    totalCustos,
+    receitaBruta: r2(receitaBruta),
+    impostos: r2(impostos),
+    receitaLiquida: r2(receitaLiquida),
+    custosTransporte: r2(custosTransporte),
+    custosFrota: r2(custosFrota),
+    despesasOperacionais: r2(despesasOperacionais),
+    despesasAdministrativas: r2(despesasAdministrativas),
+    despesasPessoal: r2(despesasPessoal),
+    despesasFinanceiras: r2(despesasFinanceiras),
+    resultadoFinal: r2(resultadoFinal),
+    margemLucro: r2(margemLucro),
+    totalCustos: r2(totalCustos),
     lancamentos: rows.reduce((total, row) => total + n(row.lancamentos), 0),
   };
 
   const structure = [
-    { label: "RECEITA BRUTA", value: receitaBruta, kind: "total" },
-    { label: "(-) IMPOSTOS / DEDUCOES", value: -impostos, kind: "deduction" },
-    { label: "= RECEITA LIQUIDA", value: receitaLiquida, kind: "result" },
-    { label: "(-) CUSTOS DE TRANSPORTE", value: -custosTransporte, kind: "deduction" },
-    { label: "(-) CUSTOS COM FROTA", value: -custosFrota, kind: "deduction" },
-    { label: "= LUCRO BRUTO", value: lucroBruto, kind: "result" },
-    { label: "(-) DESPESAS COM PESSOAL", value: -despesasPessoal, kind: "deduction" },
-    { label: "(-) DESPESAS ADMINISTRATIVAS", value: -despesasAdministrativas, kind: "deduction" },
-    { label: "(-) DESPESAS FINANCEIRAS", value: -despesasFinanceiras, kind: "deduction" },
-    { label: "= RESULTADO OPERACIONAL / FINAL", value: resultadoFinal, kind: "final" },
+    { label: "RECEITA BRUTA", value: cards.receitaBruta, kind: "total" },
+    { label: "(-) IMPOSTOS / DEDUCOES", value: -cards.impostos, kind: "deduction" },
+    { label: "= RECEITA LIQUIDA", value: cards.receitaLiquida, kind: "result" },
+    { label: "(-) CUSTOS DE TRANSPORTE", value: -cards.custosTransporte, kind: "deduction" },
+    { label: "(-) CUSTOS COM FROTA", value: -cards.custosFrota, kind: "deduction" },
+    { label: "= LUCRO BRUTO", value: r2(lucroBruto), kind: "result" },
+    { label: "(-) DESPESAS COM PESSOAL", value: -cards.despesasPessoal, kind: "deduction" },
+    { label: "(-) DESPESAS ADMINISTRATIVAS", value: -cards.despesasAdministrativas, kind: "deduction" },
+    { label: "(-) DESPESAS FINANCEIRAS", value: -cards.despesasFinanceiras, kind: "deduction" },
+    { label: "(-) FINANCIAMENTO / OUTRAS DESPESAS OPERACIONAIS", value: -cards.despesasOperacionais, kind: "deduction" },
+    { label: "= RESULTADO OPERACIONAL / FINAL", value: cards.resultadoFinal, kind: "final" },
   ];
 
   return { cards, structure };
@@ -149,8 +155,8 @@ function aggregate(rows) {
   const plates = new Map();
 
   for (const row of rows) {
-    const receita = row.tipo === "Receita" ? Math.abs(row.valor) : 0;
-    const custo = row.tipo !== "Receita" ? Math.abs(row.valor) : 0;
+    const receita = row.valor > 0 ? row.valor : 0;
+    const custo = row.valor < 0 ? Math.abs(row.valor) : 0;
     const values = { valor: row.valor, receita, custo, lancamentos: row.lancamentos };
     add(monthly, row.mes, values, { mes: row.mes, label: row.labelMes });
     add(categories, row.categoriaDre, values, { categoriaDre: row.categoriaDre, order: DRE_ORDER.indexOf(row.categoriaDre) });
@@ -161,7 +167,11 @@ function aggregate(rows) {
 
   return {
     monthly: Array.from(monthly.values()).sort((a, b) => String(a.mes).localeCompare(String(b.mes))).map((row) => ({ ...row, lucro: r2(row.receita - row.custo) })),
-    categories: Array.from(categories.values()).sort((a, b) => a.order - b.order),
+    categories: Array.from(categories.values()).sort((a, b) => {
+      const orderA = a.order === -1 ? DRE_ORDER.length : a.order;
+      const orderB = b.order === -1 ? DRE_ORDER.length : b.order;
+      return orderA - orderB;
+    }),
     accounts: Array.from(accounts.values()).sort((a, b) => Math.abs(b.valor) - Math.abs(a.valor)),
     centers: Array.from(centers.values()).sort((a, b) => a.valor - b.valor),
     plates: Array.from(plates.values()).sort((a, b) => b.custo - a.custo),
@@ -201,12 +211,39 @@ function buildManagement(rows, aggr) {
   };
 }
 
+// Classificação do DRE por mascaracfi (hierarquia do plano de contas), espelhando
+// os grupos do "Demonstrativo por Conta Financeira": 1.x = receita, 2.x = impostos,
+// 4.1.x = custo com frota, demais 4.x = custo de transporte, 6.1.x = pessoal,
+// 6.2.x = administrativas, 6.4.x = financeiras, 6.5.x/demais = operacionais.
+const CATEGORIA_CASE = `
+  CASE
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '1%' THEN 'RECEITA BRUTA'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '2%' THEN 'IMPOSTOS / DEDUCOES'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '4.1%' THEN 'CUSTOS COM FROTA'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '4%' THEN 'CUSTOS DE TRANSPORTE'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.1%' THEN 'DESPESAS COM PESSOAL'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.2%' THEN 'DESPESAS ADMINISTRATIVAS'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.4%' THEN 'DESPESAS FINANCEIRAS'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6%' THEN 'DESPESAS OPERACIONAIS'
+    ELSE 'DESPESAS OPERACIONAIS'
+  END
+`;
+
+const TIPO_CASE = `
+  CASE
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '1%' THEN 'Receita'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '2%' THEN 'Imposto'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '4%' THEN 'Custo'
+    ELSE 'Despesa'
+  END
+`;
+
 export async function getDreEmpresarial({
   period,
   startDate,
   endDate,
   mesAno,
-  empresa = 2,
+  empresa,
   centro,
   conta,
   placa,
@@ -216,8 +253,9 @@ export async function getDreEmpresarial({
   search,
 } = {}) {
   const resolved = resolvePeriod({ period, startDate, endDate, mesAno });
+  const empresaCod = empresa ? Number(empresa) || null : null;
   const params = [
-    Number(empresa) || 2,
+    empresaCod,
     resolved.startDate,
     resolved.endDate,
     centro ? Number(centro) : null,
@@ -237,136 +275,83 @@ export async function getDreEmpresarial({
     ),
     receita AS (
       SELECT
-        con.empresacon AS empresa,
-        con.dataemissaocon::date AS data_base,
-        date_trunc('month', con.dataemissaocon::date)::date AS mes,
+        rec.empresarec AS empresa,
+        rec.dataemissaorec::date AS data_base,
+        date_trunc('month', rec.dataemissaorec::date)::date AS mes,
         'RECEITA BRUTA'::text AS categoria_dre,
         'Receita'::text AS tipo,
-        'conhecimento'::text AS origem,
-        COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), NULL) AS placa,
-        vei.nomevei AS veiculo_nome,
-        vei.centrocustovei::int AS centro_codigo,
+        'receber'::text AS origem,
+        UPPER(NULLIF(TRIM(rec.veiculorec::text), '')) AS placa,
+        vei_doc.nomevei::text AS veiculo_nome,
+        vlr.centrocusto AS centro_codigo,
         cc.nomeccs AS centro_nome,
         cc.mascaraccs AS centro_mascara,
-        NULL::int AS conta_codigo,
-        'Receita de CT-e / Conhecimento'::text AS conta_nome,
-        NULL::text AS conta_mascara,
-        con.clientecon AS cliente_codigo,
+        vlr.contafinanceira AS conta_codigo,
+        cfi.nomecfi AS conta_nome,
+        cfi.mascaracfi AS conta_mascara,
+        rec.clienterec AS cliente_codigo,
         COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, '')) AS pessoa_nome,
-        (con.seriecon || '-' || con.codigocon::text) AS documento,
-        COALESCE(con.observacaonfcon, '') AS historico,
-        'recebido'::text AS status_financeiro,
-        COALESCE(con.totalcon, con.valorfretecon, 0)::numeric AS valor,
+        COALESCE(NULLIF(rec.documentorec::text, ''), rec.duplicatarec::text)::text AS documento,
+        COALESCE(NULLIF(rec.observacaorec, ''), '')::text AS historico,
+        CASE
+          WHEN COALESCE(rec.valorabertorec,0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE THEN 'vencido'
+          WHEN COALESCE(rec.valorabertorec,0) > 0 THEN 'aberto'
+          ELSE 'recebido'
+        END AS status_financeiro,
+        vlr.valorliquido::numeric AS valor,
         1::int AS lancamentos
-      FROM logistica.conhecimentos con
+      FROM financeiro.receber rec
+      INNER JOIN financeiro.valorliquidorateiosreceber vlr
+        ON rec.empresarec = vlr.empresa
+       AND rec.serierec = vlr.serie
+       AND rec.duplicatarec = vlr.duplicata
+       AND rec.parcelarec = vlr.parcela
       CROSS JOIN params p
-      LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.centrocustovei
-        FROM frotas.veiculos v
-        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
-          AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
-        ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
-        LIMIT 1
-      ) vei ON true
       LEFT JOIN LATERAL (
         SELECT c.nomeccs, c.mascaraccs
         FROM financeiro.centroscustos c
-        WHERE c.codigoccs = vei.centrocustovei
-        ORDER BY (c.empresaccs = con.empresacon) DESC, c.empresaccs
+        WHERE c.codigoccs = vlr.centrocusto
+        ORDER BY (c.empresaccs = rec.empresarec) DESC, c.empresaccs
         LIMIT 1
       ) cc ON true
       LEFT JOIN LATERAL (
-        SELECT nomecli, fantasiacli
-        FROM gerais.clientes
-        WHERE codigocli = con.clientecon
+        SELECT c.nomecfi, c.mascaracfi
+        FROM financeiro.contasfinanceiras c
+        WHERE c.codigocfi = vlr.contafinanceira
+        ORDER BY (c.empresacfi = rec.empresarec) DESC, c.empresacfi
         LIMIT 1
-      ) cli ON true
-      WHERE con.empresacon = p.empresa
-        AND con.statuscon = 2
-        AND con.dataemissaocon::date >= p.data_inicio
-        AND con.dataemissaocon::date <= p.data_fim
-        AND (p.centro IS NULL OR vei.centrocustovei = p.centro)
-        AND (p.placa IS NULL OR UPPER(TRIM(con.veiculocon::text)) = p.placa)
-        AND (p.cliente IS NULL OR con.clientecon = p.cliente)
-    ),
-    impostos AS (
-      SELECT
-        con.empresacon AS empresa,
-        con.dataemissaocon::date AS data_base,
-        date_trunc('month', con.dataemissaocon::date)::date AS mes,
-        'IMPOSTOS / DEDUCOES'::text AS categoria_dre,
-        'Imposto'::text AS tipo,
-        'conhecimento'::text AS origem,
-        COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), NULL) AS placa,
-        vei.nomevei AS veiculo_nome,
-        vei.centrocustovei::int AS centro_codigo,
-        cc.nomeccs AS centro_nome,
-        cc.mascaraccs AS centro_mascara,
-        NULL::int AS conta_codigo,
-        'ICMS/PIS/COFINS sobre CT-e'::text AS conta_nome,
-        NULL::text AS conta_mascara,
-        con.clientecon AS cliente_codigo,
-        COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, '')) AS pessoa_nome,
-        (con.seriecon || '-' || con.codigocon::text) AS documento,
-        'Impostos do conhecimento'::text AS historico,
-        'recebido'::text AS status_financeiro,
-        (COALESCE(con.valoricmscon,0) + COALESCE(con.valorpiscon,0) + COALESCE(con.valorcofinscon,0))::numeric * -1 AS valor,
-        1::int AS lancamentos
-      FROM logistica.conhecimentos con
-      CROSS JOIN params p
+      ) cfi ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.centrocustovei
+        SELECT v.nomevei
         FROM frotas.veiculos v
-        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
+        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(rec.veiculorec::text))
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
-        ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+        ORDER BY (v.empresavei = rec.empresarec) DESC, v.empresavei
         LIMIT 1
-      ) vei ON true
-      LEFT JOIN LATERAL (
-        SELECT c.nomeccs, c.mascaraccs
-        FROM financeiro.centroscustos c
-        WHERE c.codigoccs = vei.centrocustovei
-        ORDER BY (c.empresaccs = con.empresacon) DESC, c.empresaccs
-        LIMIT 1
-      ) cc ON true
+      ) vei_doc ON true
       LEFT JOIN LATERAL (
         SELECT nomecli, fantasiacli
         FROM gerais.clientes
-        WHERE codigocli = con.clientecon
+        WHERE codigocli = rec.clienterec
         LIMIT 1
       ) cli ON true
-      WHERE con.empresacon = p.empresa
-        AND con.statuscon = 2
-        AND con.dataemissaocon::date >= p.data_inicio
-        AND con.dataemissaocon::date <= p.data_fim
-        AND (COALESCE(con.valoricmscon,0) + COALESCE(con.valorpiscon,0) + COALESCE(con.valorcofinscon,0)) <> 0
-        AND (p.centro IS NULL OR vei.centrocustovei = p.centro)
-        AND (p.placa IS NULL OR UPPER(TRIM(con.veiculocon::text)) = p.placa)
-        AND (p.cliente IS NULL OR con.clientecon = p.cliente)
+      WHERE rec.statusrec IN (1,2)
+        AND (p.empresa IS NULL OR rec.empresarec = p.empresa)
+        AND rec.dataemissaorec::date >= p.data_inicio
+        AND rec.dataemissaorec::date <= p.data_fim
+        AND (p.centro IS NULL OR vlr.centrocusto = p.centro)
+        AND (p.conta IS NULL OR vlr.contafinanceira = p.conta)
     ),
     pagar AS (
       SELECT
         pag.empresapag AS empresa,
-        pag.datavencimentopag::date AS data_base,
-        date_trunc('month', pag.datavencimentopag::date)::date AS mes,
-        CASE
-          WHEN lower(COALESCE(cfi.nomecfi,'')) SIMILAR TO '%(icms|iss|pis|cofins|irpj|csll|inss|sest)%' THEN 'IMPOSTOS / DEDUCOES'
-          WHEN lower(COALESCE(cfi.nomecfi,'')) SIMILAR TO '%(salario|folha|ferias|rescis|pro labore|motorista)%' THEN 'DESPESAS COM PESSOAL'
-          WHEN lower(COALESCE(cfi.nomecfi,'')) SIMILAR TO '%(tarifa|juros|banc|cartao)%' THEN 'DESPESAS FINANCEIRAS'
-          WHEN COALESCE(NULLIF(TRIM(pag.veiculopag::text), ''), NULLIF(TRIM(vei_cc.placavei::text), '')) IS NOT NULL
-            OR lower(COALESCE(cfi.nomecfi,'')) SIMILAR TO '%(combust|pedagio|borracha|manutenc|rastreamento|seguro|veicul)%' THEN 'CUSTOS COM FROTA'
-          WHEN COALESCE(cfi.mascaracfi,'') LIKE '4.%' THEN 'CUSTOS DE TRANSPORTE'
-          WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.%' THEN 'DESPESAS ADMINISTRATIVAS'
-          ELSE 'DESPESAS OPERACIONAIS'
-        END AS categoria_dre,
-        CASE
-          WHEN lower(COALESCE(cfi.nomecfi,'')) SIMILAR TO '%(icms|iss|pis|cofins|irpj|csll|inss|sest)%' THEN 'Imposto'
-          WHEN COALESCE(cfi.mascaracfi,'') LIKE '4.%' OR NULLIF(TRIM(COALESCE(pag.veiculopag, vei_cc.placavei)::text), '') IS NOT NULL THEN 'Custo'
-          ELSE 'Despesa'
-        END AS tipo,
+        pag.dataemissaopag::date AS data_base,
+        date_trunc('month', pag.dataemissaopag::date)::date AS mes,
+        ${CATEGORIA_CASE} AS categoria_dre,
+        ${TIPO_CASE} AS tipo,
         'pagar'::text AS origem,
         UPPER(NULLIF(TRIM(COALESCE(pag.veiculopag, vei_cc.placavei, substring(cc.nomeccs from '[A-Z]{3}[0-9][A-Z0-9][0-9]{2}'))::text), '')) AS placa,
-        vei_doc.nomevei AS veiculo_nome,
+        vei_doc.nomevei::text AS veiculo_nome,
         vlp.centrocusto AS centro_codigo,
         cc.nomeccs AS centro_nome,
         cc.mascaraccs AS centro_mascara,
@@ -375,8 +360,8 @@ export async function getDreEmpresarial({
         cfi.mascaracfi AS conta_mascara,
         NULL::int AS cliente_codigo,
         COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, '')) AS pessoa_nome,
-        COALESCE(NULLIF(pag.documentopag, ''), pag.duplicatapag::text) AS documento,
-        COALESCE(NULLIF(pag.observacaopag, ''), '') AS historico,
+        COALESCE(NULLIF(pag.documentopag, ''), pag.duplicatapag::text)::text AS documento,
+        COALESCE(NULLIF(pag.observacaopag, ''), '')::text AS historico,
         CASE
           WHEN COALESCE(pag.valorabertopag,0) > 0 AND pag.datavencimentopag::date < CURRENT_DATE THEN 'vencido'
           WHEN COALESCE(pag.valorabertopag,0) > 0 THEN 'aberto'
@@ -428,17 +413,71 @@ export async function getDreEmpresarial({
         WHERE codigofor = pag.fornecedorpag
         LIMIT 1
       ) forn ON true
-      WHERE pag.empresapag = p.empresa
-        AND pag.statuspag IN (1,2)
-        AND pag.datavencimentopag::date >= p.data_inicio
-        AND pag.datavencimentopag::date <= p.data_fim
+      WHERE pag.statuspag IN (1,2)
+        AND (p.empresa IS NULL OR pag.empresapag = p.empresa)
+        AND pag.dataemissaopag::date >= p.data_inicio
+        AND pag.dataemissaopag::date <= p.data_fim
         AND (p.centro IS NULL OR vlp.centrocusto = p.centro)
         AND (p.conta IS NULL OR vlp.contafinanceira = p.conta)
     ),
+    movimentacao AS (
+      SELECT
+        mfr.empresa AS empresa,
+        mfr.data::date AS data_base,
+        date_trunc('month', mfr.data::date)::date AS mes,
+        ${CATEGORIA_CASE} AS categoria_dre,
+        ${TIPO_CASE} AS tipo,
+        'movimentacao'::text AS origem,
+        UPPER(NULLIF(TRIM(vei_cc.placavei::text), '')) AS placa,
+        NULL::text AS veiculo_nome,
+        mfr.centrocusto AS centro_codigo,
+        cc.nomeccs AS centro_nome,
+        cc.mascaraccs AS centro_mascara,
+        mfr.contafinanceira AS conta_codigo,
+        cfi.nomecfi AS conta_nome,
+        cfi.mascaracfi AS conta_mascara,
+        NULL::int AS cliente_codigo,
+        NULL::text AS pessoa_nome,
+        COALESCE(NULLIF(mfr.documento, ''), '')::text AS documento,
+        COALESCE(NULLIF(mfr.historico, ''), '')::text AS historico,
+        CASE WHEN mfr.valor >= 0 THEN 'recebido' ELSE 'pago' END AS status_financeiro,
+        mfr.valor::numeric AS valor,
+        1::int AS lancamentos
+      FROM financeiro.movimentacaofinanceirarateadasinalizada mfr
+      CROSS JOIN params p
+      LEFT JOIN LATERAL (
+        SELECT c.nomeccs, c.mascaraccs
+        FROM financeiro.centroscustos c
+        WHERE c.codigoccs = mfr.centrocusto
+        ORDER BY (c.empresaccs = mfr.empresa) DESC, c.empresaccs
+        LIMIT 1
+      ) cc ON true
+      LEFT JOIN LATERAL (
+        SELECT c.nomecfi, c.mascaracfi
+        FROM financeiro.contasfinanceiras c
+        WHERE c.codigocfi = mfr.contafinanceira
+        ORDER BY (c.empresacfi = mfr.empresa) DESC, c.empresacfi
+        LIMIT 1
+      ) cfi ON true
+      LEFT JOIN LATERAL (
+        SELECT v.placavei
+        FROM frotas.veiculos v
+        WHERE v.centrocustovei = mfr.centrocusto
+          AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
+        ORDER BY (v.empresavei = mfr.empresa) DESC, v.empresavei
+        LIMIT 1
+      ) vei_cc ON true
+      WHERE NOT mfr.duplicatagerada
+        AND (p.empresa IS NULL OR mfr.empresa = p.empresa)
+        AND mfr.data::date >= p.data_inicio
+        AND mfr.data::date <= p.data_fim
+        AND (p.centro IS NULL OR mfr.centrocusto = p.centro)
+        AND (p.conta IS NULL OR mfr.contafinanceira = p.conta)
+    ),
     base AS (
       SELECT * FROM receita
-      UNION ALL SELECT * FROM impostos
       UNION ALL SELECT * FROM pagar
+      UNION ALL SELECT * FROM movimentacao
     )
     SELECT *
     FROM base b
@@ -504,7 +543,7 @@ export async function getDreEmpresarial({
 
   return {
     period: resolved,
-    filters: { empresa: params[0], centro, conta, placa, cliente, tipo: params[7], status: params[8], search },
+    filters: { empresa: empresaCod, centro, conta, placa, cliente, tipo: params[7], status: params[8], search },
     summary: summary.cards,
     structure: summary.structure,
     monthly: aggregations.monthly,
@@ -515,9 +554,11 @@ export async function getDreEmpresarial({
     management,
     rows,
     sources: [
-      "logistica.conhecimentos",
+      "financeiro.receber",
+      "financeiro.valorliquidorateiosreceber",
       "financeiro.pagar",
       "financeiro.valorliquidorateiospagar",
+      "financeiro.movimentacaofinanceirarateadasinalizada",
       "financeiro.contasfinanceiras",
       "financeiro.centroscustos",
       "frotas.veiculos",

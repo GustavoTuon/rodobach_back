@@ -38,7 +38,7 @@ export function mapDiaria(row) {
   };
 }
 
-export function mapViagem(row, rotas = []) {
+export function mapViagem(row, rotas = [], documentosFinanceiros = []) {
   return {
     id: row.id,
     numero: row.numero_viagem || "",
@@ -71,10 +71,13 @@ export function mapViagem(row, rotas = []) {
       contaDeposito: Boolean(row.doc_conta_deposito),
       chavePix: Boolean(row.doc_chave_pix),
       cnh: Boolean(row.doc_cnh_motorista),
+      consultaMotorista: Boolean(row.doc_consulta_motorista),
       comprovanteResidencia: Boolean(row.doc_comprovante_residencia),
       numeroMotorista: Boolean(row.doc_numero_motorista),
     },
     paradas: rotas.map(mapParada),
+    documentosFinanceiros: documentosFinanceiros.map(mapDocumentoFinanceiro),
+    rotaMapsUrl: row.rota_maps_url || "",
     observacoes: row.observacoes || "",
     valorKg: Number(row.valor_kg || 0),
     valorTon: Number(row.valor_ton || 0),
@@ -89,8 +92,16 @@ function hasValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "" && Number(value) !== 0;
 }
 
+function normalizeVehicleOwnershipType(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw) return null;
+  if (["T", "TERCEIRO", "TERCEIROS"].includes(raw)) return "TERCEIRO";
+  return "FROTA";
+}
+
 export function calcularSituacaoViagem(input = {}) {
   if (PROCESS_SITUACOES.has(input.situacao)) return input.situacao;
+  const ownershipType = normalizeVehicleOwnershipType(input.vehicleOwnershipType || input.ownershipType || input.tipoPropriedade);
 
   const hasCarga = [
     input.cliente,
@@ -101,20 +112,25 @@ export function calcularSituacaoViagem(input = {}) {
     input.destino,
   ].some(hasValue);
 
-  if (hasCarga && (!hasValue(input.placa) || !hasValue(input.motorista))) {
+  if (hasCarga && !hasValue(input.placa)) {
     return "aguardando_veiculo";
   }
 
-  const hasDadosOperacionais = [
+  if (ownershipType !== "FROTA" && hasCarga && !hasValue(input.motorista)) {
+    return "aguardando_veiculo";
+  }
+
+  const baseOk = [
     input.placa,
-    input.motorista,
     input.cliente,
     input.material,
     input.valorCliente,
-    input.valorMotorista,
     input.origem,
     input.destino,
   ].every(hasValue);
+  const hasDadosOperacionais = ownershipType === "FROTA"
+    ? baseOk
+    : baseOk && [input.motorista, input.valorMotorista].every(hasValue);
 
   return hasDadosOperacionais ? "aguardando_cte" : "faltando_dados";
 }
@@ -130,6 +146,23 @@ function mapParada(row) {
     endereco: row.endereco || "",
     nf: row.numero_nota_fiscal || "",
     obs: row.observacoes || "",
+  };
+}
+
+function mapDocumentoFinanceiro(row) {
+  return {
+    id: row.id,
+    tipo: row.tipo_documento || "CT-e",
+    numero: row.numero_documento || "",
+    chave: row.chave_documento || "",
+    link: row.link_documento || "",
+    observacoes: row.observacoes || "",
+    criadoPorId: row.criado_por_id,
+    criadoPorLogin: row.criado_por_login || "",
+    atualizadoPorId: row.atualizado_por_id,
+    atualizadoPorLogin: row.atualizado_por_login || "",
+    criadoEm: row.criado_em,
+    atualizadoEm: row.atualizado_em,
   };
 }
 
@@ -169,8 +202,10 @@ export function viagemParams(input) {
     Boolean(docs.contaDeposito),
     Boolean(docs.chavePix),
     Boolean(docs.cnh),
+    Boolean(docs.consultaMotorista),
     Boolean(docs.comprovanteResidencia),
     Boolean(docs.numeroMotorista),
+    input.rotaMapsUrl || null,
     input.observacoes || null,
   ];
 }

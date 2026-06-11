@@ -8,8 +8,8 @@ export const usuariosRouter = express.Router();
 
 const COLS_RETORNO = `
   id, login, email, numero, admin, ativo,
-  perm_simulador, perm_diarias, perm_viagens, perm_custos, perm_receita,
-  perm_demonstrativo, perm_dre_empresarial, perm_placa, perm_clientes, perm_pneus, perm_settings, perm_manutencao,
+  perm_simulador, perm_viagens, perm_dre_empresarial, perm_custos_veiculos, perm_clientes, perm_clientes_lucro,
+  perm_pneus, perm_settings, perm_manutencao,
   criado_em
 `;
 
@@ -31,9 +31,8 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
     const {
       login, senha, email, numero,
       admin = false, ativo = true,
-      perm_simulador = true, perm_diarias = true, perm_viagens = true,
-      perm_custos = true, perm_receita = true, perm_demonstrativo = true,
-      perm_dre_empresarial = true, perm_placa = true, perm_clientes = true,
+      perm_simulador = true, perm_viagens = true, perm_dre_empresarial = true, perm_custos_veiculos = true,
+      perm_clientes = true, perm_clientes_lucro = true,
       perm_pneus = true, perm_settings = true, perm_manutencao = true,
     } = req.body;
 
@@ -46,16 +45,15 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
     const { rows } = await pool.query(
       `INSERT INTO ${tableName("usuarios")}
         (login, senha, email, numero, admin, ativo,
-         perm_simulador, perm_diarias, perm_viagens, perm_custos, perm_receita,
-         perm_demonstrativo, perm_dre_empresarial, perm_placa, perm_clientes, perm_pneus, perm_settings, perm_manutencao)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         perm_simulador, perm_viagens, perm_dre_empresarial, perm_custos_veiculos, perm_clientes, perm_clientes_lucro,
+         perm_pneus, perm_settings, perm_manutencao)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING ${COLS_RETORNO}`,
       [
         String(login).trim().toLowerCase(), hash, email || null, numero || null,
         Boolean(admin), Boolean(ativo),
-        Boolean(perm_simulador), Boolean(perm_diarias), Boolean(perm_viagens),
-        Boolean(perm_custos), Boolean(perm_receita), Boolean(perm_demonstrativo),
-        Boolean(perm_dre_empresarial), Boolean(perm_placa), Boolean(perm_clientes),
+        Boolean(perm_simulador), Boolean(perm_viagens), Boolean(perm_dre_empresarial), Boolean(perm_custos_veiculos),
+        Boolean(perm_clientes), Boolean(perm_clientes_lucro),
         Boolean(perm_pneus),
         Boolean(perm_settings),
         Boolean(perm_manutencao),
@@ -79,13 +77,13 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, async (req, res, next) => {
 
     const FIELDS = [
       "email", "numero", "admin", "ativo",
-      "perm_simulador", "perm_diarias", "perm_viagens", "perm_custos", "perm_receita",
-      "perm_demonstrativo", "perm_dre_empresarial", "perm_placa", "perm_clientes", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_custos_veiculos", "perm_clientes",
+      "perm_clientes_lucro", "perm_pneus", "perm_settings", "perm_manutencao",
     ];
     const BOOL_FIELDS = new Set([
       "admin", "ativo",
-      "perm_simulador", "perm_diarias", "perm_viagens", "perm_custos", "perm_receita",
-      "perm_demonstrativo", "perm_dre_empresarial", "perm_placa", "perm_clientes", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_custos_veiculos", "perm_clientes",
+      "perm_clientes_lucro", "perm_pneus", "perm_settings", "perm_manutencao",
     ]);
 
     const sets = [];

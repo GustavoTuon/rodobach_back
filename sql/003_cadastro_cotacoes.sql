@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS cadastro_cotacao_frete (
   doc_conta_deposito BOOLEAN NOT NULL DEFAULT false,
   doc_chave_pix BOOLEAN NOT NULL DEFAULT false,
   doc_cnh_motorista BOOLEAN NOT NULL DEFAULT false,
+  doc_consulta_motorista BOOLEAN NOT NULL DEFAULT false,
   doc_comprovante_residencia BOOLEAN NOT NULL DEFAULT false,
   doc_numero_motorista BOOLEAN NOT NULL DEFAULT false,
   valor_kg NUMERIC(12, 4) GENERATED ALWAYS AS (
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS cadastro_cotacao_frete (
   valor_ton NUMERIC(12, 2) GENERATED ALWAYS AS (
     CASE WHEN peso_kg > 0 THEN valor_cliente / (peso_kg / 1000) ELSE 0 END
   ) STORED,
+  rota_maps_url TEXT,
   observacoes TEXT,
   criado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -61,8 +63,10 @@ ALTER TABLE cadastro_cotacao_frete
   ADD COLUMN IF NOT EXISTS doc_conta_deposito BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS doc_chave_pix BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS doc_cnh_motorista BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS doc_consulta_motorista BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS doc_comprovante_residencia BOOLEAN NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS doc_numero_motorista BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS doc_numero_motorista BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS rota_maps_url TEXT;
 
 CREATE TABLE IF NOT EXISTS cadastro_cotacao_frete_rotas (
   id SERIAL PRIMARY KEY,
@@ -84,3 +88,35 @@ CREATE INDEX IF NOT EXISTS idx_cadastro_cotacao_rotas_cotacao
 
 ALTER TABLE cadastro_cotacao_frete_rotas
   ADD COLUMN IF NOT EXISTS numero_nota_fiscal TEXT;
+
+CREATE TABLE IF NOT EXISTS cadastro_cotacao_frete_documentos (
+  id SERIAL PRIMARY KEY,
+  cotacao_id INTEGER NOT NULL REFERENCES cadastro_cotacao_frete(id) ON DELETE CASCADE,
+  tipo_documento TEXT NOT NULL DEFAULT 'CT-e',
+  numero_documento TEXT,
+  chave_documento TEXT,
+  link_documento TEXT,
+  observacoes TEXT,
+  criado_por_id INTEGER,
+  criado_por_login TEXT,
+  atualizado_por_id INTEGER,
+  atualizado_por_login TEXT,
+  criado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cadastro_cotacao_documentos_cotacao
+  ON cadastro_cotacao_frete_documentos (cotacao_id, id);
+
+ALTER TABLE cadastro_cotacao_frete_documentos
+  ADD COLUMN IF NOT EXISTS tipo_documento TEXT NOT NULL DEFAULT 'CT-e',
+  ADD COLUMN IF NOT EXISTS numero_documento TEXT,
+  ADD COLUMN IF NOT EXISTS chave_documento TEXT,
+  ADD COLUMN IF NOT EXISTS link_documento TEXT,
+  ADD COLUMN IF NOT EXISTS observacoes TEXT,
+  ADD COLUMN IF NOT EXISTS criado_por_id INTEGER,
+  ADD COLUMN IF NOT EXISTS criado_por_login TEXT,
+  ADD COLUMN IF NOT EXISTS atualizado_por_id INTEGER,
+  ADD COLUMN IF NOT EXISTS atualizado_por_login TEXT,
+  ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS atualizado_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;

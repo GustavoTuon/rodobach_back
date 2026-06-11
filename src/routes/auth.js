@@ -27,14 +27,11 @@ authRouter.post("/auth/login", async (req, res, next) => {
 
     const permissions = {
       simulador: user.perm_simulador,
-      diarias: user.perm_diarias,
       viagens: user.perm_viagens,
-      custos: user.perm_custos,
-      receita: user.perm_receita,
-      demonstrativo: user.perm_demonstrativo,
       "dre-empresarial": user.perm_dre_empresarial,
-      placa: user.perm_placa,
+      "custos-veiculos": user.perm_custos_veiculos ?? user.perm_custos,
       clientes: user.perm_clientes,
+      "clientes-lucro": user.perm_clientes_lucro ?? user.perm_clientes,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
       manutencao: user.perm_manutencao,
