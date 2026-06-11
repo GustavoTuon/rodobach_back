@@ -59,6 +59,15 @@ function normalizeStatus(value) {
   return "todos";
 }
 
+function logRentabilidade(label, { sql, params, rows, totals } = {}) {
+  console.log("[rentabilidade-clientes]", label, {
+    params,
+    rows,
+    totals,
+    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+  });
+}
+
 const BASE_SQL = `
   WITH params AS (
     SELECT
@@ -386,6 +395,16 @@ export async function getRentabilidadeClientes(filters = {}) {
     clientPool.query(optionsQuery, params),
   ]);
 
+  logRentabilidade("consultas-base", {
+    sql: detailQuery,
+    params,
+    rows: {
+      detalhes: detailRes.rowCount,
+      mensal: mensalRes.rowCount,
+      opcoes: optionsRes.rowCount,
+    },
+  });
+
   const viagens = detailRes.rows.map((row) => {
     const receita = num(row.receita);
     const custo = num(row.custo_total);
@@ -523,6 +542,34 @@ export async function getRentabilidadeClientes(filters = {}) {
       receita: "logistica.conhecimentos.totalcon/valorfretecon, com fallback de logistica.controleviagensfretes.",
       custos: "logistica.controleviagens, logistica.controleviagensdespesas, logistica.controleviagensabastecimentos, logistica.cartasfretes e financeiro.pagar para manutencao por placa/mes.",
       observacao: "financeiro.receber nao entra no calculo para evitar duplicidade com CT-e/conhecimento.",
+    },
+    audit: {
+      tablesFound: [
+        "logistica.conhecimentos",
+        "logistica.controleviagens",
+        "logistica.controleviagensfretes",
+        "logistica.controleviagensdespesas",
+        "logistica.controleviagensabastecimentos",
+        "logistica.cartasfretes",
+        "logistica.cartasfretesconhecimentos",
+        "frotas.abastecimentos",
+        "frotas.veiculos",
+        "frotas.motoristas",
+        "financeiro.pagar",
+        "financeiro.pagarrateios",
+        "financeiro.contasfinanceiras",
+        "gerais.clientes",
+        "localidades.cidades",
+      ],
+      fieldsUsed: {
+        receita: ["conhecimentos.totalcon", "conhecimentos.valorfretecon", "controleviagensfretes.valortotalcvf"],
+        clienteTomador: ["tomadorservicoctecon", "tomadorservicooutroscon", "destinatariocon", "recebedorcon", "expedidorcon", "clientecon"],
+        custosOperacionais: ["cartasfretes.valorliquidocfr", "controleviagens.totalabastecimentoscvg", "controleviagensdespesas.valorcvd", "pagarrateios.valorrateioprt"],
+      },
+      pending: [
+        "Manutencao de financeiro.pagar e rateada por placa/mes quando nao existe vinculo direto com CT-e.",
+        "Tabelas logistica.abastecimentos/logistica.despesas nao existem neste banco; foram usadas frotas.abastecimentos e logistica.controleviagensdespesas.",
+      ],
     },
   };
 }
