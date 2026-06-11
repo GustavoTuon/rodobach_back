@@ -99,6 +99,7 @@ function baseCostCte() {
         COALESCE(vei_doc.placavei, vei_cc.placavei) AS placa,
         COALESCE(vei_doc.nomevei, vei_cc.nomevei) AS veiculo_nome,
         COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei) AS tipo_propriedade,
+        COALESCE(vei_doc.proprietariovei, vei_cc.proprietariovei) AS proprietario_codigo,
         COALESCE(vei_doc.kmatualvei, vei_cc.kmatualvei) AS km_atual,
         COALESCE(vei_doc.centrocustovei, vei_cc.centrocustovei, prt.centrocustoprt)::int AS centro_veiculo,
         CASE
@@ -153,7 +154,7 @@ function baseCostCte() {
        AND pgt.parcelappg = pag.parcelapag
        AND pgt.fornecedorppg = pag.fornecedorpag
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei
         FROM frotas.veiculos v
         WHERE NULLIF(TRIM(pag.veiculopag::text), '') IS NOT NULL
           AND UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(pag.veiculopag::text))
@@ -162,7 +163,7 @@ function baseCostCte() {
         LIMIT 1
       ) vei_doc ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei
         FROM frotas.veiculos v
         WHERE v.centrocustovei = prt.centrocustoprt
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -200,6 +201,7 @@ function baseCostCte() {
         v.placavei AS placa,
         v.nomevei AS veiculo_nome,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
@@ -256,6 +258,7 @@ function baseCostCte() {
         v.placavei AS placa,
         v.nomevei AS veiculo_nome,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
@@ -480,12 +483,18 @@ function mapLaunch(row) {
     origem: row.origem,
     empresa: row.empresa,
     proprietario: row.proprietario,
+    proprietarioCodigo: row.proprietario_codigo,
     veiculoNome: row.veiculo_nome || "",
   };
 }
 
 async function queryCostRows(sql, params) {
   const { rows } = await clientPool.query(sql, params);
+  console.log("[custos-veiculos] sql", {
+    params,
+    rows: rows.length,
+    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+  });
   return rows;
 }
 
@@ -539,6 +548,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(veiculo_nome) AS veiculo_nome,
         MAX(centro_custo) AS centro_custo,
         MAX(proprietario) AS proprietario,
+        MAX(proprietario_codigo) AS proprietario_codigo,
         MAX(km_atual) AS km_atual,
         COALESCE(SUM(valor), 0) AS custo,
         COALESCE(SUM(valor_pago), 0) AS pago,
@@ -557,6 +567,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(veiculo_nome) AS veiculo_nome,
         MAX(centro_custo) AS centro_custo,
         MAX(proprietario) AS proprietario,
+        MAX(proprietario_codigo) AS proprietario_codigo,
         MAX(km_atual) AS km_atual,
         COALESCE(SUM(valor), 0) AS custo,
         COALESCE(SUM(valor_pago), 0) AS pago,
@@ -607,6 +618,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(vei.centrocustovei) AS centro_codigo,
         MAX(ccs.nomeccs) AS centro_custo,
         MAX(vei.tipopropriedadevei) AS tipo_propriedade,
+        MAX(vei.proprietariovei) AS proprietario_codigo,
         MAX(vei.kmatualvei) AS km_atual,
         COALESCE(SUM(COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)), 0) AS receita,
         COUNT(*)::int AS conhecimentos,
@@ -614,7 +626,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(con.dataemissaocon)::date AS ultima_receita
       FROM logistica.conhecimentos con
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei, v.empresavei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei, v.empresavei
         FROM frotas.veiculos v
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
           AND COALESCE(v.situacaovei::text, '') <> 'I'
@@ -676,6 +688,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.proprietario || "nao_identificado",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: num(row.custo),
       pago: num(row.pago),
@@ -693,6 +706,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: 0,
       pago: 0,
@@ -749,6 +763,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.proprietario || "nao_identificado",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: money(row.custo),
       pago: money(row.pago),
@@ -806,6 +821,12 @@ export async function getCustosVeiculos(filters = {}) {
         "financeiro.contasfinanceiras",
         "logistica.conhecimentos",
       ],
+      fieldsUsed: {
+        proprietarioVeiculo: "frotas.veiculos.proprietariovei",
+        tipoFrotaTerceiro: "frotas.veiculos.tipopropriedadevei",
+        situacaoVeiculo: "frotas.veiculos.situacaovei",
+        centroCustoPlaca: "frotas.veiculos.centrocustovei / financeiro.centroscustos.codigoccs",
+      },
       filters: {
         ...filters,
         startDate: period.startDate,
@@ -863,6 +884,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
         v.nomevei AS nome,
         v.modelovei AS modelo,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.dataatualkmvei AS data_km,
         v.centrocustovei AS centro_codigo,
@@ -929,6 +951,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
       nome: vehicle.nome || "",
       modelo: vehicle.modelo || "",
       proprietario: vehicle.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietarioCodigo: vehicle.proprietario_codigo,
       kmAtual: num(vehicle.km_atual),
       dataKm: dateOnly(vehicle.data_km),
       centroCodigo: vehicle.centro_codigo,
