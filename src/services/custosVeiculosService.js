@@ -74,8 +74,8 @@ function baseCostCte() {
         ('pagar:' || pag.empresapag || ':' || pag.seriepag || ':' || pag.duplicatapag || ':' || pag.parcelapag || ':' || pag.fornecedorpag || ':' || prt.centrocustoprt || ':' || prt.contafinanceiraprt) AS id,
         pag.empresapag::int AS empresa,
         pag.seriepag AS serie,
-        pag.duplicatapag,
-        pag.parcelapag,
+        pag.duplicatapag::bigint AS duplicatapag,
+        pag.parcelapag::text AS parcelapag,
         pag.fornecedorpag AS fornecedor_codigo,
         COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
         pag.dataemissaopag::date AS data,
@@ -87,7 +87,7 @@ function baseCostCte() {
             THEN COALESCE(pag.valorabertopag, 0) * (COALESCE(prt.valorrateioprt, 0) / NULLIF(pag.valorduplicatapag, 0))
           ELSE COALESCE(pag.valorabertopag, 0)
         END::numeric AS valor_aberto,
-        pag.statuspag,
+        pag.statuspag::text AS statuspag,
         prt.centrocustoprt::int AS centro_codigo,
         COALESCE(NULLIF(ccs.nomeccs, ''), 'Sem centro de custo') AS centro_custo,
         prt.contafinanceiraprt::int AS conta_codigo,
@@ -99,6 +99,7 @@ function baseCostCte() {
         COALESCE(vei_doc.placavei, vei_cc.placavei) AS placa,
         COALESCE(vei_doc.nomevei, vei_cc.nomevei) AS veiculo_nome,
         COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei) AS tipo_propriedade,
+        COALESCE(vei_doc.proprietariovei, vei_cc.proprietariovei) AS proprietario_codigo,
         COALESCE(vei_doc.kmatualvei, vei_cc.kmatualvei) AS km_atual,
         COALESCE(vei_doc.centrocustovei, vei_cc.centrocustovei, prt.centrocustoprt)::int AS centro_veiculo,
         CASE
@@ -153,7 +154,7 @@ function baseCostCte() {
        AND pgt.parcelappg = pag.parcelapag
        AND pgt.fornecedorppg = pag.fornecedorpag
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei
         FROM frotas.veiculos v
         WHERE NULLIF(TRIM(pag.veiculopag::text), '') IS NOT NULL
           AND UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(pag.veiculopag::text))
@@ -162,7 +163,7 @@ function baseCostCte() {
         LIMIT 1
       ) vei_doc ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei
         FROM frotas.veiculos v
         WHERE v.centrocustovei = prt.centrocustoprt
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -180,7 +181,7 @@ function baseCostCte() {
         aba.empresaaba::int AS empresa,
         aba.serieaba AS serie,
         aba.duplicataaba AS duplicatapag,
-        aba.parcelaaba AS parcelapag,
+        aba.parcelaaba::text AS parcelapag,
         aba.postocombustivelaba AS fornecedor_codigo,
         ('Posto ' || COALESCE(aba.postocombustivelaba::text, 'nao informado')) AS fornecedor,
         aba.dataaba::date AS data,
@@ -188,7 +189,7 @@ function baseCostCte() {
         aba.databaixaaba::date AS data_pagamento,
         COALESCE(aba.totalaba, 0)::numeric AS valor,
         CASE WHEN aba.databaixaaba IS NULL THEN COALESCE(aba.totalaba, 0) ELSE 0 END::numeric AS valor_aberto,
-        aba.statusaba AS statuspag,
+        aba.statusaba::text AS statuspag,
         v.centrocustovei::int AS centro_codigo,
         COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
         v.contafinanceiraabastecimentovei AS conta_codigo,
@@ -200,6 +201,7 @@ function baseCostCte() {
         v.placavei AS placa,
         v.nomevei AS veiculo_nome,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
@@ -244,7 +246,7 @@ function baseCostCte() {
         cvd.datacvd::date AS data_pagamento,
         COALESCE(cvd.valorcvd, 0)::numeric AS valor,
         0::numeric AS valor_aberto,
-        0::smallint AS statuspag,
+        0::text AS statuspag,
         v.centrocustovei::int AS centro_codigo,
         COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
         desp.contafinanceiracpv AS conta_codigo,
@@ -256,6 +258,7 @@ function baseCostCte() {
         v.placavei AS placa,
         v.nomevei AS veiculo_nome,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
@@ -291,7 +294,331 @@ function baseCostCte() {
         AND cvd.datacvd::date <= $2::date
         AND COALESCE(cvd.valorcvd, 0) <> 0
         AND COALESCE(cvd.financeirocvd, 'N') <> 'S'
+        AND cvd.codigonotafiscalcvd IS NULL
+        AND cvd.multacvd IS NULL
         AND NULLIF(TRIM(COALESCE(cvd.chaveduplicatapagarcvd, '')::text), '') IS NULL
+    ),
+    os_externa_operacional AS (
+      SELECT
+        ('os-produto:' || i.empresaoep || ':' || i.serieoep || ':' || i.codigooep || ':' || i.fornecedoroep || ':' || i.sequenciaoep) AS id,
+        i.empresaoep::int AS empresa,
+        i.serieoep AS serie,
+        i.codigooep::bigint AS duplicatapag,
+        i.sequenciaoep::text AS parcelapag,
+        i.fornecedoroep AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS data,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS vencimento,
+        NULL::date AS data_pagamento,
+        COALESCE(i.totalitemoep, 0)::numeric AS valor,
+        COALESCE(i.totalitemoep, 0)::numeric AS valor_aberto,
+        NULL::text AS statuspag,
+        COALESCE(i.centrocustooep, v.centrocustovei)::int AS centro_codigo,
+        COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
+        i.contafinanceiraoep::int AS conta_codigo,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto de OS externa') AS conta_nome,
+        NULL::text AS conta_mascara,
+        o.observacaoose AS historico,
+        o.codigoose::text AS documento,
+        COALESCE(NULLIF(i.veiculooep, ''), o.veiculoose) AS veiculo_documento,
+        v.placavei AS placa,
+        v.nomevei AS veiculo_nome,
+        v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
+        v.kmatualvei AS km_atual,
+        v.centrocustovei::int AS centro_veiculo,
+        CASE
+          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
+          WHEN v.placavei IS NULL THEN 'nao_identificado'
+          ELSE 'frota'
+        END AS proprietario,
+        CASE
+          WHEN COALESCE(prod.nomepro, '') ILIKE '%pneu%' THEN 'Pneus'
+          ELSE 'Manutencao'
+        END AS tipo_custo,
+        'frotas.ordensservicosexternaprodutos'::text AS origem
+      FROM frotas.ordensservicosexternaprodutos i
+      JOIN frotas.ordensservicosexterna o
+        ON o.empresaose = i.empresaoep
+       AND o.serieose = i.serieoep
+       AND o.codigoose = i.codigooep
+       AND o.fornecedorose = i.fornecedoroep
+      LEFT JOIN gerais.fornecedores forn
+        ON forn.codigofor = i.fornecedoroep
+       AND (forn.empresafor = i.empresaoep OR forn.empresafor IS NULL)
+      LEFT JOIN estoque.produtos prod
+        ON prod.codigopro = i.produtooep
+       AND (prod.empresapro = i.empresaoep OR prod.empresapro IS NULL)
+      LEFT JOIN frotas.veiculos v
+        ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(COALESCE(NULLIF(i.veiculooep, ''), o.veiculoose)::text))
+       AND COALESCE(v.situacaovei::text, '') <> 'I'
+      LEFT JOIN financeiro.centroscustos ccs
+        ON ccs.codigoccs = COALESCE(i.centrocustooep, v.centrocustovei)
+       AND (ccs.empresaccs = i.empresaoep OR ccs.empresaccs IS NULL)
+      WHERE COALESCE(o.dataentradaose, o.dataemissaoose)::date >= $1::date
+        AND COALESCE(o.dataentradaose, o.dataemissaoose)::date <= $2::date
+        AND COALESCE(i.totalitemoep, 0) <> 0
+        AND COALESCE(i.financeirooep, 'N') <> 'S'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM frotas.ordensservicosexternanotasfiscaisentrada osn
+          WHERE osn.empresaosn = i.empresaoep
+            AND osn.serieosn = i.serieoep
+            AND osn.ordemosn = i.codigooep
+            AND osn.fornecedorosn = i.fornecedoroep
+        )
+
+      UNION ALL
+
+      SELECT
+        ('os-servico:' || i.empresaoes || ':' || i.serieoes || ':' || i.codigooes || ':' || i.fornecedoroes || ':' || i.sequenciaoes) AS id,
+        i.empresaoes::int AS empresa,
+        i.serieoes AS serie,
+        i.codigooes::bigint AS duplicatapag,
+        i.sequenciaoes::text AS parcelapag,
+        i.fornecedoroes AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS data,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS vencimento,
+        NULL::date AS data_pagamento,
+        COALESCE(i.totalitemoes, 0)::numeric AS valor,
+        COALESCE(i.totalitemoes, 0)::numeric AS valor_aberto,
+        NULL::text AS statuspag,
+        COALESCE(i.centrocustooes, v.centrocustovei)::int AS centro_codigo,
+        COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
+        i.contafinanceiraoes::int AS conta_codigo,
+        ('Servico ' || COALESCE(i.servicooes::text, '')) AS conta_nome,
+        NULL::text AS conta_mascara,
+        o.observacaoose AS historico,
+        o.codigoose::text AS documento,
+        COALESCE(NULLIF(i.veiculooes, ''), o.veiculoose) AS veiculo_documento,
+        v.placavei AS placa,
+        v.nomevei AS veiculo_nome,
+        v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
+        v.kmatualvei AS km_atual,
+        v.centrocustovei::int AS centro_veiculo,
+        CASE
+          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
+          WHEN v.placavei IS NULL THEN 'nao_identificado'
+          ELSE 'frota'
+        END AS proprietario,
+        'Manutencao'::text AS tipo_custo,
+        'frotas.ordensservicosexternaservicos'::text AS origem
+      FROM frotas.ordensservicosexternaservicos i
+      JOIN frotas.ordensservicosexterna o
+        ON o.empresaose = i.empresaoes
+       AND o.serieose = i.serieoes
+       AND o.codigoose = i.codigooes
+       AND o.fornecedorose = i.fornecedoroes
+      LEFT JOIN gerais.fornecedores forn
+        ON forn.codigofor = i.fornecedoroes
+       AND (forn.empresafor = i.empresaoes OR forn.empresafor IS NULL)
+      LEFT JOIN frotas.veiculos v
+        ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(COALESCE(NULLIF(i.veiculooes, ''), o.veiculoose)::text))
+       AND COALESCE(v.situacaovei::text, '') <> 'I'
+      LEFT JOIN financeiro.centroscustos ccs
+        ON ccs.codigoccs = COALESCE(i.centrocustooes, v.centrocustovei)
+       AND (ccs.empresaccs = i.empresaoes OR ccs.empresaccs IS NULL)
+      WHERE COALESCE(o.dataentradaose, o.dataemissaoose)::date >= $1::date
+        AND COALESCE(o.dataentradaose, o.dataemissaoose)::date <= $2::date
+        AND COALESCE(i.totalitemoes, 0) <> 0
+        AND COALESCE(i.financeirooes, 'N') <> 'S'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM frotas.ordensservicosexternanotasfiscaisentrada osn
+          WHERE osn.empresaosn = i.empresaoes
+            AND osn.serieosn = i.serieoes
+            AND osn.ordemosn = i.codigooes
+            AND osn.fornecedorosn = i.fornecedoroes
+        )
+    ),
+    nf_entrada_operacional AS (
+      SELECT
+        ('nf-entrada:' || i.empresanep || ':' || i.serienep || ':' || i.codigonep || ':' || i.fornecedornep || ':' || i.sequencianep) AS id,
+        i.empresanep::int AS empresa,
+        i.serienep AS serie,
+        i.codigonep::bigint AS duplicatapag,
+        i.sequencianep::text AS parcelapag,
+        i.fornecedornep AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(n.dataentradanfe, n.dataemissaonfe)::date AS data,
+        COALESCE(n.dataentradanfe, n.dataemissaonfe)::date AS vencimento,
+        NULL::date AS data_pagamento,
+        COALESCE(i.totalitemestoquenep, i.totalitemnep, 0)::numeric AS valor,
+        COALESCE(i.totalitemestoquenep, i.totalitemnep, 0)::numeric AS valor_aberto,
+        n.statusnfe::text AS statuspag,
+        COALESCE(i.centrocustonep, v.centrocustovei)::int AS centro_codigo,
+        COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
+        i.contafinanceiranep::int AS conta_codigo,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto NF entrada') AS conta_nome,
+        NULL::text AS conta_mascara,
+        n.observacaonfe AS historico,
+        n.codigonfe::text AS documento,
+        COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe) AS veiculo_documento,
+        v.placavei AS placa,
+        v.nomevei AS veiculo_nome,
+        v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
+        v.kmatualvei AS km_atual,
+        v.centrocustovei::int AS centro_veiculo,
+        CASE
+          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
+          WHEN v.placavei IS NULL THEN 'nao_identificado'
+          ELSE 'frota'
+        END AS proprietario,
+        CASE
+          WHEN TRIM(COALESCE(i.combustivelnep::text, '')) = 'S'
+            OR i.postobombacombustivelnep IS NOT NULL
+            OR COALESCE(prod.nomepro, '') ILIKE '%diesel%'
+            OR COALESCE(prod.nomepro, '') ILIKE '%combust%'
+            OR COALESCE(prod.nomepro, '') ILIKE '%lubrific%' THEN 'Abastecimento'
+          WHEN COALESCE(prod.nomepro, '') ILIKE '%pneu%' THEN 'Pneus'
+          ELSE 'Manutencao'
+        END AS tipo_custo,
+        'compras.notasfiscaisentradaprodutos'::text AS origem
+      FROM compras.notasfiscaisentradaprodutos i
+      JOIN compras.notasfiscaisentrada n
+        ON n.empresanfe = i.empresanep
+       AND n.serienfe = i.serienep
+       AND n.codigonfe = i.codigonep
+       AND n.fornecedornfe = i.fornecedornep
+      LEFT JOIN estoque.produtos prod
+        ON prod.codigopro = i.produtonep
+       AND (prod.empresapro = i.empresanep OR prod.empresapro IS NULL)
+      LEFT JOIN gerais.fornecedores forn
+        ON forn.codigofor = i.fornecedornep
+       AND (forn.empresafor = i.empresanep OR forn.empresafor IS NULL)
+      LEFT JOIN frotas.veiculos v
+        ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text))
+       AND COALESCE(v.situacaovei::text, '') <> 'I'
+      LEFT JOIN financeiro.centroscustos ccs
+        ON ccs.codigoccs = COALESCE(i.centrocustonep, v.centrocustovei)
+       AND (ccs.empresaccs = i.empresanep OR ccs.empresaccs IS NULL)
+      WHERE COALESCE(n.dataentradanfe, n.dataemissaonfe)::date >= $1::date
+        AND COALESCE(n.dataentradanfe, n.dataemissaonfe)::date <= $2::date
+        AND COALESCE(i.totalitemestoquenep, i.totalitemnep, 0) <> 0
+        AND NULLIF(TRIM(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM frotas.ordensservicosexternanotasfiscaisentrada osn
+          WHERE osn.empresaosn = i.empresanep
+            AND osn.serienotafiscalosn = i.serienep
+            AND osn.notafiscalosn = i.codigonep
+            AND osn.fornecedornotaosn = i.fornecedornep
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM financeiro.pagar pag
+          WHERE pag.fornecedorpag = i.fornecedornep
+            AND pag.duplicatapag = i.codigonep
+            AND pag.datavencimentopag::date >= ($1::date - INTERVAL '90 days')
+            AND pag.datavencimentopag::date <= ($2::date + INTERVAL '90 days')
+        )
+    ),
+    multas_operacionais AS (
+      SELECT
+        ('multa:' || m.empresamtr || ':' || m.codigomtr) AS id,
+        m.empresamtr::int AS empresa,
+        m.serieduplicatamtr AS serie,
+        m.sequenciaduplicatamtr::bigint AS duplicatapag,
+        m.parceladuplicatamtr::text AS parcelapag,
+        m.fornecedorduplicatamtr AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date AS data,
+        COALESCE(m.datavencimentoboletomtr, m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date AS vencimento,
+        m.datapagamentomtr::date AS data_pagamento,
+        (COALESCE(m.valormtr, 0) - COALESCE(m.valordescontomtr, 0) + COALESCE(m.valorjurosmtr, 0))::numeric AS valor,
+        CASE WHEN m.datapagamentomtr IS NULL THEN (COALESCE(m.valormtr, 0) - COALESCE(m.valordescontomtr, 0) + COALESCE(m.valorjurosmtr, 0)) ELSE 0 END::numeric AS valor_aberto,
+        m.statusmtr::text AS statuspag,
+        v.centrocustovei::int AS centro_codigo,
+        COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
+        NULL::int AS conta_codigo,
+        'Multa de transito'::text AS conta_nome,
+        NULL::text AS conta_mascara,
+        m.observacaomtr AS historico,
+        COALESCE(m.numeroautomtr, m.codigomtr::text) AS documento,
+        m.veiculomtr AS veiculo_documento,
+        v.placavei AS placa,
+        v.nomevei AS veiculo_nome,
+        v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
+        v.kmatualvei AS km_atual,
+        v.centrocustovei::int AS centro_veiculo,
+        CASE
+          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
+          WHEN v.placavei IS NULL THEN 'nao_identificado'
+          ELSE 'frota'
+        END AS proprietario,
+        'Multas'::text AS tipo_custo,
+        'frotas.multastransito'::text AS origem
+      FROM frotas.multastransito m
+      LEFT JOIN gerais.fornecedores forn
+        ON forn.codigofor = m.fornecedorduplicatamtr
+       AND (forn.empresafor = m.empresamtr OR forn.empresafor IS NULL)
+      LEFT JOIN frotas.veiculos v
+        ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(m.veiculomtr::text))
+       AND COALESCE(v.situacaovei::text, '') <> 'I'
+      LEFT JOIN financeiro.centroscustos ccs
+        ON ccs.codigoccs = v.centrocustovei
+       AND (ccs.empresaccs = v.empresavei OR ccs.empresaccs IS NULL)
+      WHERE COALESCE(m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date >= $1::date
+        AND COALESCE(m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date <= $2::date
+        AND (COALESCE(m.valormtr, 0) - COALESCE(m.valordescontomtr, 0) + COALESCE(m.valorjurosmtr, 0)) <> 0
+        AND NOT COALESCE(m.pagafinanceiromtr, false)
+    ),
+    pneus_operacionais AS (
+      SELECT
+        ('pneu:' || p.empresampn || ':' || p.codigompn) AS id,
+        p.empresampn::int AS empresa,
+        NULL::varchar AS serie,
+        p.codigompn::bigint AS duplicatapag,
+        NULL::varchar AS parcelapag,
+        p.fornecedormpn AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        p.datampn::date AS data,
+        p.datampn::date AS vencimento,
+        p.datampn::date AS data_pagamento,
+        COALESCE(p.valormpn, 0)::numeric AS valor,
+        0::numeric AS valor_aberto,
+        0::text AS statuspag,
+        v.centrocustovei::int AS centro_codigo,
+        COALESCE(ccs.nomeccs, 'Sem centro de custo') AS centro_custo,
+        NULL::int AS conta_codigo,
+        COALESCE(NULLIF(pne.nomepne, ''), 'Movimentacao de pneu') AS conta_nome,
+        NULL::text AS conta_mascara,
+        p.observacaompn AS historico,
+        p.codigompn::text AS documento,
+        p.veiculompn AS veiculo_documento,
+        v.placavei AS placa,
+        v.nomevei AS veiculo_nome,
+        v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
+        v.kmatualvei AS km_atual,
+        v.centrocustovei::int AS centro_veiculo,
+        CASE
+          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
+          WHEN v.placavei IS NULL THEN 'nao_identificado'
+          ELSE 'frota'
+        END AS proprietario,
+        'Pneus'::text AS tipo_custo,
+        'frotas.movimentacaopneus'::text AS origem
+      FROM frotas.movimentacaopneus p
+      LEFT JOIN frotas.pneus pne
+        ON pne.codigopne = p.pneumpn
+       AND (pne.empresapne = p.empresampn OR pne.empresapne IS NULL)
+      LEFT JOIN gerais.fornecedores forn
+        ON forn.codigofor = p.fornecedormpn
+       AND (forn.empresafor = p.empresampn OR forn.empresafor IS NULL)
+      LEFT JOIN frotas.veiculos v
+        ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(p.veiculompn::text))
+       AND COALESCE(v.situacaovei::text, '') <> 'I'
+      LEFT JOIN financeiro.centroscustos ccs
+        ON ccs.codigoccs = v.centrocustovei
+       AND (ccs.empresaccs = v.empresavei OR ccs.empresaccs IS NULL)
+      WHERE p.datampn::date >= $1::date
+        AND p.datampn::date <= $2::date
+        AND COALESCE(p.valormpn, 0) <> 0
     ),
     custos_base AS (
       SELECT * FROM rateios
@@ -299,6 +626,14 @@ function baseCostCte() {
       SELECT * FROM abastecimentos_operacionais
       UNION ALL
       SELECT * FROM despesas_viagem_operacionais
+      UNION ALL
+      SELECT * FROM os_externa_operacional
+      UNION ALL
+      SELECT * FROM nf_entrada_operacional
+      UNION ALL
+      SELECT * FROM multas_operacionais
+      UNION ALL
+      SELECT * FROM pneus_operacionais
     ),
     custos_status AS (
       SELECT
@@ -480,12 +815,18 @@ function mapLaunch(row) {
     origem: row.origem,
     empresa: row.empresa,
     proprietario: row.proprietario,
+    proprietarioCodigo: row.proprietario_codigo,
     veiculoNome: row.veiculo_nome || "",
   };
 }
 
 async function queryCostRows(sql, params) {
   const { rows } = await clientPool.query(sql, params);
+  console.log("[custos-veiculos] sql", {
+    params,
+    rows: rows.length,
+    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+  });
   return rows;
 }
 
@@ -539,6 +880,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(veiculo_nome) AS veiculo_nome,
         MAX(centro_custo) AS centro_custo,
         MAX(proprietario) AS proprietario,
+        MAX(proprietario_codigo) AS proprietario_codigo,
         MAX(km_atual) AS km_atual,
         COALESCE(SUM(valor), 0) AS custo,
         COALESCE(SUM(valor_pago), 0) AS pago,
@@ -557,6 +899,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(veiculo_nome) AS veiculo_nome,
         MAX(centro_custo) AS centro_custo,
         MAX(proprietario) AS proprietario,
+        MAX(proprietario_codigo) AS proprietario_codigo,
         MAX(km_atual) AS km_atual,
         COALESCE(SUM(valor), 0) AS custo,
         COALESCE(SUM(valor_pago), 0) AS pago,
@@ -607,6 +950,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(vei.centrocustovei) AS centro_codigo,
         MAX(ccs.nomeccs) AS centro_custo,
         MAX(vei.tipopropriedadevei) AS tipo_propriedade,
+        MAX(vei.proprietariovei) AS proprietario_codigo,
         MAX(vei.kmatualvei) AS km_atual,
         COALESCE(SUM(COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)), 0) AS receita,
         COUNT(*)::int AS conhecimentos,
@@ -614,7 +958,7 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(con.dataemissaocon)::date AS ultima_receita
       FROM logistica.conhecimentos con
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.kmatualvei, v.centrocustovei, v.empresavei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei, v.empresavei
         FROM frotas.veiculos v
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
           AND COALESCE(v.situacaovei::text, '') <> 'I'
@@ -676,6 +1020,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.proprietario || "nao_identificado",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: num(row.custo),
       pago: num(row.pago),
@@ -693,6 +1038,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: 0,
       pago: 0,
@@ -749,6 +1095,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
       proprietario: row.proprietario || "nao_identificado",
+      proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: money(row.custo),
       pago: money(row.pago),
@@ -806,6 +1153,12 @@ export async function getCustosVeiculos(filters = {}) {
         "financeiro.contasfinanceiras",
         "logistica.conhecimentos",
       ],
+      fieldsUsed: {
+        proprietarioVeiculo: "frotas.veiculos.proprietariovei",
+        tipoFrotaTerceiro: "frotas.veiculos.tipopropriedadevei",
+        situacaoVeiculo: "frotas.veiculos.situacaovei",
+        centroCustoPlaca: "frotas.veiculos.centrocustovei / financeiro.centroscustos.codigoccs",
+      },
       filters: {
         ...filters,
         startDate: period.startDate,
@@ -863,6 +1216,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
         v.nomevei AS nome,
         v.modelovei AS modelo,
         v.tipopropriedadevei AS tipo_propriedade,
+        v.proprietariovei AS proprietario_codigo,
         v.kmatualvei AS km_atual,
         v.dataatualkmvei AS data_km,
         v.centrocustovei AS centro_codigo,
@@ -929,6 +1283,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
       nome: vehicle.nome || "",
       modelo: vehicle.modelo || "",
       proprietario: vehicle.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietarioCodigo: vehicle.proprietario_codigo,
       kmAtual: num(vehicle.km_atual),
       dataKm: dateOnly(vehicle.data_km),
       centroCodigo: vehicle.centro_codigo,

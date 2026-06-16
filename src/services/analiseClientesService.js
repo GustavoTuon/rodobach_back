@@ -11,6 +11,19 @@ function dateOnly(v) {
   return v.toISOString().slice(0, 10);
 }
 
+function r2(value) {
+  return Math.round((num(value) + Number.EPSILON) * 100) / 100;
+}
+
+function logAnaliseClientes(label, { sql, params, rows, totals } = {}) {
+  console.log("[analise-clientes]", label, {
+    params,
+    rows,
+    totals,
+    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+  });
+}
+
 function toIso(d) {
   return d.toISOString().slice(0, 10);
 }
@@ -90,6 +103,17 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         rec.clienterec   AS codigo,
         rec.empresarec   AS empresa,
         SUM(rec.valorduplicatarec)  AS total_periodo,
+        SUM(COALESCE(rec.valorabertorec, 0)) AS total_aberto,
+        SUM(CASE
+          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE
+            THEN COALESCE(rec.valorabertorec, 0)
+          ELSE 0
+        END) AS total_vencido,
+        SUM(CASE
+          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE - INTERVAL '5 days'
+            THEN COALESCE(rec.valorabertorec, 0)
+          ELSE 0
+        END) AS total_inadimplente,
         COUNT(*)                    AS lancamentos_periodo,
         MAX(rec.dataemissaorec::date) AS ultimo_no_periodo
       FROM financeiro.receber rec
@@ -97,6 +121,21 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         AND rec.dataemissaorec::date <= $2
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
       GROUP BY rec.clienterec, rec.empresarec
+    ),
+    rec_recebido AS (
+      SELECT
+        COALESCE(rcb.clientercb, rec.clienterec) AS codigo,
+        SUM(COALESCE(rcb.valorrecebidorcb, 0)) AS total_recebido
+      FROM financeiro.receberrecebimentos rcb
+      LEFT JOIN financeiro.receber rec
+        ON rec.empresarec = rcb.empresarcb
+       AND rec.serierec = rcb.seriercb
+       AND rec.duplicatarec = rcb.duplicatarcb
+       AND rec.parcelarec = rcb.parcelarcb
+      WHERE rcb.datarecebimentorcb::date >= $1
+        AND rcb.datarecebimentorcb::date <= $2
+        AND ($5::int IS NULL OR COALESCE(rcb.clientercb, rec.clienterec) = $5::int)
+      GROUP BY COALESCE(rcb.clientercb, rec.clienterec)
     ),
     rec_hist AS (
       SELECT
@@ -124,6 +163,10 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         COALESCE(rp.codigo, rh.codigo)           AS codigo,
         rp.empresa                                AS empresa,
         COALESCE(rp.total_periodo, 0)             AS total_periodo,
+        COALESCE(rr.total_recebido, 0)             AS total_recebido,
+        COALESCE(rp.total_aberto, 0)               AS total_aberto,
+        COALESCE(rp.total_vencido, 0)              AS total_vencido,
+        COALESCE(rp.total_inadimplente, 0)         AS total_inadimplente,
         COALESCE(rp.lancamentos_periodo, 0)::int  AS lancamentos_periodo,
         rh.ultimo_global,
         rh.primeiro,
@@ -131,6 +174,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         COALESCE(rprev.total_anterior, 0)         AS total_anterior
       FROM rec_hist rh
       LEFT JOIN rec_period  rp    ON rp.codigo    = rh.codigo
+      LEFT JOIN rec_recebido rr    ON rr.codigo    = rh.codigo
       LEFT JOIN rec_prev    rprev ON rprev.codigo = rh.codigo
     )
     SELECT
@@ -203,17 +247,27 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const params = [sd, ed, prevSd, prevEd, clienteFilter];
   const monthParams = [sd, ed];
 
-  const [clientsRes, monthlyRes, topMonthlyRes] = await Promise.all([
-    clientPool.query(clientsQuery, params),
-    clientPool.query(monthlyQuery, monthParams),
-    clientPool.query(topMonthlyQuery, monthParams),
-  ]);
+  const dbClient = await clientPool.connect();
+  let clientsRes;
+  let monthlyRes;
+  let topMonthlyRes;
+  try {
+    clientsRes = await dbClient.query(clientsQuery, params);
+    monthlyRes = await dbClient.query(monthlyQuery, monthParams);
+    topMonthlyRes = await dbClient.query(topMonthlyQuery, monthParams);
+  } finally {
+    dbClient.release();
+  }
 
   const allClients = clientsRes.rows;
 
   // ── Summary calculations ──────────────────────────────────────────────────
   const withBilling = allClients.filter(c => num(c.total_periodo) > 0);
   const totalFaturado = withBilling.reduce((s, c) => s + num(c.total_periodo), 0);
+  const totalRecebido = allClients.reduce((s, c) => s + num(c.total_recebido), 0);
+  const totalAberto = allClients.reduce((s, c) => s + num(c.total_aberto), 0);
+  const totalVencido = allClients.reduce((s, c) => s + num(c.total_vencido), 0);
+  const totalInadimplente = allClients.reduce((s, c) => s + num(c.total_inadimplente), 0);
   const clientesAtivos = withBilling.length;
   const ticketMedio = clientesAtivos > 0 ? totalFaturado / clientesAtivos : 0;
   const topCliente = withBilling.length > 0 ? withBilling[0] : null;
@@ -235,6 +289,10 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       ultimoFaturamento: dateOnly(c.ultimo_global),
       primeiroFaturamento: dateOnly(c.primeiro),
       totalPeriodo: total,
+      totalRecebido: r2(c.total_recebido),
+      totalAberto: r2(c.total_aberto),
+      totalVencido: r2(c.total_vencido),
+      totalInadimplente: r2(c.total_inadimplente),
       totalAnterior: anterior,
       lancamentos: lanc,
       ticketMedio: ticketC,
@@ -259,10 +317,25 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const inativo90 = allClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 90 && d <= 120; }).length;
   const inativo120 = allClients.filter(c => num(c.dias_sem_faturar) > 120).length;
 
+  logAnaliseClientes("consulta-consolidada", {
+    sql: clientsQuery,
+    params,
+    rows: {
+      clientes: clientsRes.rowCount,
+      mensal: monthlyRes.rowCount,
+      topMensal: topMonthlyRes.rowCount,
+    },
+    totals: { totalFaturado: r2(totalFaturado), totalRecebido: r2(totalRecebido), totalAberto: r2(totalAberto), totalVencido: r2(totalVencido) },
+  });
+
   return {
     period: resolved,
     summary: {
       totalFaturado,
+      totalRecebido: r2(totalRecebido),
+      totalAberto: r2(totalAberto),
+      totalVencido: r2(totalVencido),
+      totalInadimplente: r2(totalInadimplente),
       clientesAtivos,
       ticketMedio,
       topCliente: topCliente
@@ -272,6 +345,23 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       inativo60,
       inativo90,
       inativo120,
+    },
+    audit: {
+      tablesFound: [
+        "financeiro.receber",
+        "financeiro.receberrecebimentos",
+        "gerais.clientes",
+      ],
+      fieldsUsed: {
+        receitaPorCliente: ["receber.clienterec", "receber.dataemissaorec", "receber.valorduplicatarec"],
+        recebido: ["receberrecebimentos.datarecebimentorcb", "receberrecebimentos.valorrecebidorcb"],
+        abertoVencido: ["receber.valorabertorec", "receber.datavencimentorec"],
+        cliente: ["gerais.clientes.codigocli", "nomecli", "fantasiacli", "cnpjcpfcli"],
+      },
+      pending: [
+        "A tela Clientes usa financeiro.receber para visao financeira; receita operacional por CT-e fica na tela Clientes Lucro.",
+        "Inadimplente foi definido como aberto vencido ha mais de 5 dias; ajuste a regra se a empresa usar outro prazo de tolerancia.",
+      ],
     },
     monthly: monthlyRes.rows.map(r => ({
       mes: dateOnly(r.mes),

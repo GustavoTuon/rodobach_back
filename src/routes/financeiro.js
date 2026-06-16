@@ -17,6 +17,11 @@ import {
   getCustosVeiculos,
   getCustosVeiculosFiltros,
 } from "../services/custosVeiculosService.js";
+import {
+  getManutencaoVeiculoDetalhe,
+  getManutencoesVeiculos,
+  getManutencoesVeiculosFiltros,
+} from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 
@@ -273,6 +278,49 @@ financeiroRouter.get("/financeiro/custos-veiculos/:placa", async (req, res, next
       valorMax: req.query.valorMax,
       search: req.query.search,
     });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/manutencoes-veiculos", async (req, res, next) => {
+  try {
+    const data = await getManutencoesVeiculos({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      categoria: req.query.categoria,
+      fornecedor: req.query.fornecedor,
+      centro: req.query.centro,
+      produto: req.query.produto,
+      search: req.query.search,
+      limit: req.query.limit,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/manutencoes-veiculos/filtros", async (_req, res, next) => {
+  try {
+    res.json(await getManutencoesVeiculosFiltros());
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/manutencoes-veiculos/:placa", async (req, res, next) => {
+  try {
+    const data = await getManutencaoVeiculoDetalhe(req.params.placa, {
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+    });
+    if (!data) {
+      res.status(404).json({ error: "Placa nao encontrada" });
+      return;
+    }
     res.json(data);
   } catch (error) {
     next(error);
