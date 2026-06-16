@@ -213,8 +213,8 @@ function buildManagement(rows, aggr) {
 
 // Classificação do DRE por mascaracfi (hierarquia do plano de contas), espelhando
 // os grupos do "Demonstrativo por Conta Financeira": 1.x = receita, 2.x = impostos,
-// 4.1.x = custo com frota, demais 4.x = custo de transporte, 6.1.x = pessoal,
-// 6.2.x = administrativas, 6.4.x = financeiras, 6.5.x/demais = operacionais.
+// 4.1.x = custo com frota, demais 4.x = custo de transporte, 6.1/6.3 = pessoal,
+// 6.2.x = administrativas, 6.4/6.5 = financeiras, demais 6.x = operacionais.
 const CATEGORIA_CASE = `
   CASE
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '1%' THEN 'RECEITA BRUTA'
@@ -222,8 +222,10 @@ const CATEGORIA_CASE = `
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '4.1%' THEN 'CUSTOS COM FROTA'
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '4%' THEN 'CUSTOS DE TRANSPORTE'
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.1%' THEN 'DESPESAS COM PESSOAL'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.3%' THEN 'DESPESAS COM PESSOAL'
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.2%' THEN 'DESPESAS ADMINISTRATIVAS'
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.4%' THEN 'DESPESAS FINANCEIRAS'
+    WHEN COALESCE(cfi.mascaracfi,'') LIKE '6.5%' THEN 'DESPESAS FINANCEIRAS'
     WHEN COALESCE(cfi.mascaracfi,'') LIKE '6%' THEN 'DESPESAS OPERACIONAIS'
     ELSE 'DESPESAS OPERACIONAIS'
   END

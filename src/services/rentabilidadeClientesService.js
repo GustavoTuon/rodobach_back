@@ -313,8 +313,9 @@ const BASE_SQL = `
       END AS custo_motorista,
       COALESCE(cm.manutencao, 0) * CASE WHEN pmt.receita_mes > 0 THEN cb.receita / pmt.receita_mes ELSE 1 / NULLIF(pmt.qtd_ctes_mes, 0) END AS custo_manutencao,
       CASE
-        WHEN COALESCE(cm.manutencao, 0) > 0 THEN 'Manutencao rateada por placa/mes via financeiro.pagar + centro de custo.'
+        WHEN cb.viagem IS NULL AND COALESCE(cm.manutencao, 0) > 0 THEN 'Sem viagem vinculada ao CT-e; custos de viagem nao puderam ser rateados. Manutencao rateada por placa/mes via financeiro.pagar + centro de custo.'
         WHEN cb.viagem IS NULL THEN 'Sem viagem vinculada ao CT-e; custos de viagem nao puderam ser rateados.'
+        WHEN COALESCE(cm.manutencao, 0) > 0 THEN 'Manutencao rateada por placa/mes via financeiro.pagar + centro de custo.'
         ELSE ''
       END AS observacao_custo
     FROM conhecimentos_base cb
