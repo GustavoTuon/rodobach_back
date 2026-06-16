@@ -7,6 +7,15 @@ export const manutencaoRouter = express.Router();
 
 const TABLE = () => tableName("automacao_mensagem_manutencao");
 
+// Aceita array ou string ("123, 456; 789") e devolve "123,456,789"
+function normalizarNumeros(input) {
+  const lista = Array.isArray(input) ? input : String(input || "").split(/[,;\n]+/);
+  return lista
+    .map(n => String(n).replace(/[^\d+]/g, ""))
+    .filter(Boolean)
+    .join(",");
+}
+
 const QUERY_VEICULOS = `
   SELECT placa, odometro
   FROM (
@@ -52,7 +61,7 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
 // POST /api/manutencao — cria um registro por placa selecionada
 manutencaoRouter.post("/manutencao", async (req, res, next) => {
   try {
-    const { placas, titulo, mensagem, intervalo_km } = req.body;
+    const { placas, titulo, mensagem, intervalo_km, numeros } = req.body;
 
     if (!Array.isArray(placas) || placas.length === 0) {
       return res.status(400).json({ error: "Selecione ao menos uma placa." });
@@ -67,14 +76,16 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
       km_atual: Number(p.km_atual || 0),
     }));
 
+    const numerosDestino = normalizarNumeros(numeros);
+
     const criados = [];
     for (const { placa, km_atual } of entradas) {
       const km = Number(km_atual || 0);
       const intervalo = Number(intervalo_km);
       const { rows } = await pool.query(
-        `INSERT INTO ${TABLE()} (placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [placa, titulo, mensagem, intervalo, km, km + intervalo]
+        `INSERT INTO ${TABLE()} (placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio, numeros)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [placa, titulo, mensagem, intervalo, km, km + intervalo, numerosDestino]
       );
       criados.push(rows[0]);
     }
@@ -89,7 +100,7 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
 manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { placa, titulo, mensagem, intervalo_km, km_atual, ativo } = req.body;
+    const { placa, titulo, mensagem, intervalo_km, km_atual, ativo, numeros } = req.body;
 
     const sets = [];
     const vals = [];
@@ -101,6 +112,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(Number(intervalo_km)); }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
+    if (numeros !== undefined)      { sets.push(`numeros = $${i++}`);      vals.push(normalizarNumeros(numeros)); }
     // Recalcula km_proximo_envio se km_atual ou intervalo_km mudar
     if (km_atual !== undefined || intervalo_km !== undefined) {
       sets.push(`km_proximo_envio = $${i++}`);
