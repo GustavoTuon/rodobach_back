@@ -247,11 +247,17 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const params = [sd, ed, prevSd, prevEd, clienteFilter];
   const monthParams = [sd, ed];
 
-  const [clientsRes, monthlyRes, topMonthlyRes] = await Promise.all([
-    clientPool.query(clientsQuery, params),
-    clientPool.query(monthlyQuery, monthParams),
-    clientPool.query(topMonthlyQuery, monthParams),
-  ]);
+  const dbClient = await clientPool.connect();
+  let clientsRes;
+  let monthlyRes;
+  let topMonthlyRes;
+  try {
+    clientsRes = await dbClient.query(clientsQuery, params);
+    monthlyRes = await dbClient.query(monthlyQuery, monthParams);
+    topMonthlyRes = await dbClient.query(topMonthlyQuery, monthParams);
+  } finally {
+    dbClient.release();
+  }
 
   const allClients = clientsRes.rows;
 
