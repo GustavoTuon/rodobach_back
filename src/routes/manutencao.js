@@ -6,6 +6,48 @@ import { getVeiculosPool } from "../db/pool-veiculos.js";
 export const manutencaoRouter = express.Router();
 
 const TABLE = () => tableName("automacao_mensagem_manutencao");
+const CONTACT_TABLE = () => tableName("manutencao_contatos");
+
+function normalizePhone(value) {
+  return String(value || "").replace(/[^\d]/g, "");
+}
+
+function normalizePhoneList(value) {
+  return String(value || "")
+    .split(/[,;\s]+/)
+    .map(normalizePhone)
+    .filter(Boolean);
+}
+
+async function resolveContato(payload = {}) {
+  const numerosDiretos = normalizePhoneList(payload.numeros || payload.contato_numero);
+  const numeroDireto = numerosDiretos[0];
+  if (payload.contato_id) {
+    const { rows } = await pool.query(
+      `SELECT id, nome, numero FROM ${CONTACT_TABLE()} WHERE id = $1 AND ativo = TRUE`,
+      [Number(payload.contato_id)]
+    );
+    if (rows[0]) {
+      return {
+        contato_id: null,
+        contato_nome: null,
+        contato_numero: null,
+        numeros: rows[0].numero,
+      };
+    }
+  }
+
+  if (numeroDireto) {
+    return {
+      contato_id: null,
+      contato_nome: null,
+      contato_numero: null,
+      numeros: numerosDiretos.join(","),
+    };
+  }
+
+  return { contato_id: null, contato_nome: null, contato_numero: null, numeros: null };
+}
 
 const QUERY_VEICULOS = `
   SELECT placa, odometro
@@ -37,6 +79,44 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
   }
 });
 
+manutencaoRouter.get("/manutencao/contatos", async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nome, numero, ativo, criado_em, atualizado_em
+       FROM ${CONTACT_TABLE()}
+       WHERE ativo = TRUE
+       ORDER BY lower(nome), numero`
+    );
+    res.json({ contatos: rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+manutencaoRouter.post("/manutencao/contatos", async (req, res, next) => {
+  try {
+    const nome = String(req.body.nome || "").trim();
+    const numero = normalizePhone(req.body.numero);
+    if (!nome || !numero) {
+      return res.status(400).json({ error: "Nome e numero sao obrigatorios." });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO ${CONTACT_TABLE()} (nome, numero)
+       VALUES ($1, $2)
+       ON CONFLICT (numero) DO UPDATE
+         SET nome = EXCLUDED.nome,
+             ativo = TRUE,
+             atualizado_em = NOW()
+       RETURNING *`,
+      [nome, numero]
+    );
+    res.status(201).json({ contato: rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/manutencao
 manutencaoRouter.get("/manutencao", async (_req, res, next) => {
   try {
@@ -53,12 +133,17 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
 manutencaoRouter.post("/manutencao", async (req, res, next) => {
   try {
     const { placas, titulo, mensagem, intervalo_km } = req.body;
+    const contato = await resolveContato(req.body);
 
     if (!Array.isArray(placas) || placas.length === 0) {
       return res.status(400).json({ error: "Selecione ao menos uma placa." });
     }
     if (!titulo || !mensagem || !intervalo_km) {
       return res.status(400).json({ error: "Título, mensagem e intervalo_km são obrigatórios." });
+    }
+
+    if (!contato.numeros) {
+      return res.status(400).json({ error: "Selecione ou cadastre um contato para envio." });
     }
 
     // placas vem como [{ placa, km_atual }]
@@ -72,9 +157,23 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
       const km = Number(km_atual || 0);
       const intervalo = Number(intervalo_km);
       const { rows } = await pool.query(
-        `INSERT INTO ${TABLE()} (placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [placa, titulo, mensagem, intervalo, km, km + intervalo]
+        `INSERT INTO ${TABLE()} (
+           placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio,
+           numeros, contato_id, contato_nome, contato_numero
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [
+          placa,
+          titulo,
+          mensagem,
+          intervalo,
+          km,
+          km + intervalo,
+          contato.numeros,
+          contato.contato_id,
+          contato.contato_nome,
+          contato.contato_numero,
+        ]
       );
       criados.push(rows[0]);
     }
@@ -89,7 +188,18 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
 manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { placa, titulo, mensagem, intervalo_km, km_atual, ativo } = req.body;
+    const {
+      placa,
+      titulo,
+      mensagem,
+      intervalo_km,
+      km_atual,
+      ativo,
+      numeros,
+      contato_id,
+      contato_nome,
+      contato_numero,
+    } = req.body;
 
     const sets = [];
     const vals = [];
@@ -101,6 +211,21 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(Number(intervalo_km)); }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
+    if (
+      numeros !== undefined ||
+      contato_id !== undefined ||
+      contato_nome !== undefined ||
+      contato_numero !== undefined
+    ) {
+      const contato = await resolveContato(req.body);
+      if (!contato.numeros) {
+        return res.status(400).json({ error: "Selecione ou cadastre um contato para envio." });
+      }
+      sets.push(`numeros = $${i++}`); vals.push(contato.numeros);
+      sets.push(`contato_id = $${i++}`); vals.push(contato.contato_id);
+      sets.push(`contato_nome = $${i++}`); vals.push(contato.contato_nome);
+      sets.push(`contato_numero = $${i++}`); vals.push(contato.contato_numero);
+    }
     // Recalcula km_proximo_envio se km_atual ou intervalo_km mudar
     if (km_atual !== undefined || intervalo_km !== undefined) {
       sets.push(`km_proximo_envio = $${i++}`);
