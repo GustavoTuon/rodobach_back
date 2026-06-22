@@ -24,6 +24,7 @@ import {
 } from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
+import { getAnaliseFrota } from "../services/analiseFrotaService.js";
 
 export const financeiroRouter = Router();
 
@@ -225,6 +226,29 @@ financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
       startDate: req.query.startDate || req.query.dataInicio,
       endDate: req.query.endDate || req.query.dataFim,
       tipoProprietario: req.query.tipoProprietario,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/frota/analise", async (req, res, next) => {
+  try {
+    const data = await getAnaliseFrota({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      centro: req.query.centro,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
+      tipoCusto: req.query.tipoCusto,
+      situacao: req.query.situacao,
+      modelo: req.query.modelo,
+      marca: req.query.marca,
+      ano: req.query.ano,
+      limit: req.query.limit,
     });
     res.json(data);
   } catch (error) {

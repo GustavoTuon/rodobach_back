@@ -701,6 +701,42 @@ function buildWhere(filters = {}, offset = 2) {
       i += 1;
     }
   }
+  if (filters.modelo) {
+    values.push(`%${normalizeText(filters.modelo)}%`);
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND COALESCE(fv.modelovei::text, fv.marcamodelorenavamvei::text, '') ILIKE $${i}
+    )`);
+    i += 1;
+  }
+  if (filters.marca) {
+    values.push(`%${normalizeText(filters.marca)}%`);
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      LEFT JOIN frotas.marcas fm
+        ON fm.codigomar = fv.marcavei
+       AND (fm.empresamar = fv.empresavei OR fm.empresamar IS NULL)
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND COALESCE(fm.nomemar::text, fv.marcavei::text, '') ILIKE $${i}
+    )`);
+    i += 1;
+  }
+  if (filters.ano) {
+    values.push(String(filters.ano).trim());
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND fv.anomodelovei::text = $${i}
+    )`);
+    i += 1;
+  }
   if (filters.empresa) {
     values.push(Number(filters.empresa));
     where.push(`empresa = $${i}`);
@@ -759,6 +795,21 @@ function buildRevenueWhere(filters = {}, offset = 2) {
   if (filters.search) {
     values.push(`%${normalizeText(filters.search)}%`);
     where.push(`CONCAT_WS(' ', con.veiculocon, vei.nomevei, con.codigocon::text, con.numeroctecon::text, con.chavectecon) ILIKE $${i}`);
+    i += 1;
+  }
+  if (filters.modelo) {
+    values.push(`%${normalizeText(filters.modelo)}%`);
+    where.push(`COALESCE(vei.modelovei::text, vei.marcamodelorenavamvei::text, '') ILIKE $${i}`);
+    i += 1;
+  }
+  if (filters.marca) {
+    values.push(`%${normalizeText(filters.marca)}%`);
+    where.push(`COALESCE(vei.marca_nome::text, vei.marcavei::text, '') ILIKE $${i}`);
+    i += 1;
+  }
+  if (filters.ano) {
+    values.push(String(filters.ano).trim());
+    where.push(`vei.anomodelovei::text = $${i}`);
     i += 1;
   }
 
@@ -822,11 +873,13 @@ function mapLaunch(row) {
 
 async function queryCostRows(sql, params) {
   const { rows } = await clientPool.query(sql, params);
-  console.log("[custos-veiculos] sql", {
-    params,
-    rows: rows.length,
-    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
-  });
+  if (process.env.DEBUG_SQL === "1") {
+    console.log("[custos-veiculos] sql", {
+      params,
+      rows: rows.length,
+      sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+    });
+  }
   return rows;
 }
 
@@ -841,7 +894,7 @@ export async function getCustosVeiculos(filters = {}) {
 
   const cte = baseCostCte();
 
-  const [summaryRows, monthlyRows, rankingRows, costVehicleRows, typeRows, supplierRows, statusRows, launchesRows, revenueRows, validationRows, auditOriginRows, auditRows] = await Promise.all([
+  const [summaryRows, monthlyRows, revenueMonthlyRows, rankingRows, costVehicleRows, typeRows, supplierRows, statusRows, launchesRows, revenueRows, validationRows, auditOriginRows, auditRows, auditExtraRows] = await Promise.all([
     queryCostRows(`
       ${cte}
       SELECT
@@ -873,6 +926,27 @@ export async function getCustosVeiculos(filters = {}) {
       GROUP BY DATE_TRUNC('month', data), TO_CHAR(DATE_TRUNC('month', data), 'YYYY-MM')
       ORDER BY DATE_TRUNC('month', data)
     `, params),
+    queryCostRows(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', con.dataemissaocon), 'YYYY-MM') AS mes,
+        COALESCE(SUM(COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)), 0) AS receita
+      FROM logistica.conhecimentos con
+      LEFT JOIN LATERAL (
+      SELECT v.placavei, v.tipopropriedadevei, v.empresavei
+             , v.modelovei, v.marcamodelorenavamvei, v.marcavei, v.anomodelovei, m.nomemar AS marca_nome
+        FROM frotas.veiculos v
+        LEFT JOIN frotas.marcas m
+          ON m.codigomar = v.marcavei
+         AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
+        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
+          AND COALESCE(v.situacaovei::text, '') <> 'I'
+        ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+        LIMIT 1
+      ) vei ON true
+      ${revenueWhere.clause}
+      GROUP BY DATE_TRUNC('month', con.dataemissaocon), TO_CHAR(DATE_TRUNC('month', con.dataemissaocon), 'YYYY-MM')
+      ORDER BY DATE_TRUNC('month', con.dataemissaocon)
+    `, revenueParams),
     queryCostRows(`
       ${cte}
       SELECT
@@ -943,6 +1017,7 @@ export async function getCustosVeiculos(filters = {}) {
       ORDER BY data DESC, valor DESC
       LIMIT ${limit}
     `, params),
+    // Origem da receita por placa: logistica.conhecimentos (CT-e emitidos), status=2 = ativo, valor = totalcon ou valorfretecon.
     queryCostRows(`
       SELECT
         UPPER(TRIM(con.veiculocon::text)) AS placa,
@@ -958,8 +1033,23 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(con.dataemissaocon)::date AS ultima_receita
       FROM logistica.conhecimentos con
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei, v.empresavei
+        SELECT
+          v.placavei,
+          v.nomevei,
+          v.tipopropriedadevei,
+          v.proprietariovei,
+          v.kmatualvei,
+          v.centrocustovei,
+          v.empresavei,
+          v.modelovei,
+          v.marcamodelorenavamvei,
+          v.marcavei,
+          v.anomodelovei,
+          m.nomemar AS marca_nome
         FROM frotas.veiculos v
+        LEFT JOIN frotas.marcas m
+          ON m.codigomar = v.marcavei
+         AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
           AND COALESCE(v.situacaovei::text, '') <> 'I'
         ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
@@ -1010,6 +1100,26 @@ export async function getCustosVeiculos(filters = {}) {
       FROM custos_status
       ${where.clause}
     `, params),
+    queryCostRows(`
+      SELECT
+        (SELECT COUNT(*)::int FROM logistica.conhecimentos con
+          WHERE con.statuscon = 2
+            AND con.dataemissaocon::date >= $1::date AND con.dataemissaocon::date <= $2::date
+            AND NULLIF(TRIM(con.veiculocon::text), '') IS NULL) AS receitas_sem_veiculo,
+        (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
+          WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
+            AND COALESCE(aba.totalaba, 0) <> 0
+            AND aba.duplicatageradaaba IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM financeiro.pagar pag
+              WHERE pag.empresapag = COALESCE(aba.empresaaba, pag.empresapag)
+                AND pag.seriepag = COALESCE(aba.seriegeradaaba, aba.serieaba, pag.seriepag)
+                AND pag.duplicatapag = COALESCE(aba.duplicatageradaaba, aba.duplicataaba)
+            )) AS abastecimentos_ja_no_financeiro,
+        (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
+          WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
+            AND COALESCE(aba.diferencakilometragemaba, 0) = 0) AS abastecimentos_sem_km
+    `, [period.startDate, period.endDate]),
   ]);
 
   const costMap = new Map();
@@ -1060,6 +1170,7 @@ export async function getCustosVeiculos(filters = {}) {
     const receita = num(item.receita);
     const custo = num(item.custo);
     const lucro = receita - custo;
+    // receita vem de logistica.conhecimentos (CT-e); sem receita no periodo + custo > 0 = prejuizo de -100%.
     const margem = receita > 0 ? (lucro / receita) * 100 : (lucro < 0 ? -100 : 0);
     return {
       ...item,
@@ -1079,17 +1190,32 @@ export async function getCustosVeiculos(filters = {}) {
   const totalCustoProfit = money(profitRows.reduce((sum, row) => sum + num(row.custo), 0));
   const totalLucro = money(totalReceita - totalCustoProfit);
 
-  return {
-    period,
-    summary: mapSummary(summaryRows[0]),
-    monthly: monthlyRows.map((row) => ({
+  const revenueByMonth = new Map(revenueMonthlyRows.map((row) => [row.mes, num(row.receita)]));
+  const monthly = monthlyRows.map((row) => {
+    const receita = revenueByMonth.get(row.mes) || 0;
+    const custo = num(row.custo);
+    return {
       mes: row.mes,
       label: monthLabel(row.mes),
-      custo: money(row.custo),
+      custo: money(custo),
       pago: money(row.pago),
       aberto: money(row.aberto),
       vencido: money(row.vencido),
-    })),
+      receita: money(receita),
+      lucro: money(receita - custo),
+    };
+  });
+  for (const [mes, receita] of revenueByMonth) {
+    if (!monthly.some((item) => item.mes === mes)) {
+      monthly.push({ mes, label: monthLabel(mes), custo: 0, pago: 0, aberto: 0, vencido: 0, receita: money(receita), lucro: money(receita) });
+    }
+  }
+  monthly.sort((a, b) => String(a.mes).localeCompare(String(b.mes)));
+
+  return {
+    period,
+    summary: mapSummary(summaryRows[0]),
+    monthly,
     ranking: rankingRows.map((row) => ({
       placa: row.placa || "Nao identificado",
       veiculoNome: row.veiculo_nome || "",
@@ -1123,10 +1249,12 @@ export async function getCustosVeiculos(filters = {}) {
         receitaTotal: totalReceita,
         custoTotal: totalCustoProfit,
         lucroTotal: totalLucro,
-        margem: totalReceita > 0 ? money((totalLucro / totalReceita) * 100) : 0,
+        // mesma regra usada por veiculo (linha ~1172): sem receita no periodo mas com custo = prejuizo de -100%, nao 0,00.
+        margem: totalReceita > 0 ? money((totalLucro / totalReceita) * 100) : (totalLucro < 0 ? -100 : 0),
         veiculos: profitRows.length,
         veiculosLucro: profitRows.filter((row) => row.statusResultado === "lucro").length,
         veiculosPrejuizo: profitRows.filter((row) => row.statusResultado === "prejuizo").length,
+        veiculosCustoSemReceita: profitRows.filter((row) => row.custo > 0 && row.receita === 0).length,
       },
       vehicles: profitRows,
       rankings: {
@@ -1171,6 +1299,9 @@ export async function getCustosVeiculos(filters = {}) {
       registrosCentroAdministrativo: num(auditRows[0]?.registros_centro_administrativo),
       possiveisDivergenciasPlaca: num(auditRows[0]?.possiveis_divergencias_placa),
       registrosFiltrados: num(auditRows[0]?.registros_filtrados),
+      receitasSemVeiculo: num(auditExtraRows[0]?.receitas_sem_veiculo),
+      abastecimentosJaNoFinanceiro: num(auditExtraRows[0]?.abastecimentos_ja_no_financeiro),
+      abastecimentosSemKm: num(auditExtraRows[0]?.abastecimentos_sem_km),
       observacoes: [
         "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei diferente de 'T'.",
         "Centros administrativos sem placa resolvida ficam fora quando o filtro de proprietario e frota/terceiro.",
