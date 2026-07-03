@@ -13,6 +13,7 @@ import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
 import { getRentabilidadeClientes } from "../services/rentabilidadeClientesService.js";
 import {
+  getAuditoriaCustosVeiculos,
   getCustosVeiculoDetalhe,
   getCustosVeiculos,
   getCustosVeiculosFiltros,
@@ -194,6 +195,7 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
       endDate: req.query.dataFim || req.query.endDate,
       cliente: req.query.cliente,
       status: req.query.status,
+      incluirVencidosAntigos: req.query.incluirVencidosAntigos,
     });
     res.json(data);
   } catch (error) {
@@ -282,6 +284,17 @@ financeiroRouter.get("/financeiro/custos-veiculos", async (req, res, next) => {
 financeiroRouter.get("/financeiro/custos-veiculos/filtros", async (_req, res, next) => {
   try {
     res.json(await getCustosVeiculosFiltros());
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/auditoria", async (req, res, next) => {
+  try {
+    res.json(await getAuditoriaCustosVeiculos({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+    }));
   } catch (error) {
     next(error);
   }

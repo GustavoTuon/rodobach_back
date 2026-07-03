@@ -7,6 +7,7 @@ import {
   registrarMovimentacaoPneu,
   fetchVehicles,
   fetchPositions,
+  getOdometroAtualVeiculo,
 } from "../services/pneusService.js";
 
 export const pneusRouter = Router();
@@ -30,6 +31,16 @@ pneusRouter.get("/pneus/posicoes", async (req, res, next) => {
 });
 
 // GET /api/pneus/veiculo/:placa — estado atual (banco cliente + movimentos aplicados)
+pneusRouter.get("/pneus/veiculo/:placa/odometro", async (req, res, next) => {
+  try {
+    const placa = String(req.params.placa || "").trim().toUpperCase();
+    if (!placa) { res.status(400).json({ error: "Placa e obrigatoria." }); return; }
+    res.json(await getOdometroAtualVeiculo(placa));
+  } catch (error) {
+    next(error);
+  }
+});
+
 pneusRouter.get("/pneus/veiculo/:placa", async (req, res, next) => {
   try {
     const placa = String(req.params.placa || "").trim().toUpperCase();

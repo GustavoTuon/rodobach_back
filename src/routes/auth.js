@@ -26,21 +26,18 @@ authRouter.post("/auth/login", async (req, res, next) => {
     }
 
     const permissions = {
+      diretoria: user.perm_diretoria,
       simulador: user.perm_simulador,
       viagens: user.perm_viagens,
       "dre-empresarial": user.perm_dre_empresarial,
-      "custos-veiculos": user.perm_custos_veiculos ?? user.perm_custos,
+      "analise-frota": user.perm_analise_frota,
+      "custos-veiculos": user.perm_custos_veiculos,
+      "manutencoes-veiculos": user.perm_manutencoes_veiculos,
       clientes: user.perm_clientes,
       "clientes-lucro": user.perm_clientes_lucro ?? user.perm_clientes,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
       manutencao: user.perm_manutencao,
-      dashboard: user.perm_dashboard,
-      vehicles: user.perm_vehicles,
-      alerts: user.perm_alerts,
-      reports: user.perm_reports,
-      map: user.perm_map,
-      integration: user.perm_integration,
     };
 
     const token = jwt.sign(

@@ -16,6 +16,7 @@ function r2(value) {
 }
 
 function logAnaliseClientes(label, { sql, params, rows, totals } = {}) {
+  if (process.env.DEBUG_SQL !== "1") return;
   console.log("[analise-clientes]", label, {
     params,
     rows,
@@ -81,9 +82,11 @@ function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos
   return { status: "ativo", acao: "manter-relacionamento" };
 }
 
-export async function getAnaliseClientes({ period, startDate, endDate, cliente, status } = {}) {
+export async function getAnaliseClientes({ period, startDate, endDate, cliente, status, incluirVencidosAntigos } = {}) {
   const resolved = resolvePeriod(period, startDate, endDate);
   const { startDate: sd, endDate: ed } = resolved;
+  const includeOldOverdue = ["1", "true", "sim", "yes"].includes(String(incluirVencidosAntigos || "").toLowerCase());
+  const overdueStartDate = includeOldOverdue ? "1900-01-01" : "2025-01-01";
 
   // Previous period (same duration before the current period)
   const sdDate = new Date(sd + "T00:00:00Z");
@@ -105,12 +108,16 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         SUM(rec.valorduplicatarec)  AS total_periodo,
         SUM(COALESCE(rec.valorabertorec, 0)) AS total_aberto,
         SUM(CASE
-          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE
+          WHEN COALESCE(rec.valorabertorec, 0) > 0
+            AND rec.datavencimentorec::date >= $6::date
+            AND rec.datavencimentorec::date < CURRENT_DATE
             THEN COALESCE(rec.valorabertorec, 0)
           ELSE 0
         END) AS total_vencido,
         SUM(CASE
-          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE - INTERVAL '5 days'
+          WHEN COALESCE(rec.valorabertorec, 0) > 0
+            AND rec.datavencimentorec::date >= $6::date
+            AND rec.datavencimentorec::date < CURRENT_DATE - INTERVAL '5 days'
             THEN COALESCE(rec.valorabertorec, 0)
           ELSE 0
         END) AS total_inadimplente,
@@ -244,7 +251,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     ORDER BY m.mes, m.valor DESC
   `;
 
-  const params = [sd, ed, prevSd, prevEd, clienteFilter];
+  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate];
   const monthParams = [sd, ed];
 
   const dbClient = await clientPool.connect();
@@ -357,6 +364,9 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         recebido: ["receberrecebimentos.datarecebimentorcb", "receberrecebimentos.valorrecebidorcb"],
         abertoVencido: ["receber.valorabertorec", "receber.datavencimentorec"],
         cliente: ["gerais.clientes.codigocli", "nomecli", "fantasiacli", "cnpjcpfcli"],
+      },
+      regras: {
+        vencidosAntigos: includeOldOverdue ? "incluidos" : "ignorados antes de 2025-01-01",
       },
       pending: [
         "A tela Clientes usa financeiro.receber para visao financeira; receita operacional por CT-e fica na tela Clientes Lucro.",
