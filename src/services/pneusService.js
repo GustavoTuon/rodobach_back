@@ -1,5 +1,6 @@
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
+import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { tableName } from "../config.js";
 
 const MOV_TABLE = tableName("movimentacoes_pneus");
@@ -14,6 +15,7 @@ const TIPOS_VALIDOS = new Set([
 ]);
 
 function logPneus(message, details = {}) {
+  if (process.env.DEBUG_SQL !== "1") return;
   console.log("[pneus]", message, details);
 }
 
@@ -237,6 +239,189 @@ function mapVehicles(rows) {
     empresa: normalizeText(row.empresa),
     label: [row.placa, row.nome].filter(Boolean).join(" - "),
   }));
+}
+
+async function fetchLatestTelemetryHodometer(placa) {
+  const vPool = getVeiculosPool();
+  const { rows } = await vPool.query(`
+    SELECT
+      v.placa,
+      mcb.odometro,
+      mcb.data_hora
+    FROM rodobach.mensagens_cb mcb
+    JOIN rodobach.veiculos v
+      ON v.veiculo_id = mcb.veiculo_id
+    WHERE UPPER(TRIM(v.placa)) = UPPER(TRIM($1))
+      AND mcb.odometro IS NOT NULL
+      AND mcb.odometro > 0
+      AND mcb.tipo_mensagem = 1
+      AND mcb.evento_gerador = 13
+    ORDER BY mcb.data_hora DESC
+    LIMIT 1
+  `, [placa]);
+
+  const row = rows[0];
+  if (!row) return null;
+
+  return {
+    placa: normalizeText(row.placa),
+    odometro: Number(row.odometro),
+    dataHora: row.data_hora,
+    origem: "hodometro_telemetria",
+  };
+}
+
+async function fetchLatestTelemetryOdometer(placa) {
+  const vPool = getVeiculosPool();
+  const { rows } = await vPool.query(`
+    SELECT
+      v.placa,
+      mcb.odometro,
+      mcb.data_hora
+    FROM rodobach.mensagens_cb mcb
+    JOIN rodobach.veiculos v
+      ON v.veiculo_id = mcb.veiculo_id
+    WHERE UPPER(TRIM(v.placa)) = UPPER(TRIM($1))
+      AND mcb.odometro IS NOT NULL
+    ORDER BY mcb.data_hora DESC
+    LIMIT 1
+  `, [placa]);
+
+  const row = rows[0];
+  if (!row) return null;
+
+  return {
+    placa: normalizeText(row.placa),
+    odometro: Number(row.odometro),
+    dataHora: row.data_hora,
+    origem: "telemetria",
+  };
+}
+
+async function fetchClientVehicleKm(placa) {
+  const { rows } = await queryClient("km veiculo cadastro", `
+    SELECT placavei, kmatualvei, dataatualkmvei
+    FROM frotas.veiculos
+    WHERE UPPER(TRIM(placavei::text)) = UPPER(TRIM($1))
+    LIMIT 1
+  `, [placa]);
+
+  const row = rows[0];
+  if (!row || row.kmatualvei == null) return null;
+
+  return {
+    placa: normalizeText(row.placavei),
+    odometro: Number(row.kmatualvei),
+    dataHora: row.dataatualkmvei,
+    origem: "cadastro_frotas",
+  };
+}
+
+async function fetchEngatePorImplemento(placa) {
+  const { rows } = await queryClient("engate implemento", `
+    SELECT placa_principal, placa_reboque1, placa_reboque2, placa_reboque3
+    FROM frotas.veiculosreboquesmotoristas
+    WHERE UPPER(TRIM(COALESCE(placa_reboque1, ''))) = UPPER(TRIM($1))
+       OR UPPER(TRIM(COALESCE(placa_reboque2, ''))) = UPPER(TRIM($1))
+       OR UPPER(TRIM(COALESCE(placa_reboque3, ''))) = UPPER(TRIM($1))
+    LIMIT 1
+  `, [placa]);
+
+  const row = rows[0];
+  if (!row?.placa_principal) return null;
+
+  return {
+    placaPrincipal: normalizeText(row.placa_principal),
+    reboques: [row.placa_reboque1, row.placa_reboque2, row.placa_reboque3]
+      .map(normalizeText)
+      .filter(Boolean),
+  };
+}
+
+export async function getOdometroAtualVeiculo(veiculo) {
+  const placa = normalizeText(veiculo).toUpperCase();
+  if (!placa) throw new Error("Placa e obrigatoria.");
+
+  const hodometro = await fetchLatestTelemetryHodometer(placa).catch((error) => {
+    logPneus("hodometro telemetria indisponivel para placa direta", { placa, error: error.message });
+    return null;
+  });
+  if (hodometro) {
+    return {
+      ...hodometro,
+      placaSolicitada: placa,
+      placaOdometro: hodometro.placa,
+      engate: null,
+    };
+  }
+
+  const direto = await fetchLatestTelemetryOdometer(placa).catch((error) => {
+    logPneus("telemetria indisponivel para placa direta", { placa, error: error.message });
+    return null;
+  });
+  if (direto) {
+    return {
+      ...direto,
+      placaSolicitada: placa,
+      placaOdometro: direto.placa,
+      engate: null,
+    };
+  }
+
+  const engate = await fetchEngatePorImplemento(placa).catch((error) => {
+    logPneus("engate indisponivel", { placa, error: error.message });
+    return null;
+  });
+  if (engate?.placaPrincipal) {
+    const hodometroPrincipal = await fetchLatestTelemetryHodometer(engate.placaPrincipal).catch((error) => {
+      logPneus("hodometro telemetria indisponivel para placa principal", { placaPrincipal: engate.placaPrincipal, error: error.message });
+      return null;
+    });
+    if (hodometroPrincipal) {
+      return {
+        ...hodometroPrincipal,
+        placaSolicitada: placa,
+        placaOdometro: hodometroPrincipal.placa,
+        origem: "hodometro_telemetria_engate",
+        engate,
+      };
+    }
+
+    const telemetriaPrincipal = await fetchLatestTelemetryOdometer(engate.placaPrincipal).catch((error) => {
+      logPneus("telemetria indisponivel para placa principal", { placaPrincipal: engate.placaPrincipal, error: error.message });
+      return null;
+    });
+    if (telemetriaPrincipal) {
+      return {
+        ...telemetriaPrincipal,
+        placaSolicitada: placa,
+        placaOdometro: telemetriaPrincipal.placa,
+        origem: "telemetria_engate",
+        engate,
+      };
+    }
+  }
+
+  const fallbackPlaca = engate?.placaPrincipal || placa;
+  const cadastro = await fetchClientVehicleKm(fallbackPlaca);
+  if (cadastro) {
+    return {
+      ...cadastro,
+      placaSolicitada: placa,
+      placaOdometro: cadastro.placa,
+      origem: engate?.placaPrincipal ? "cadastro_frotas_engate" : "cadastro_frotas",
+      engate,
+    };
+  }
+
+  return {
+    placaSolicitada: placa,
+    placaOdometro: fallbackPlaca,
+    odometro: null,
+    dataHora: null,
+    origem: "nao_encontrado",
+    engate,
+  };
 }
 
 async function fetchMovimentosByTireCodes(codes) {

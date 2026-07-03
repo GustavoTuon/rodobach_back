@@ -16,6 +16,7 @@ export const config = {
   port: Number(process.env.PORT || 3333),
   jwtSecret: process.env.JWT_SECRET || "rodobach-jwt-secret-TROQUE-EM-PRODUCAO",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "24h",
+  telemetriaResumoDir: process.env.TELEMETRIA_RESUMO_DIR || "",
   frontendOrigins: (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())

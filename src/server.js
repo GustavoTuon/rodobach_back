@@ -13,6 +13,7 @@ import { viagensRouter } from "./routes/viagens.js";
 import { pneusRouter } from "./routes/pneus.js";
 import { manutencaoRouter } from "./routes/manutencao.js";
 import { whatsappRouter } from "./routes/whatsapp.js";
+import { conducaoRouter } from "./routes/conducao.js";
 
 const app = express();
 
@@ -92,6 +93,7 @@ app.use("/api", usuariosRouter);
 app.use("/api", pneusRouter);
 app.use("/api", manutencaoRouter);
 app.use("/api", whatsappRouter);
+app.use("/api", conducaoRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {

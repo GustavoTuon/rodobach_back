@@ -60,6 +60,7 @@ function normalizeStatus(value) {
 }
 
 function logRentabilidade(label, { sql, params, rows, totals } = {}) {
+  if (process.env.DEBUG_SQL !== "1") return;
   console.log("[rentabilidade-clientes]", label, {
     params,
     rows,

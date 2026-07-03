@@ -1,6 +1,7 @@
 import { clientPool } from "../db/clientPool.js";
 import { getCustosVeiculos } from "./custosVeiculosService.js";
 import { getManutencoesVeiculos } from "./manutencoesVeiculosService.js";
+import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
 
 function num(value) {
   const n = Number(value);
@@ -92,6 +93,8 @@ async function getAbastecimento(filters = {}) {
   const period = resolvePeriod(filters);
   const params = [period.startDate, period.endDate];
   const where = filterClause(filters, params);
+  const telemetria = getTelemetriaResumoPorPlaca(filters);
+  const telemetriaPorPlaca = new Map(telemetria.byPlate.map((row) => [row.placa, row]));
 
   const baseJoin = `
     FROM frotas.abastecimentos a
@@ -196,17 +199,45 @@ async function getAbastecimento(filters = {}) {
   const km = money(s.km);
   const precoMedio = money(s.preco_medio);
   const precoAnterior = money(previous.rows[0]?.preco_medio);
-  const mediaFrota = litros > 0 ? money(km / litros) : 0;
+  const mediaFrota = telemetria.summary.mediaConsumoKmL || (litros > 0 ? money(km / litros) : 0);
 
-  const rankingRows = byVehicle.rows.map((row) => ({
-    placa: row.placa || "Sem placa",
-    modelo: row.modelo || "Nao informado",
-    litros: money(row.litros),
-    total: money(row.total),
-    km: money(row.km),
-    media: money(row.media),
-    reaisKm: num(row.km) > 0 ? money(row.total / row.km) : money(row.reais_km),
-  }));
+  const rankingRows = byVehicle.rows.map((row) => {
+    const placa = row.placa || "Sem placa";
+    const telemetriaPlaca = telemetriaPorPlaca.get(placa);
+    return {
+      placa,
+      modelo: telemetriaPlaca?.modelo || row.modelo || "Nao informado",
+      litros: telemetriaPlaca?.consumoTotalLitros || money(row.litros),
+      total: money(row.total),
+      km: telemetriaPlaca?.distanciaKm || money(row.km),
+      media: telemetriaPlaca?.mediaConsumoKmL || money(row.media),
+      mediaAbastecimento: money(row.media),
+      mediaTelemetria: telemetriaPlaca?.mediaConsumoKmL || 0,
+      consumoTotalTelemetria: telemetriaPlaca?.consumoTotalLitros || 0,
+      kmTelemetria: telemetriaPlaca?.distanciaKm || 0,
+      origemConsumo: telemetriaPlaca ? "telemetria" : "abastecimento",
+      reaisKm: num(row.km) > 0 ? money(row.total / row.km) : money(row.reais_km),
+    };
+  });
+
+  for (const telemetriaPlaca of telemetria.byPlate) {
+    if (rankingRows.some((row) => row.placa === telemetriaPlaca.placa)) continue;
+    rankingRows.push({
+      placa: telemetriaPlaca.placa,
+      modelo: telemetriaPlaca.modelo || "Telemetria",
+      marca: telemetriaPlaca.marca || "",
+      litros: telemetriaPlaca.consumoTotalLitros,
+      total: 0,
+      km: telemetriaPlaca.distanciaKm,
+      media: telemetriaPlaca.mediaConsumoKmL,
+      mediaAbastecimento: 0,
+      mediaTelemetria: telemetriaPlaca.mediaConsumoKmL,
+      consumoTotalTelemetria: telemetriaPlaca.consumoTotalLitros,
+      kmTelemetria: telemetriaPlaca.distanciaKm,
+      origemConsumo: "telemetria",
+      reaisKm: 0,
+    });
+  }
   const postoRows = bySupplier.rows.map((row) => ({
     fornecedor: row.fornecedor,
     total: money(row.total),
@@ -241,11 +272,15 @@ async function getAbastecimento(filters = {}) {
       km,
       reaisKm: km > 0 ? money(total / km) : 0,
       mediaFrota,
+      mediaTelemetria: telemetria.summary.mediaConsumoKmL,
+      kmTelemetria: telemetria.summary.distanciaKm,
+      consumoTotalTelemetria: telemetria.summary.consumoTotalLitros,
       mediaVeiculo: byVehicle.rows.length ? money(litros / byVehicle.rows.length) : 0,
       veiculos: num(s.veiculos),
       abastecimentos: num(s.abastecimentos),
       variacaoPreco: precoAnterior > 0 ? money(((precoMedio - precoAnterior) / precoAnterior) * 100) : null,
     },
+    telemetria,
     ranking: rankingRows,
     modelos: byModel.rows.map((row) => ({ modelo: row.modelo, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),
     marcas: byBrand.rows.map((row) => ({ marca: row.marca, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),
@@ -518,8 +553,8 @@ export async function getAnaliseFrota(filters = {}) {
       receitaTotal: custos.profit?.summary?.receitaTotal || 0,
       lucroTotal: custos.profit?.summary?.lucroTotal || 0,
       margem: custos.profit?.summary?.margem || 0,
-      kmRodado: abastecimento.summary?.km || 0,
-      litrosAbastecidos: abastecimento.summary?.litros || 0,
+      kmRodado: abastecimento.summary?.kmTelemetria || abastecimento.summary?.km || 0,
+      litrosAbastecidos: abastecimento.summary?.consumoTotalTelemetria || abastecimento.summary?.litros || 0,
       custoPorKm: abastecimento.summary?.reaisKm || 0,
       mediaKmLitro: abastecimento.summary?.mediaFrota || 0,
     },
