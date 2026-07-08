@@ -103,9 +103,9 @@ function baseCostCte() {
         COALESCE(vei_doc.kmatualvei, vei_cc.kmatualvei) AS km_atual,
         COALESCE(vei_doc.centrocustovei, vei_cc.centrocustovei, prt.centrocustoprt)::int AS centro_veiculo,
         CASE
-          WHEN COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text = 'T' THEN 'terceiro'
           WHEN COALESCE(vei_doc.placavei, vei_cc.placavei) IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(cfi.nomecfi, '') ILIKE '%combust%' OR COALESCE(cfi.nomecfi, '') ILIKE '%abastec%' THEN 'Abastecimento'::text
@@ -205,9 +205,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Abastecimento'::text AS tipo_custo,
         'frotas.abastecimentos'::text AS origem
@@ -262,9 +262,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(desp.nomecpv, '') ILIKE '%pedagio%' THEN 'Pedagio'::text
@@ -328,9 +328,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(prod.nomepro, '') ILIKE '%pneu%' THEN 'Pneus'
@@ -399,9 +399,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Manutencao'::text AS tipo_custo,
         'frotas.ordensservicosexternaservicos'::text AS origem
@@ -463,9 +463,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN TRIM(COALESCE(i.combustivelnep::text, '')) = 'S'
@@ -546,9 +546,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Multas'::text AS tipo_custo,
         'frotas.multastransito'::text AS origem
@@ -597,9 +597,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Pneus'::text AS tipo_custo,
         'frotas.movimentacaopneus'::text AS origem
@@ -815,9 +815,9 @@ function buildRevenueWhere(filters = {}, offset = 2) {
 
   const owner = normalizeOwner(filters.proprietario);
   if (owner === "frota") {
-    where.push("vei.placavei IS NOT NULL AND COALESCE(vei.tipopropriedadevei::text, '') <> 'T'");
+    where.push("vei.placavei IS NOT NULL AND vei.tipopropriedadevei::text = 'P'");
   } else if (owner === "terceiro") {
-    where.push("vei.tipopropriedadevei::text = 'T'");
+    where.push("COALESCE(vei.tipopropriedadevei::text, 'T') <> 'P'");
   }
 
   return { clause: `WHERE ${where.join(" AND ")}`, values };
@@ -1147,7 +1147,7 @@ export async function getCustosVeiculos(filters = {}) {
       placa: placaKey,
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
-      proprietario: row.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietario: row.tipo_propriedade === "P" ? "frota" : "terceiro",
       proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: 0,
@@ -1303,7 +1303,7 @@ export async function getCustosVeiculos(filters = {}) {
       abastecimentosJaNoFinanceiro: num(auditExtraRows[0]?.abastecimentos_ja_no_financeiro),
       abastecimentosSemKm: num(auditExtraRows[0]?.abastecimentos_sem_km),
       observacoes: [
-        "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei diferente de 'T'.",
+        "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei = 'P'; NULL e demais valores sao terceiro.",
         "Centros administrativos sem placa resolvida ficam fora quando o filtro de proprietario e frota/terceiro.",
         "Receita de lucro por veiculo vem de conhecimentos/CT-e, nao de financeiro.receber.",
       ],
@@ -1678,7 +1678,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
       placa: vehicle.placa || target,
       nome: vehicle.nome || "",
       modelo: vehicle.modelo || "",
-      proprietario: vehicle.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietario: vehicle.tipo_propriedade === "P" ? "frota" : "terceiro",
       proprietarioCodigo: vehicle.proprietario_codigo,
       kmAtual: num(vehicle.km_atual),
       dataKm: dateOnly(vehicle.data_km),

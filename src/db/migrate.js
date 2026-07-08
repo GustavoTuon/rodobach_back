@@ -22,7 +22,7 @@ export async function runMigrations() {
     for (const file of files) {
       const sql = await fs.readFile(path.join(sqlDir, file), "utf8");
       const SKIP_FILES = new Set(["004_analise_clientes.sql", "validate_financeiro_por_placa.sql"]);
-      if (SKIP_FILES.has(file)) {
+      if (SKIP_FILES.has(file) || file.startsWith("validate_")) {
         console.log(`skipped ${file} (arquivo de consulta, nao e migracao)`);
         continue;
       }

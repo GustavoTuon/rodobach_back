@@ -209,7 +209,7 @@ export async function fetchVehicles(search = "") {
       FROM frotas.veiculos veiculos
       WHERE veiculos.placavei IS NOT NULL
         AND COALESCE(veiculos.situacaovei::text, '') <> 'I'
-        AND COALESCE(veiculos.tipopropriedadevei::text, '') <> 'T'
+        AND veiculos.tipopropriedadevei::text = 'P'
         AND ($1::text = '%%' OR CONCAT_WS(' ', veiculos.placavei, veiculos.nomevei) ILIKE $1::text)
       ORDER BY veiculos.placavei
       LIMIT 80

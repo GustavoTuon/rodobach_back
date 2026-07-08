@@ -83,8 +83,8 @@ function filterClause(filters, params) {
   }
 
   const owner = normalizeOwner(filters.proprietario);
-  if (owner === "frota") where.push(`COALESCE(v.tipopropriedadevei::text, '') <> 'T'`);
-  if (owner === "terceiro") where.push(`COALESCE(v.tipopropriedadevei::text, '') = 'T'`);
+  if (owner === "frota") where.push(`v.tipopropriedadevei::text = 'P'`);
+  if (owner === "terceiro") where.push(`COALESCE(v.tipopropriedadevei::text, 'T') <> 'P'`);
 
   return where.join(" AND ");
 }
@@ -313,8 +313,8 @@ async function getFleetInventory(filters = {}) {
   const owner = normalizeOwner(filters.proprietario);
   const where = ["COALESCE(v.situacaovei::text, '') <> 'I'"];
   const params = [];
-  if (owner === "frota") where.push("COALESCE(v.tipopropriedadevei::text, '') <> 'T'");
-  if (owner === "terceiro") where.push("COALESCE(v.tipopropriedadevei::text, '') = 'T'");
+  if (owner === "frota") where.push("v.tipopropriedadevei::text = 'P'");
+  if (owner === "terceiro") where.push("COALESCE(v.tipopropriedadevei::text, 'T') <> 'P'");
   if (filters.placa) {
     params.push(String(filters.placa).trim().toUpperCase());
     where.push(`UPPER(TRIM(v.placavei::text)) = $${params.length}`);
@@ -335,8 +335,8 @@ async function getFleetInventory(filters = {}) {
   const result = await clientPool.query(`
     SELECT
       COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE COALESCE(v.tipopropriedadevei::text, '') = 'T')::int AS terceiros,
-      COUNT(*) FILTER (WHERE COALESCE(v.tipopropriedadevei::text, '') <> 'T')::int AS frota
+      COUNT(*) FILTER (WHERE COALESCE(v.tipopropriedadevei::text, 'T') <> 'P')::int AS terceiros,
+      COUNT(*) FILTER (WHERE v.tipopropriedadevei::text = 'P')::int AS frota
     FROM frotas.veiculos v
     LEFT JOIN frotas.marcas m
       ON m.codigomar = v.marcavei
@@ -391,8 +391,8 @@ async function buildManutencaoBi(manutencao = {}, filters = {}) {
 
   const filteredRows = maintenanceRows.filter((row) => {
     const vehicle = meta(row);
-    if (normalizeOwner(filters.proprietario) === "frota" && String(vehicle.tipo_propriedade || "") === "T") return false;
-    if (normalizeOwner(filters.proprietario) === "terceiro" && String(vehicle.tipo_propriedade || "") !== "T") return false;
+    if (normalizeOwner(filters.proprietario) === "frota" && String(vehicle.tipo_propriedade || "") !== "P") return false;
+    if (normalizeOwner(filters.proprietario) === "terceiro" && String(vehicle.tipo_propriedade || "T") === "P") return false;
     if (filters.modelo && !String(vehicle.modelo || row.veiculoNome || "").toLowerCase().includes(String(filters.modelo).toLowerCase())) return false;
     if (filters.marca && !String(vehicle.marca || "").toLowerCase().includes(String(filters.marca).toLowerCase())) return false;
     if (filters.ano && String(vehicle.ano_modelo || "") !== String(filters.ano)) return false;
@@ -460,7 +460,7 @@ async function buildManutencaoBi(manutencao = {}, filters = {}) {
       origemOsExterna: "frotas.ordensservicosexternaprodutos + frotas.ordensservicosexternaservicos",
       origemOsInterna: "Demais origens operacionais de manutencao sem abastecimento, multas e despesas de viagem; precisa validacao se o cliente exigir OS interna formal.",
       veiculo: "frotas.veiculos: placavei, marcavei, modelovei, anomodelovei, centrocustovei, tipopropriedadevei",
-      regraFrota: "Filtro padrao proprietario=frota exclui tipopropriedadevei = 'T'.",
+      regraFrota: "Filtro proprietario=frota considera somente tipopropriedadevei = 'P'; NULL e demais valores entram como terceiro.",
     },
   };
 }

@@ -69,7 +69,7 @@ function logRentabilidade(label, { sql, params, rows, totals } = {}) {
   });
 }
 
-const BASE_SQL = `
+export const BASE_SQL = `
   WITH params AS (
     SELECT
       $1::date AS data_inicio,
@@ -140,6 +140,8 @@ const BASE_SQL = `
       con.dataemissaocon::date AS data,
       COALESCE(con.viagemcon, cvf.viagem, con.numeroviagemcon, con.cargacontroleviagemcon) AS viagem,
       COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), cvf.veiculo_cvf) AS placa,
+      vei.tipopropriedadevei AS tipo_propriedade,
+      CASE WHEN vei.tipopropriedadevei::text = 'P' THEN 'Frota' ELSE 'Terceiro' END AS tipo_veiculo,
       con.motoristacon AS motorista_codigo,
       COALESCE(mot.nomemot, NULLIF(TRIM(con.motoristacon::text), '')) AS motorista,
       COALESCE(cvf.cidade_origem, con.cidadecoletacon) AS cidade_origem_codigo,
@@ -181,6 +183,14 @@ const BASE_SQL = `
     LEFT JOIN localidades.cidades origem ON origem.codigocid = COALESCE(cvf.cidade_origem, con.cidadecoletacon)
     LEFT JOIN localidades.cidades destino ON destino.codigocid = COALESCE(cvf.cidade_destino, con.cidadeentregacon)
     LEFT JOIN frotas.motoristas mot ON mot.codigomot = con.motoristacon AND mot.empresamot = con.empresacon
+    LEFT JOIN LATERAL (
+      SELECT v.tipopropriedadevei
+      FROM frotas.veiculos v
+      WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(COALESCE(NULLIF(con.veiculocon::text, ''), cvf.veiculo_cvf)))
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+      ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+      LIMIT 1
+    ) vei ON true
     LEFT JOIN LATERAL (
       SELECT nomecli, fantasiacli, cnpjcpfcli
       FROM gerais.clientes
@@ -358,7 +368,7 @@ export async function getRentabilidadeClientes(filters = {}) {
   const detailQuery = `
     ${BASE_SQL}
     SELECT
-      id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, motorista_codigo, motorista,
+      id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, tipo_propriedade, tipo_veiculo, motorista_codigo, motorista,
       cidade_origem_codigo, cidade_destino_codigo, origem, destino, material,
       cliente_codigo, cliente_nome, cliente_documento, clientecon, destinatariocon, destinatario_nome,
       expedidorcon, expedidor_nome, recebedorcon, recebedor_nome, tomadorservicoctecon,
@@ -391,11 +401,9 @@ export async function getRentabilidadeClientes(filters = {}) {
       ARRAY(SELECT DISTINCT material FROM final WHERE NULLIF(TRIM(material::text), '') IS NOT NULL ORDER BY material LIMIT 300) AS materiais
   `;
 
-  const [detailRes, mensalRes, optionsRes] = await Promise.all([
-    clientPool.query(detailQuery, params),
-    clientPool.query(mensalQuery, params),
-    clientPool.query(optionsQuery, params),
-  ]);
+  const detailRes = await clientPool.query(detailQuery, params);
+  const mensalRes = await clientPool.query(mensalQuery, params);
+  const optionsRes = await clientPool.query(optionsQuery, params);
 
   logRentabilidade("consultas-base", {
     sql: detailQuery,
@@ -421,6 +429,8 @@ export async function getRentabilidadeClientes(filters = {}) {
       data: dateOnly(row.data),
       viagem: row.viagem,
       placa: row.placa || "",
+      tipoPropriedade: row.tipo_propriedade || null,
+      tipoVeiculo: row.tipo_veiculo || "Terceiro",
       motorista: row.motorista || "",
       origem: row.origem || "",
       destino: row.destino || "",
