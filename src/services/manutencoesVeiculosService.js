@@ -33,6 +33,12 @@ function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
 }
 
+function normalizeOwner(value) {
+  const v = normalizeText(value || "todos").toLowerCase();
+  if (["frota", "terceiro", "terceiros", "todos"].includes(v)) return v === "terceiros" ? "terceiro" : v;
+  return "todos";
+}
+
 function resolvePeriod({ startDate, endDate } = {}) {
   return {
     startDate: startDate || daysAgoIso(29),
@@ -432,6 +438,13 @@ function buildWhere(filters = {}, offset = 2) {
     values.push(`%${normalizeText(filters.produto)}%`);
     where.push(`produto_nome ILIKE $${i}`);
     i += 1;
+  }
+  const owner = normalizeOwner(filters.proprietario);
+  if (owner === "frota") {
+    where.push(`tipo_propriedade::text = 'P'`);
+  }
+  if (owner === "terceiro") {
+    where.push(`COALESCE(tipo_propriedade::text, 'T') <> 'P'`);
   }
   if (filters.search) {
     values.push(`%${normalizeText(filters.search)}%`);

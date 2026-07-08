@@ -26,6 +26,8 @@ import {
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 import { getAnaliseFrota } from "../services/analiseFrotaService.js";
+import { getLucroViagens } from "../services/lucroViagensService.js";
+import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
 
 export const financeiroRouter = Router();
 
@@ -221,6 +223,43 @@ financeiroRouter.get("/clientes/rentabilidade", async (req, res, next) => {
   }
 });
 
+financeiroRouter.get("/financeiro/lucro-viagens", async (req, res, next) => {
+  try {
+    const data = await getLucroViagens({
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      status: req.query.status,
+      origem: req.query.origem,
+      destino: req.query.destino,
+      material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-diario", async (req, res, next) => {
+  try {
+    const data = await getFaturamentoDiario({
+      period: req.query.period || req.query.periodo,
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      status: req.query.status,
+      material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
   try {
     const data = await getFinanceiroPorPlaca({
@@ -331,6 +370,7 @@ financeiroRouter.get("/financeiro/manutencoes-veiculos", async (req, res, next) 
       fornecedor: req.query.fornecedor,
       centro: req.query.centro,
       produto: req.query.produto,
+      proprietario: req.query.proprietario,
       search: req.query.search,
       limit: req.query.limit,
     });

@@ -55,9 +55,9 @@ function normalizeTipoProprietario(value) {
 }
 
 function proprietarioWhere(tipoProprietario) {
-  if (tipoProprietario === "terceiros") return "AND v.tipopropriedadevei = 'T'";
+  if (tipoProprietario === "terceiros") return "AND COALESCE(v.tipopropriedadevei::text, 'T') <> 'P'";
   if (tipoProprietario === "todos") return "";
-  return "AND COALESCE(v.tipopropriedadevei::text, '') <> 'T'";
+  return "AND v.tipopropriedadevei::text = 'P'";
 }
 
 function lancamentoWhere(tipoProprietario) {
@@ -149,10 +149,10 @@ function financeiroBaseSql({ tableName, tableAlias, companyColumn, dateColumn, v
 // Proprietário determinado via frotas.veiculos.tipopropriedadevei.
 
 function proprietarioWhereVeiculos(tipoProprietario) {
-  if (tipoProprietario === "terceiros") return "AND v.tipopropriedadevei = 'T'";
+  if (tipoProprietario === "terceiros") return "AND COALESCE(v.tipopropriedadevei::text, 'T') <> 'P'";
   if (tipoProprietario === "todos") return "";
   // frota: tudo que não for terceiro (inclui 'P', null, etc.)
-  return "AND COALESCE(v.tipopropriedadevei::text,'') <> 'T'";
+  return "AND v.tipopropriedadevei::text = 'P'";
 }
 
 function receberConhecimentosSql(tipoProprietario) {

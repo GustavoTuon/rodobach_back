@@ -126,6 +126,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec::date >= $1
         AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
       GROUP BY rec.clienterec, rec.empresarec
     ),
@@ -141,6 +142,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
        AND rec.parcelarec = rcb.parcelarcb
       WHERE rcb.datarecebimentorcb::date >= $1
         AND rcb.datarecebimentorcb::date <= $2
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR COALESCE(rcb.clientercb, rec.clienterec) = $5::int)
       GROUP BY COALESCE(rcb.clientercb, rec.clienterec)
     ),
@@ -151,6 +153,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         MIN(rec.dataemissaorec::date) AS primeiro
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec IS NOT NULL
+        AND rec.statusrec IN (1,2)
         AND rec.dataemissaorec::date >= CURRENT_DATE - INTERVAL '3 years'
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
       GROUP BY rec.clienterec
@@ -162,6 +165,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec::date >= $3
         AND rec.dataemissaorec::date <= $4
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
       GROUP BY rec.clienterec
     ),
@@ -211,6 +215,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     FROM financeiro.receber rec
     WHERE rec.dataemissaorec::date >= $1
       AND rec.dataemissaorec::date <= $2
+      AND rec.statusrec IN (1,2)
     GROUP BY mes
     ORDER BY mes
   `;
@@ -222,6 +227,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber
       WHERE dataemissaorec::date >= $1 AND dataemissaorec::date <= $2
         AND dataemissaorec IS NOT NULL
+        AND statusrec IN (1,2)
       GROUP BY clienterec
       ORDER BY total DESC
       LIMIT 10
@@ -234,6 +240,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       INNER JOIN top10 t ON t.codigo = rec.clienterec
       WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
       GROUP BY rec.clienterec, mes
     )
     SELECT
@@ -366,10 +373,11 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         cliente: ["gerais.clientes.codigocli", "nomecli", "fantasiacli", "cnpjcpfcli"],
       },
       regras: {
+        statusReceber: "Somente statusrec IN (1,2), mesma base de recebiveis usada no DRE/Demonstrativo.",
         vencidosAntigos: includeOldOverdue ? "incluidos" : "ignorados antes de 2025-01-01",
       },
       pending: [
-        "A tela Clientes usa financeiro.receber para visao financeira; receita operacional por CT-e fica na tela Clientes Lucro.",
+        "A tela Clientes usa financeiro.receber por cliente; o DRE tambem pode incluir movimentacoes financeiras de receita sem cliente vinculado.",
         "Inadimplente foi definido como aberto vencido ha mais de 5 dias; ajuste a regra se a empresa usar outro prazo de tolerancia.",
       ],
     },
