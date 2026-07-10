@@ -1,5 +1,6 @@
 import { clientPool } from "../db/clientPool.js";
 import { getCustosVeiculos } from "./custosVeiculosService.js";
+import { getDreEmpresarial } from "./dreEmpresarialService.js";
 import { getManutencoesVeiculos } from "./manutencoesVeiculosService.js";
 import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
 
@@ -14,6 +15,7 @@ function money(value) {
 
 function dateOnly(value) {
   if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
 }
 
@@ -89,7 +91,7 @@ function filterClause(filters, params) {
   return where.join(" AND ");
 }
 
-async function getAbastecimento(filters = {}) {
+export async function getAbastecimento(filters = {}) {
   const period = resolvePeriod(filters);
   const params = [period.startDate, period.endDate];
   const where = filterClause(filters, params);
@@ -98,16 +100,46 @@ async function getAbastecimento(filters = {}) {
 
   const baseJoin = `
     FROM frotas.abastecimentos a
-    LEFT JOIN frotas.veiculos v
-      ON UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(a.veiculoaba::text))
-     AND (v.empresavei = a.empresaaba OR v.empresavei IS NULL)
+    LEFT JOIN LATERAL (
+      SELECT v.*
+      FROM frotas.veiculos v
+      WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(a.veiculoaba::text))
+        AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
+      ORDER BY (v.empresavei = a.empresaaba) DESC, v.empresavei
+      LIMIT 1
+    ) v ON true
     LEFT JOIN financeiro.centroscustos c
       ON c.codigoccs = v.centrocustovei
      AND (c.empresaccs = v.empresavei OR c.empresaccs IS NULL)
     LEFT JOIN frotas.marcas m
       ON m.codigomar = v.marcavei
      AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
+    LEFT JOIN LATERAL (
+      SELECT
+        f.codigofor,
+        COALESCE(NULLIF(f.fantasiafor, ''), NULLIF(f.nomefor, ''), 'Posto ' || f.codigofor::text) AS nome_posto,
+        f.enderecofor,
+        f.bairrofor,
+        f.cepfor,
+        cid.nomecid AS cidade,
+        est.abreviaturaest AS uf
+      FROM gerais.fornecedores f
+      LEFT JOIN localidades.cep z ON z.codigocep::text = regexp_replace(COALESCE(f.cepfor::text, ''), '\\D', '', 'g')
+      LEFT JOIN localidades.cidades cid ON cid.codigocid = z.cidadecep
+      LEFT JOIN localidades.estados est ON est.codigoest = cid.estadocid
+      WHERE f.codigofor = a.postocombustivelaba
+      ORDER BY (f.empresafor = a.empresaaba) DESC, f.empresafor
+      LIMIT 1
+    ) posto ON true
+    LEFT JOIN LATERAL (
+      SELECT p.nomepro AS nome_combustivel
+      FROM estoque.produtos p
+      WHERE p.codigopro = a.combustivelaba
+      ORDER BY (p.empresapro = a.empresaaba) DESC, p.empresapro
+      LIMIT 1
+    ) produto ON true
     WHERE ${where}
+      AND COALESCE(produto.nome_combustivel, '') ILIKE '%DIESEL%'
   `;
 
   const [summary, byVehicle, byModel, byBrand, bySupplier, rows, previous, monthly] = await Promise.all([
@@ -151,15 +183,21 @@ async function getAbastecimento(filters = {}) {
     `, params),
     clientPool.query(`
       SELECT
-        COALESCE(a.postocombustivelaba::text, 'Nao informado') AS fornecedor,
+        COALESCE(a.postocombustivelaba::text, 'Nao informado') AS fornecedor_codigo,
+        COALESCE(posto.nome_posto, 'Posto ' || a.postocombustivelaba::text, 'Nao informado') AS fornecedor,
+        posto.cidade,
+        posto.uf,
+        posto.enderecofor AS endereco,
+        posto.bairrofor AS bairro,
         COALESCE(SUM(a.totalaba), 0) AS total,
         COALESCE(SUM(a.litrosaba), 0) AS litros,
         AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio,
+        MAX(NULLIF(a.valorlitroaba, 0)) AS maior_preco,
+        MIN(NULLIF(a.valorlitroaba, 0)) AS menor_preco,
         COUNT(*)::int AS abastecimentos
       ${baseJoin}
-      GROUP BY a.postocombustivelaba
+      GROUP BY a.postocombustivelaba, posto.nome_posto, posto.cidade, posto.uf, posto.enderecofor, posto.bairrofor
       ORDER BY total DESC
-      LIMIT 20
     `, params),
     clientPool.query(`
       SELECT
@@ -171,10 +209,13 @@ async function getAbastecimento(filters = {}) {
         a.diferencakilometragemaba AS km,
         a.mediaaba AS media,
         a.postocombustivelaba AS posto,
+        COALESCE(posto.nome_posto, 'Posto ' || a.postocombustivelaba::text) AS posto_nome,
+        posto.cidade AS posto_cidade,
+        posto.uf AS posto_uf,
+        produto.nome_combustivel AS combustivel,
         a.financeiroaba AS financeiro
       ${baseJoin}
       ORDER BY a.dataaba DESC, a.codigoaba DESC
-      LIMIT 80
     `, params),
     clientPool.query(`
       SELECT AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio
@@ -239,29 +280,54 @@ async function getAbastecimento(filters = {}) {
     });
   }
   const postoRows = bySupplier.rows.map((row) => ({
+    codigo: row.fornecedor_codigo,
     fornecedor: row.fornecedor,
+    cidade: row.cidade || "",
+    uf: row.uf || "",
+    endereco: row.endereco || "",
+    bairro: row.bairro || "",
     total: money(row.total),
     litros: money(row.litros),
     precoMedio: money(row.preco_medio),
+    maiorPreco: money(row.maior_preco),
+    menorPreco: money(row.menor_preco),
     abastecimentos: num(row.abastecimentos),
   }));
-  const precoMedioPostos = postoRows.length
-    ? postoRows.reduce((sum, row) => sum + (row.total / Math.max(1, row.abastecimentos)), 0) / postoRows.length
+  const precoMedioPostos = litros > 0 ? total / litros : 0;
+  const postosComAmostra = postoRows.filter((row) => row.precoMedio > 0 && row.litros > 0 && row.abastecimentos >= 3);
+  const postosComPreco = postoRows.filter((row) => row.precoMedio > 0 && row.litros > 0);
+  const baseReferencia = postosComAmostra.length ? postosComAmostra : postosComPreco;
+  const precoReferencia = baseReferencia.length
+    ? Math.min(...baseReferencia.map((row) => row.precoMedio))
     : 0;
+  const fornecedores = postoRows.map((row) => ({
+    ...row,
+    participacao: total > 0 ? money((row.total / total) * 100) : 0,
+    diferencaPreco: precoMedioPostos > 0 ? money(((row.precoMedio / precoMedioPostos) - 1) * 100) : 0,
+    gastoAcimaMedia: precoMedioPostos > 0 ? money(Math.max(0, row.precoMedio - precoMedioPostos) * row.litros) : 0,
+    economiaPotencial: precoReferencia > 0 ? money(Math.max(0, row.precoMedio - precoReferencia) * row.litros) : 0,
+  }));
+  const economiaPotencial = money(fornecedores.reduce((sum, row) => sum + row.economiaPotencial, 0));
 
   // Alertas calculados no backend: consumo baixo (< 85% da media da frota),
-  // posto com preco medio por abastecimento acima da media geral dos postos.
+  // Posto caro considera preco por litro, ponderado pelos litros da frota.
   const alertas = {
     veiculosConsumoBaixo: rankingRows
       .filter((row) => row.media > 0 && mediaFrota > 0 && row.media < mediaFrota * 0.85)
       .sort((a, b) => a.media - b.media)
       .slice(0, 8)
       .map((row) => ({ placa: row.placa, media: row.media, mediaFrota, percentual: money((row.media / mediaFrota) * 100) })),
-    postosPrecoAlto: postoRows
-      .filter((row) => row.abastecimentos > 0 && (row.total / row.abastecimentos) > precoMedioPostos * 1.1)
-      .sort((a, b) => (b.total / b.abastecimentos) - (a.total / a.abastecimentos))
+    postosPrecoAlto: fornecedores
+      .filter((row) => row.abastecimentos >= 3 && row.precoMedio > precoMedioPostos * 1.05)
+      .sort((a, b) => b.gastoAcimaMedia - a.gastoAcimaMedia)
       .slice(0, 8)
-      .map((row) => ({ fornecedor: row.fornecedor, valorMedio: money(row.total / row.abastecimentos), mediaGeral: money(precoMedioPostos) })),
+      .map((row) => ({
+        fornecedor: row.fornecedor,
+        valorMedio: row.precoMedio,
+        mediaGeral: money(precoMedioPostos),
+        diferencaPreco: row.diferencaPreco,
+        gastoAcimaMedia: row.gastoAcimaMedia,
+      })),
   };
 
   return {
@@ -269,6 +335,7 @@ async function getAbastecimento(filters = {}) {
       litros,
       valor: total,
       precoMedio,
+      precoMedioPonderado: money(precoMedioPostos),
       km,
       reaisKm: km > 0 ? money(total / km) : 0,
       mediaFrota,
@@ -279,14 +346,16 @@ async function getAbastecimento(filters = {}) {
       veiculos: num(s.veiculos),
       abastecimentos: num(s.abastecimentos),
       variacaoPreco: precoAnterior > 0 ? money(((precoMedio - precoAnterior) / precoAnterior) * 100) : null,
+      economiaPotencial,
+      precoReferencia: money(precoReferencia),
     },
     telemetria,
     ranking: rankingRows,
     modelos: byModel.rows.map((row) => ({ modelo: row.modelo, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),
     marcas: byBrand.rows.map((row) => ({ marca: row.marca, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),
-    fornecedores: postoRows,
-    postosCaros: [...postoRows].filter((row) => row.precoMedio > 0).sort((a, b) => b.precoMedio - a.precoMedio).slice(0, 10),
-    postosBaratos: [...postoRows].filter((row) => row.precoMedio > 0).sort((a, b) => a.precoMedio - b.precoMedio).slice(0, 10),
+    fornecedores,
+    postosCaros: [...fornecedores].filter((row) => row.precoMedio > 0).sort((a, b) => b.precoMedio - a.precoMedio).slice(0, 10),
+    postosBaratos: [...fornecedores].filter((row) => row.precoMedio > 0).sort((a, b) => a.precoMedio - b.precoMedio).slice(0, 10),
     monthly: monthly.rows.map((row) => ({
       mes: row.mes,
       label: monthLabel(row.mes),
@@ -304,6 +373,10 @@ async function getAbastecimento(filters = {}) {
       km: money(row.km),
       media: money(row.media),
       posto: row.posto,
+      postoNome: row.posto_nome,
+      postoCidade: row.posto_cidade,
+      postoUf: row.posto_uf,
+      combustivel: row.combustivel,
       financeiro: Boolean(row.financeiro),
     })),
   };
@@ -347,6 +420,137 @@ async function getFleetInventory(filters = {}) {
     total: num(result.rows[0]?.total),
     frota: num(result.rows[0]?.frota),
     terceiros: num(result.rows[0]?.terceiros),
+  };
+}
+
+async function getVehicleMetaMap(plates = []) {
+  const list = [...new Set(plates.map((plate) => String(plate || "").trim().toUpperCase()).filter(Boolean))];
+  if (!list.length) return new Map();
+  const { rows } = await clientPool.query(
+    `
+      SELECT DISTINCT ON (UPPER(TRIM(v.placavei::text)))
+        UPPER(TRIM(v.placavei::text)) AS placa,
+        COALESCE(NULLIF(m.nomemar, ''), 'Marca ' || COALESCE(v.marcavei::text, '-')) AS marca,
+        COALESCE(NULLIF(v.modelovei, ''), NULLIF(v.marcamodelorenavamvei, ''), 'Nao informado') AS modelo,
+        v.anomodelovei AS ano_modelo,
+        v.tipopropriedadevei AS tipo_propriedade
+      FROM frotas.veiculos v
+      LEFT JOIN frotas.marcas m
+        ON m.codigomar = v.marcavei
+       AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
+      WHERE UPPER(TRIM(v.placavei::text)) = ANY($1::text[])
+      ORDER BY UPPER(TRIM(v.placavei::text)), v.empresavei
+    `,
+    [list],
+  );
+  return new Map(rows.map((row) => [row.placa, row]));
+}
+
+function buildDreFleetAggregates(rows = [], filters = {}, vehicleMap = new Map()) {
+  const owner = normalizeOwner(filters.proprietario);
+  const filtered = rows.filter((row) => {
+    const placa = String(row.placa || "").trim().toUpperCase();
+    if (!placa) return false;
+    const meta = vehicleMap.get(placa) || {};
+    if (owner === "frota" && String(meta.tipo_propriedade || "") !== "P") return false;
+    if (owner === "terceiro" && String(meta.tipo_propriedade || "T") === "P") return false;
+    if (filters.modelo && !String(meta.modelo || row.veiculoNome || "").toLowerCase().includes(String(filters.modelo).toLowerCase())) return false;
+    if (filters.marca && !String(meta.marca || "").toLowerCase().includes(String(filters.marca).toLowerCase())) return false;
+    if (filters.ano && String(meta.ano_modelo || "") !== String(filters.ano)) return false;
+    if (filters.centro && Number.isNaN(Number(filters.centro))) {
+      const text = String(filters.centro).toLowerCase();
+      if (!String(row.centroCusto || "").toLowerCase().includes(text)) return false;
+    }
+    return true;
+  });
+
+  const byPlate = new Map();
+  const byMonth = new Map();
+  for (const row of filtered) {
+    const placa = String(row.placa || "").trim().toUpperCase();
+    const valor = num(row.valor);
+    const receita = valor > 0 ? valor : 0;
+    const custo = valor < 0 ? Math.abs(valor) : 0;
+    const plate = byPlate.get(placa) || { placa, receita: 0, custo: 0, lancamentos: 0 };
+    plate.receita += receita;
+    plate.custo += custo;
+    plate.lancamentos += num(row.lancamentos) || 1;
+    byPlate.set(placa, plate);
+
+    const mes = dateOnly(row.mes || row.data)?.slice(0, 7);
+    if (mes) {
+      const monthly = byMonth.get(mes) || { mes, label: monthLabel(mes), receita: 0, custo: 0, lancamentos: 0 };
+      monthly.receita += receita;
+      monthly.custo += custo;
+      monthly.lancamentos += num(row.lancamentos) || 1;
+      byMonth.set(mes, monthly);
+    }
+  }
+
+  const vehicles = [...byPlate.values()].map((row) => {
+    const lucro = money(row.receita - row.custo);
+    return {
+      ...row,
+      receita: money(row.receita),
+      custo: money(row.custo),
+      lucro,
+      margem: row.receita > 0 ? money((lucro / row.receita) * 100) : (lucro < 0 ? -100 : 0),
+      statusResultado: lucro >= 0 ? "lucro" : "prejuizo",
+    };
+  }).sort((a, b) => b.receita - a.receita || b.custo - a.custo);
+
+  const receitaTotal = money(vehicles.reduce((sum, row) => sum + row.receita, 0));
+  const custoTotal = money(vehicles.reduce((sum, row) => sum + row.custo, 0));
+  const lucroTotal = money(receitaTotal - custoTotal);
+  const monthly = [...byMonth.values()].sort((a, b) => String(a.mes).localeCompare(String(b.mes))).map((row) => ({
+    ...row,
+    receita: money(row.receita),
+    custo: money(row.custo),
+    lucro: money(row.receita - row.custo),
+  }));
+
+  return {
+    summary: {
+      receitaTotal,
+      custoTotal,
+      lucroTotal,
+      margem: receitaTotal > 0 ? money((lucroTotal / receitaTotal) * 100) : (lucroTotal < 0 ? -100 : 0),
+      veiculos: vehicles.length,
+      veiculosLucro: vehicles.filter((row) => row.lucro >= 0).length,
+      veiculosPrejuizo: vehicles.filter((row) => row.lucro < 0).length,
+      veiculosCustoSemReceita: vehicles.filter((row) => row.custo > 0 && row.receita === 0).length,
+      lancamentos: filtered.reduce((sum, row) => sum + (num(row.lancamentos) || 1), 0),
+    },
+    vehicles,
+    monthly,
+    rankings: {
+      lucro: [...vehicles].sort((a, b) => b.lucro - a.lucro).slice(0, 15),
+      prejuizo: vehicles.filter((row) => row.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 15),
+      custo: [...vehicles].sort((a, b) => b.custo - a.custo).slice(0, 15),
+    },
+  };
+}
+
+async function getDreFleetView(filters = {}) {
+  const dreFilters = {
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    tipo: filters.placa ? "todos" : "frota",
+    placa: filters.placa,
+    centro: filters.centro && !Number.isNaN(Number(filters.centro)) ? Number(filters.centro) : undefined,
+    status: ["pago", "aberto", "vencido", "pendente"].includes(String(filters.situacao || "").toLowerCase())
+      ? String(filters.situacao).toLowerCase()
+      : "todos",
+  };
+  const dre = await getDreEmpresarial(dreFilters);
+  const plates = dre.rows.map((row) => row.placa).filter(Boolean);
+  const vehicleMap = await getVehicleMetaMap(plates);
+  const aggregates = buildDreFleetAggregates(dre.rows, filters, vehicleMap);
+  return {
+    period: dre.period,
+    filters: dreFilters,
+    sources: dre.sources,
+    ...aggregates,
   };
 }
 
@@ -531,14 +735,27 @@ export async function getAnaliseFrota(filters = {}) {
     limit: filters.limit || 220,
   };
 
-  const [custos, manutencao, abastecimento, inventario, mapa] = await Promise.all([
+  const [custos, manutencao, abastecimento, inventario, mapa, dreFrota] = await Promise.all([
     getCustosVeiculos(normalized),
     getManutencoesVeiculos(normalized),
     getAbastecimento(normalized),
     getFleetInventory(normalized),
     getSchemaMap(),
+    getDreFleetView(normalized),
   ]);
   const manutencaoBi = await buildManutencaoBi(manutencao, normalized);
+  const dreSummary = dreFrota.summary || {};
+  const lucroDre = {
+    ...(custos.profit || {}),
+    summary: dreSummary,
+    vehicles: dreFrota.vehicles || [],
+    rankings: dreFrota.rankings || {},
+    monthly: dreFrota.monthly || [],
+    fontes: {
+      receita: "DRE Empresarial: financeiro.receber + valorliquidorateiosreceber, filtrado por placa.",
+      custo: "DRE Empresarial: financeiro.pagar + valorliquidorateiospagar + movimentacao financeira, filtrado por placa.",
+    },
+  };
 
   return {
     period,
@@ -546,13 +763,13 @@ export async function getAnaliseFrota(filters = {}) {
     inventario,
     visaoGeral: {
       veiculosOperacao: inventario.total,
-      custoTotal: custos.summary?.custoTotal || 0,
+      custoTotal: dreSummary.custoTotal ?? custos.summary?.custoTotal ?? 0,
       custoPago: custos.summary?.custoPago || 0,
       custoAberto: custos.summary?.custoAberto || 0,
       custoVencido: custos.summary?.custoVencido || 0,
-      receitaTotal: custos.profit?.summary?.receitaTotal || 0,
-      lucroTotal: custos.profit?.summary?.lucroTotal || 0,
-      margem: custos.profit?.summary?.margem || 0,
+      receitaTotal: dreSummary.receitaTotal ?? custos.profit?.summary?.receitaTotal ?? 0,
+      lucroTotal: dreSummary.lucroTotal ?? custos.profit?.summary?.lucroTotal ?? 0,
+      margem: dreSummary.margem ?? custos.profit?.summary?.margem ?? 0,
       kmRodado: abastecimento.summary?.kmTelemetria || abastecimento.summary?.km || 0,
       litrosAbastecidos: abastecimento.summary?.consumoTotalTelemetria || abastecimento.summary?.litros || 0,
       custoPorKm: abastecimento.summary?.reaisKm || 0,
@@ -562,13 +779,15 @@ export async function getAnaliseFrota(filters = {}) {
     manutencao,
     manutencaoBi,
     abastecimento,
-    lucro: custos.profit || {},
+    lucro: lucroDre,
+    dreFrota,
     auditoria: {
       ...(custos.audit || {}),
       lancamentosSemVeiculo: manutencao.semVeiculo || { total: 0 },
       avisos: [
         ...(custos.audit?.observacoes || []),
         "Abastecimentos com financeiro=true devem ser analisados para evitar duplicidade com contas a pagar.",
+        "Receita, custo e lucro executivos da Frota BI usam a mesma base da DRE Empresarial para facilitar conciliacao.",
         "Mapa ou cidade/estado de abastecimento nao foi exibido porque frotas.abastecimentos nao possui cidade/UF direta no mapeamento usado.",
         "Classificacao preventiva x corretiva nao esta disponivel nas origens de manutencao mapeadas (OS externa, NF e movimentacao); nao foi estimada para evitar dado incorreto.",
       ],

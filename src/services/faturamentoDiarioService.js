@@ -1,5 +1,4 @@
-import { clientPool } from "../db/clientPool.js";
-import { BASE_SQL } from "./rentabilidadeClientesService.js";
+import { getLucroViagens } from "./lucroViagensService.js";
 
 function num(value) {
   const n = Number(value);
@@ -17,12 +16,19 @@ function dateOnly(value) {
 }
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 function addDaysIso(base, days) {
-  const d = new Date(`${base}T00:00:00`);
-  d.setDate(d.getDate() + days);
+  const d = new Date(`${base}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
@@ -31,9 +37,7 @@ function monthStartIso(date = new Date()) {
 }
 
 function daysAgoIso(days) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  return addDaysIso(todayIso(), -days);
 }
 
 function normalizeTipo(value) {
@@ -73,49 +77,40 @@ function pctChange(current, previous) {
   return previous > 0 ? r2(((current - previous) / previous) * 100) : null;
 }
 
-export async function getFaturamentoDiario(filters = {}) {
-  const period = resolvePeriod(filters);
-  const tipoVeiculo = normalizeTipo(filters.tipoVeiculo || filters.tipo || filters.proprietario);
-  const params = [
-    period.startDate,
-    period.endDate,
-    filters.cliente || null,
-    filters.placa || null,
-    null,
-    null,
-    filters.material || filters.produto || null,
-    tipoVeiculo,
-  ];
+function buildDias(period, lucroViagens) {
+  const dailyMap = new Map();
+  for (const viagem of lucroViagens.viagens || []) {
+    const data = dateOnly(viagem.dataFaturamento || viagem.data);
+    if (!data) continue;
+    const row = dailyMap.get(data) || {
+      data,
+      faturamento: 0,
+      custo: 0,
+      documentos: 0,
+      viagens: 0,
+      clientesSet: new Set(),
+    };
+    row.faturamento += num(viagem.receita);
+    row.custo += num(viagem.custo);
+    row.documentos += num(viagem.documentos);
+    row.viagens += 1;
+    if (viagem.cliente) row.clientesSet.add(viagem.cliente);
+    dailyMap.set(data, row);
+  }
 
-  const tipoClause = `($8::text = 'todos' OR LOWER(tipo_veiculo) = $8::text)`;
-  const dailyQuery = `
-    ${BASE_SQL}
-    SELECT
-      data::date AS data,
-      COALESCE(SUM(receita), 0) AS faturamento,
-      COALESCE(SUM(custo_total), 0) AS custo,
-      COUNT(*)::int AS documentos,
-      COUNT(DISTINCT cliente_codigo)::int AS clientes,
-      COUNT(DISTINCT COALESCE(viagem::text, id))::int AS viagens
-    FROM final
-    WHERE ${tipoClause}
-    GROUP BY data::date
-    ORDER BY data::date
-  `;
+  const filledRows = [];
+  for (let date = period.startDate; date <= period.endDate; date = addDaysIso(date, 1)) {
+    filledRows.push(dailyMap.get(date) || {
+      data: date,
+      faturamento: 0,
+      custo: 0,
+      documentos: 0,
+      viagens: 0,
+      clientesSet: new Set(),
+    });
+  }
 
-  const optionsQuery = `
-    ${BASE_SQL}
-    SELECT
-      ARRAY(SELECT DISTINCT cliente_nome FROM final WHERE cliente_nome IS NOT NULL ORDER BY cliente_nome LIMIT 300) AS clientes,
-      ARRAY(SELECT DISTINCT placa FROM final WHERE NULLIF(TRIM(placa::text), '') IS NOT NULL ORDER BY placa LIMIT 300) AS placas
-  `;
-
-  const [dailyRes, optionsRes] = await Promise.all([
-    clientPool.query(dailyQuery, params),
-    clientPool.query(optionsQuery, params.slice(0, 7)),
-  ]);
-
-  const dias = dailyRes.rows.map((row) => {
+  const dias = filledRows.map((row) => {
     const faturamento = num(row.faturamento);
     const custo = num(row.custo);
     const lucro = faturamento - custo;
@@ -127,11 +122,14 @@ export async function getFaturamentoDiario(filters = {}) {
       margem: r2(faturamento > 0 ? (lucro / faturamento) * 100 : 0),
       documentos: num(row.documentos),
       viagens: num(row.viagens),
-      clientes: num(row.clientes),
+      clientes: row.clientesSet?.size || 0,
       ticketMedio: r2(num(row.documentos) > 0 ? faturamento / num(row.documentos) : 0),
     };
   });
+  return dias;
+}
 
+function buildResumo(dias) {
   const today = todayIso();
   const yesterday = addDaysIso(today, -1);
   const byDate = new Map(dias.map((row) => [row.data, row]));
@@ -148,30 +146,46 @@ export async function getFaturamentoDiario(filters = {}) {
   const documentos = dias.reduce((sum, row) => sum + row.documentos, 0);
 
   return {
+    faturamentoHoje: r2(faturamentoHoje),
+    faturamentoOntem: r2(faturamentoOntem),
+    variacaoOntem: pctChange(faturamentoHoje, faturamentoOntem),
+    media7,
+    variacaoMedia7: pctChange(faturamentoHoje, media7),
+    media30,
+    variacaoMedia30: pctChange(faturamentoHoje, media30),
+    faturamentoTotal,
+    custoTotal,
+    lucroTotal,
+    margem: r2(faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0),
+    documentos,
+    viagens: dias.reduce((sum, row) => sum + row.viagens, 0),
+    clientesAtendidos: Math.max(0, ...dias.map((row) => row.clientes)),
+    ticketMedio: r2(documentos > 0 ? faturamentoTotal / documentos : 0),
+  };
+}
+
+export async function getFaturamentoDiario(filters = {}) {
+  const period = resolvePeriod(filters);
+  const tipoVeiculo = normalizeTipo(filters.tipoVeiculo || filters.tipo || filters.proprietario);
+  const lucroViagens = await getLucroViagens({
+    ...filters,
+    startDate: period.startDate,
+    endDate: period.endDate,
+    tipoVeiculo,
+    status: "todos",
+  });
+  const dias = buildDias(period, lucroViagens);
+  const resumo = buildResumo(dias);
+
+  return {
     periodo: period,
-    filtros: optionsRes.rows[0] || { clientes: [], placas: [] },
-    resumo: {
-      faturamentoHoje: r2(faturamentoHoje),
-      faturamentoOntem: r2(faturamentoOntem),
-      variacaoOntem: pctChange(faturamentoHoje, faturamentoOntem),
-      media7,
-      variacaoMedia7: pctChange(faturamentoHoje, media7),
-      media30,
-      variacaoMedia30: pctChange(faturamentoHoje, media30),
-      faturamentoTotal,
-      custoTotal,
-      lucroTotal,
-      margem: r2(faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0),
-      documentos,
-      viagens: dias.reduce((sum, row) => sum + row.viagens, 0),
-      clientesAtendidos: Math.max(0, ...dias.map((row) => row.clientes)),
-      ticketMedio: r2(documentos > 0 ? faturamentoTotal / documentos : 0),
-    },
+    filtros: lucroViagens.filtros || { clientes: [], placas: [] },
+    resumo,
     dias,
     audit: {
-      tabelas: ["logistica.conhecimentos", "frotas.veiculos", "gerais.clientes", "logistica.controleviagens*"],
+      tabelas: lucroViagens.audit?.tabelas || ["financeiro.receber", "logistica.conhecimentos", "logistica.controleviagens*"],
       regraTipoVeiculo: "P=Frota; T/NULL/outros=Terceiro",
-      observacao: "Faturamento diario usa CT-e emitido por dataemissaocon e evita financeiro.receber para nao duplicar receita.",
+      observacao: "Faturamento diario usa a mesma base do Lucro por Viagem, agrupando as viagens por data.",
     },
   };
 }

@@ -269,6 +269,7 @@ const BASE_QUERY = `
     SELECT
       g.grupo_id,
       COALESCE(vi.data_viagem, g.data)::date AS data,
+      g.data::date AS data_faturamento,
       g.viagem,
       g.clientes,
       COALESCE(vi.placa, g.placa) AS placa,
@@ -337,6 +338,7 @@ export async function getLucroViagens(filters = {}) {
       grupo_id,
       viagem,
       data,
+      data_faturamento,
       clientes AS cliente,
       placa,
       motorista,
@@ -381,6 +383,7 @@ export async function getLucroViagens(filters = {}) {
       id: String(row.grupo_id),
       viagem: viagemLabel,
       data: dateOnly(row.data),
+      dataFaturamento: dateOnly(row.data_faturamento),
       cliente: row.cliente || "Sem cliente vinculado",
       placa: row.placa || "",
       motorista: row.motorista || "",
