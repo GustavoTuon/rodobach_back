@@ -37,8 +37,12 @@ function monthLabel(v) {
 }
 
 function resolvePeriod(period, startDate, endDate) {
-  if (startDate && endDate) {
-    return { key: "custom", label: "Personalizado", startDate, endDate };
+  const start = dateOnly(startDate);
+  const end = dateOnly(endDate);
+  if (start || end) {
+    const now = new Date();
+    const today = toIso(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
+    return { key: "custom", label: "Personalizado", startDate: start || end, endDate: end || today };
   }
   const now = new Date();
   const ed = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -82,11 +86,12 @@ function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos
   return { status: "ativo", acao: "manter-relacionamento" };
 }
 
-export async function getAnaliseClientes({ period, startDate, endDate, cliente, status, incluirVencidosAntigos } = {}) {
+export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, incluirVencidosAntigos } = {}) {
   const resolved = resolvePeriod(period, startDate, endDate);
   const { startDate: sd, endDate: ed } = resolved;
   const includeOldOverdue = ["1", "true", "sim", "yes"].includes(String(incluirVencidosAntigos || "").toLowerCase());
   const overdueStartDate = includeOldOverdue ? "1900-01-01" : "2025-01-01";
+  const empresaFilter = empresa && String(empresa).toLowerCase() !== "todas" ? Number(empresa) || null : null;
 
   // Previous period (same duration before the current period)
   const sdDate = new Date(sd + "T00:00:00Z");
@@ -128,6 +133,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         AND rec.dataemissaorec::date <= $2
         AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec, rec.empresarec
     ),
     rec_recebido AS (
@@ -144,6 +150,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         AND rcb.datarecebimentorcb::date <= $2
         AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR COALESCE(rcb.clientercb, rec.clienterec) = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY COALESCE(rcb.clientercb, rec.clienterec)
     ),
     rec_hist AS (
@@ -156,6 +163,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         AND rec.statusrec IN (1,2)
         AND rec.dataemissaorec::date >= CURRENT_DATE - INTERVAL '3 years'
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec
     ),
     rec_prev AS (
@@ -167,6 +175,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         AND rec.dataemissaorec::date <= $4
         AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec
     ),
     combined AS (
@@ -216,6 +225,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     WHERE rec.dataemissaorec::date >= $1
       AND rec.dataemissaorec::date <= $2
       AND rec.statusrec IN (1,2)
+      AND ($3::int IS NULL OR rec.empresarec = $3::int)
     GROUP BY mes
     ORDER BY mes
   `;
@@ -228,6 +238,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       WHERE dataemissaorec::date >= $1 AND dataemissaorec::date <= $2
         AND dataemissaorec IS NOT NULL
         AND statusrec IN (1,2)
+        AND ($3::int IS NULL OR empresarec = $3::int)
       GROUP BY clienterec
       ORDER BY total DESC
       LIMIT 10
@@ -241,6 +252,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       INNER JOIN top10 t ON t.codigo = rec.clienterec
       WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
         AND rec.statusrec IN (1,2)
+        AND ($3::int IS NULL OR rec.empresarec = $3::int)
       GROUP BY rec.clienterec, mes
     )
     SELECT
@@ -258,8 +270,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     ORDER BY m.mes, m.valor DESC
   `;
 
-  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate];
-  const monthParams = [sd, ed];
+  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate, empresaFilter];
+  const monthParams = [sd, ed, empresaFilter];
 
   const dbClient = await clientPool.connect();
   let clientsRes;
@@ -344,6 +356,11 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
 
   return {
     period: resolved,
+    filters: {
+      empresa: empresaFilter,
+      cliente: clienteFilter,
+      status: status || "todos",
+    },
     summary: {
       totalFaturado,
       totalRecebido: r2(totalRecebido),
@@ -375,6 +392,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       regras: {
         statusReceber: "Somente statusrec IN (1,2), mesma base de recebiveis usada no DRE/Demonstrativo.",
         vencidosAntigos: includeOldOverdue ? "incluidos" : "ignorados antes de 2025-01-01",
+        empresa: empresaFilter ? `Somente empresa ${empresaFilter}` : "Todas as empresas",
       },
       pending: [
         "A tela Clientes usa financeiro.receber por cliente; o DRE tambem pode incluir movimentacoes financeiras de receita sem cliente vinculado.",

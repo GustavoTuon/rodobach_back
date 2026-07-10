@@ -25,9 +25,10 @@ import {
 } from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
-import { getAnaliseFrota } from "../services/analiseFrotaService.js";
+import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
+import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalComparativoService.js";
 
 export const financeiroRouter = Router();
 
@@ -195,6 +196,7 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
       period: req.query.period || req.query.periodo,
       startDate: req.query.dataInicio || req.query.startDate,
       endDate: req.query.dataFim || req.query.endDate,
+      empresa: req.query.empresa,
       cliente: req.query.cliente,
       status: req.query.status,
       incluirVencidosAntigos: req.query.incluirVencidosAntigos,
@@ -253,6 +255,23 @@ financeiroRouter.get("/financeiro/faturamento-diario", async (req, res, next) =>
       tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
       status: req.query.status,
       material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-mensal-comparativo", async (req, res, next) => {
+  try {
+    const data = await getFaturamentoMensalComparativo({
+      ano: req.query.ano || req.query.year,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      mesAno: req.query.mesAno || req.query.monthYear,
+      mesReferencia: req.query.mesReferencia || req.query.mes || req.query.month,
+      modoMes: req.query.modoMes || req.query.somenteMes,
     });
     res.json(data);
   } catch (error) {
@@ -323,6 +342,26 @@ financeiroRouter.get("/financeiro/custos-veiculos", async (req, res, next) => {
 financeiroRouter.get("/financeiro/custos-veiculos/filtros", async (_req, res, next) => {
   try {
     res.json(await getCustosVeiculosFiltros());
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/frota/abastecimentos", async (req, res, next) => {
+  try {
+    const abastecimento = await getAbastecimento({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      centro: req.query.centro,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
+      modelo: req.query.modelo,
+      marca: req.query.marca,
+      ano: req.query.ano,
+    });
+    res.json({ abastecimento });
   } catch (error) {
     next(error);
   }

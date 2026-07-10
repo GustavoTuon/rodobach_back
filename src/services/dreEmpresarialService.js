@@ -60,7 +60,7 @@ function resolvePeriod({ period, startDate, endDate, mesAno } = {}) {
 
 function normalizeTipo(value) {
   const tipo = String(value || "todos").toLowerCase();
-  if (tipo === "administrativo" || tipo === "frota") return tipo;
+  if (["frota", "terceiro", "terceiros"].includes(tipo)) return tipo === "terceiros" ? "terceiro" : tipo;
   return "todos";
 }
 
@@ -283,8 +283,9 @@ export async function getDreEmpresarial({
         'RECEITA BRUTA'::text AS categoria_dre,
         'Receita'::text AS tipo,
         'receber'::text AS origem,
-        UPPER(NULLIF(TRIM(rec.veiculorec::text), '')) AS placa,
-        vei_doc.nomevei::text AS veiculo_nome,
+        UPPER(NULLIF(TRIM(COALESCE(rec.veiculorec, vei_cc.placavei)::text), '')) AS placa,
+        COALESCE(vei_doc.nomevei, vei_cc.nomevei)::text AS veiculo_nome,
+        COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text AS tipo_propriedade,
         vlr.centrocusto AS centro_codigo,
         cc.nomeccs AS centro_nome,
         cc.mascaraccs AS centro_mascara,
@@ -295,6 +296,8 @@ export async function getDreEmpresarial({
         COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, '')) AS pessoa_nome,
         COALESCE(NULLIF(rec.documentorec::text, ''), rec.duplicatarec::text)::text AS documento,
         COALESCE(NULLIF(rec.observacaorec, ''), '')::text AS historico,
+        rota_info.rota::text AS rota,
+        rota_info.ctes::text AS ctes,
         CASE
           WHEN COALESCE(rec.valorabertorec,0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE THEN 'vencido'
           WHEN COALESCE(rec.valorabertorec,0) > 0 THEN 'aberto'
@@ -324,7 +327,7 @@ export async function getDreEmpresarial({
         LIMIT 1
       ) cfi ON true
       LEFT JOIN LATERAL (
-        SELECT v.nomevei
+        SELECT v.nomevei, v.tipopropriedadevei
         FROM frotas.veiculos v
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(rec.veiculorec::text))
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -332,11 +335,50 @@ export async function getDreEmpresarial({
         LIMIT 1
       ) vei_doc ON true
       LEFT JOIN LATERAL (
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei
+        FROM frotas.veiculos v
+        WHERE v.centrocustovei = vlr.centrocusto
+          AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
+        ORDER BY (v.empresavei = rec.empresarec) DESC, v.empresavei
+        LIMIT 1
+      ) vei_cc ON true
+      LEFT JOIN LATERAL (
         SELECT nomecli, fantasiacli
         FROM gerais.clientes
         WHERE codigocli = rec.clienterec
         LIMIT 1
       ) cli ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          STRING_AGG(DISTINCT NULLIF(CONCAT_WS(' ate ',
+            NULLIF(CONCAT_WS('/', NULLIF(origem.nomecid, ''), NULLIF(TRIM(uf_origem.abreviaturaest), '')), ''),
+            NULLIF(CONCAT_WS('/', NULLIF(destino.nomecid, ''), NULLIF(TRIM(uf_destino.abreviaturaest), '')), '')
+          ), ''), ', ') AS rota,
+          STRING_AGG(DISTINCT COALESCE(con.numeroctecon::text, con.codigocon::text), ', ') AS ctes
+        FROM (
+          SELECT rcv.serieconhecimento AS serie_cte, rcv.codigoconhecimento AS cte_codigo
+          FROM financeiro.receberconhecimentosvinculados rcv
+          WHERE rcv.empresa = rec.empresarec
+            AND rcv.serie = rec.serierec
+            AND rcv.duplicata = rec.duplicatarec
+          UNION
+          SELECT NULL::varchar AS serie_cte, rcc.conhecimentorcc AS cte_codigo
+          FROM financeiro.receberconhecimentos rcc
+          WHERE rcc.empresarcc = rec.empresarec
+            AND rcc.seriercc = rec.serierec
+            AND rcc.duplicatarcc = rec.duplicatarec
+            AND rcc.parcelarcc = rec.parcelarec
+        ) vinc
+        INNER JOIN logistica.conhecimentos con
+          ON con.empresacon = rec.empresarec
+         AND con.codigocon = vinc.cte_codigo
+         AND (vinc.serie_cte IS NULL OR con.seriecon = vinc.serie_cte)
+         AND con.statuscon = 2
+        LEFT JOIN localidades.cidades origem ON origem.codigocid = con.cidadecoletacon
+        LEFT JOIN localidades.cidades destino ON destino.codigocid = con.cidadeentregacon
+        LEFT JOIN localidades.estados uf_origem ON uf_origem.codigoest = origem.estadocid
+        LEFT JOIN localidades.estados uf_destino ON uf_destino.codigoest = destino.estadocid
+      ) rota_info ON true
       WHERE rec.statusrec IN (1,2)
         AND (p.empresa IS NULL OR rec.empresarec = p.empresa)
         AND rec.dataemissaorec::date >= p.data_inicio
@@ -354,6 +396,7 @@ export async function getDreEmpresarial({
         'pagar'::text AS origem,
         UPPER(NULLIF(TRIM(COALESCE(pag.veiculopag, vei_cc.placavei, substring(cc.nomeccs from '[A-Z]{3}[0-9][A-Z0-9][0-9]{2}'))::text), '')) AS placa,
         vei_doc.nomevei::text AS veiculo_nome,
+        COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text AS tipo_propriedade,
         vlp.centrocusto AS centro_codigo,
         cc.nomeccs AS centro_nome,
         cc.mascaraccs AS centro_mascara,
@@ -364,6 +407,8 @@ export async function getDreEmpresarial({
         COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, '')) AS pessoa_nome,
         COALESCE(NULLIF(pag.documentopag, ''), pag.duplicatapag::text)::text AS documento,
         COALESCE(NULLIF(pag.observacaopag, ''), '')::text AS historico,
+        NULL::text AS rota,
+        NULL::text AS ctes,
         CASE
           WHEN COALESCE(pag.valorabertopag,0) > 0 AND pag.datavencimentopag::date < CURRENT_DATE THEN 'vencido'
           WHEN COALESCE(pag.valorabertopag,0) > 0 THEN 'aberto'
@@ -394,7 +439,7 @@ export async function getDreEmpresarial({
         LIMIT 1
       ) cfi ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei
+        SELECT v.placavei, v.nomevei, v.tipopropriedadevei
         FROM frotas.veiculos v
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(pag.veiculopag::text))
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -402,7 +447,7 @@ export async function getDreEmpresarial({
         LIMIT 1
       ) vei_doc ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei
+        SELECT v.placavei, v.tipopropriedadevei
         FROM frotas.veiculos v
         WHERE v.centrocustovei = vlp.centrocusto
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -432,6 +477,7 @@ export async function getDreEmpresarial({
         'movimentacao'::text AS origem,
         UPPER(NULLIF(TRIM(vei_cc.placavei::text), '')) AS placa,
         NULL::text AS veiculo_nome,
+        vei_cc.tipopropriedadevei::text AS tipo_propriedade,
         mfr.centrocusto AS centro_codigo,
         cc.nomeccs AS centro_nome,
         cc.mascaraccs AS centro_mascara,
@@ -442,6 +488,8 @@ export async function getDreEmpresarial({
         NULL::text AS pessoa_nome,
         COALESCE(NULLIF(mfr.documento, ''), '')::text AS documento,
         COALESCE(NULLIF(mfr.historico, ''), '')::text AS historico,
+        NULL::text AS rota,
+        NULL::text AS ctes,
         CASE WHEN mfr.valor >= 0 THEN 'recebido' ELSE 'pago' END AS status_financeiro,
         mfr.valor::numeric AS valor,
         1::int AS lancamentos
@@ -462,7 +510,7 @@ export async function getDreEmpresarial({
         LIMIT 1
       ) cfi ON true
       LEFT JOIN LATERAL (
-        SELECT v.placavei
+        SELECT v.placavei, v.tipopropriedadevei
         FROM frotas.veiculos v
         WHERE v.centrocustovei = mfr.centrocusto
           AND NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
@@ -489,8 +537,8 @@ export async function getDreEmpresarial({
       AND (p.cliente IS NULL OR b.cliente_codigo = p.cliente)
       AND (
         p.tipo_filtro = 'todos'
-        OR (p.tipo_filtro = 'frota' AND NULLIF(TRIM(b.placa::text), '') IS NOT NULL)
-        OR (p.tipo_filtro = 'administrativo' AND NULLIF(TRIM(b.placa::text), '') IS NULL)
+        OR (p.tipo_filtro = 'frota' AND b.tipo_propriedade = 'P')
+        OR (p.tipo_filtro = 'terceiro' AND NULLIF(TRIM(b.placa::text), '') IS NOT NULL AND COALESCE(b.tipo_propriedade, 'T') <> 'P')
       )
       AND (
         p.status_filtro = 'todos'
@@ -526,10 +574,14 @@ export async function getDreEmpresarial({
       tipo: row.tipo,
       placa: extractPlate(row.placa, row.centro_nome, row.historico),
       veiculoNome: row.veiculo_nome,
+      tipoPropriedade: row.tipo_propriedade,
+      operacao: row.tipo_propriedade === "P" ? "frota" : (row.placa ? "terceiro" : "sem_placa"),
       clienteCodigo: row.cliente_codigo,
       pessoaNome: row.pessoa_nome,
       documento: row.documento,
       historico: row.historico,
+      rota: row.rota,
+      ctes: row.ctes,
       valor,
       valorAbs: Math.abs(valor),
       status: row.status_financeiro,
