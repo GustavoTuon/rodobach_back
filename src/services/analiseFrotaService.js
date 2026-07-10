@@ -147,10 +147,11 @@ export async function getAbastecimento(filters = {}) {
       SELECT
         COALESCE(SUM(a.litrosaba), 0) AS litros,
         COALESCE(SUM(a.totalaba), 0) AS total,
+        COALESCE(SUM(a.valordescontoaba), 0) AS desconto,
         COALESCE(SUM(a.diferencakilometragemaba), 0) AS km,
         COUNT(*)::int AS abastecimentos,
         COUNT(DISTINCT UPPER(TRIM(a.veiculoaba::text)))::int AS veiculos,
-        AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio
+        AVG(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS preco_medio
       ${baseJoin}
     `, params),
     clientPool.query(`
@@ -191,9 +192,11 @@ export async function getAbastecimento(filters = {}) {
         posto.bairrofor AS bairro,
         COALESCE(SUM(a.totalaba), 0) AS total,
         COALESCE(SUM(a.litrosaba), 0) AS litros,
-        AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio,
-        MAX(NULLIF(a.valorlitroaba, 0)) AS maior_preco,
-        MIN(NULLIF(a.valorlitroaba, 0)) AS menor_preco,
+        COALESCE(SUM(a.valordescontoaba), 0) AS desconto,
+        AVG(NULLIF(a.valorlitroaba, 0)) AS preco_tabela_medio,
+        AVG(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS preco_medio,
+        MAX(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS maior_preco,
+        MIN(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS menor_preco,
         COUNT(*)::int AS abastecimentos
       ${baseJoin}
       GROUP BY a.postocombustivelaba, posto.nome_posto, posto.cidade, posto.uf, posto.enderecofor, posto.bairrofor
@@ -204,7 +207,9 @@ export async function getAbastecimento(filters = {}) {
         a.dataaba::date AS data,
         UPPER(TRIM(a.veiculoaba::text)) AS placa,
         a.litrosaba AS litros,
-        a.valorlitroaba AS valor_litro,
+        a.valorlitroaba AS valor_litro_tabela,
+        COALESCE(a.valordescontoaba, 0) AS desconto,
+        a.totalaba / NULLIF(a.litrosaba, 0) AS valor_litro,
         a.totalaba AS total,
         a.diferencakilometragemaba AS km,
         a.mediaaba AS media,
@@ -218,14 +223,20 @@ export async function getAbastecimento(filters = {}) {
       ORDER BY a.dataaba DESC, a.codigoaba DESC
     `, params),
     clientPool.query(`
-      SELECT AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio
+      SELECT AVG(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS preco_medio
       FROM frotas.abastecimentos a
+      LEFT JOIN LATERAL (
+        SELECT p.nomepro FROM estoque.produtos p
+        WHERE p.codigopro = a.combustivelaba
+        ORDER BY (p.empresapro = a.empresaaba) DESC, p.empresapro LIMIT 1
+      ) produto_anterior ON true
       WHERE a.dataaba::date BETWEEN ($1::date - (($2::date - $1::date) + 1)) AND ($1::date - 1)
+        AND COALESCE(produto_anterior.nomepro, '') ILIKE '%DIESEL%'
     `, [period.startDate, period.endDate]).catch(() => ({ rows: [] })),
     clientPool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', a.dataaba), 'YYYY-MM') AS mes,
-        AVG(NULLIF(a.valorlitroaba, 0)) AS preco_medio,
+        AVG(NULLIF(a.totalaba / NULLIF(a.litrosaba, 0), 0)) AS preco_medio,
         COALESCE(SUM(a.litrosaba), 0) AS litros,
         COALESCE(SUM(a.totalaba), 0) AS total
       ${baseJoin}
@@ -236,6 +247,7 @@ export async function getAbastecimento(filters = {}) {
 
   const s = summary.rows[0] || {};
   const total = money(s.total);
+  const desconto = money(s.desconto);
   const litros = money(s.litros);
   const km = money(s.km);
   const precoMedio = money(s.preco_medio);
@@ -288,6 +300,8 @@ export async function getAbastecimento(filters = {}) {
     bairro: row.bairro || "",
     total: money(row.total),
     litros: money(row.litros),
+    desconto: money(row.desconto),
+    precoTabelaMedio: money(row.preco_tabela_medio),
     precoMedio: money(row.preco_medio),
     maiorPreco: money(row.maior_preco),
     menorPreco: money(row.menor_preco),
@@ -334,6 +348,8 @@ export async function getAbastecimento(filters = {}) {
     summary: {
       litros,
       valor: total,
+      desconto,
+      valorBruto: money(total + desconto),
       precoMedio,
       precoMedioPonderado: money(precoMedioPostos),
       km,
@@ -369,6 +385,8 @@ export async function getAbastecimento(filters = {}) {
       placa: row.placa,
       litros: money(row.litros),
       valorLitro: money(row.valor_litro),
+      valorLitroTabela: money(row.valor_litro_tabela),
+      desconto: money(row.desconto),
       total: money(row.total),
       km: money(row.km),
       media: money(row.media),
