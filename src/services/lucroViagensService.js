@@ -50,6 +50,30 @@ function statusLucro(lucro) {
   return num(lucro) >= 0 ? "lucro" : "prejuizo";
 }
 
+function margemStatus(lucro, receita) {
+  const l = num(lucro);
+  const r = num(receita);
+  const margem = r > 0 ? (l / r) * 100 : (l < 0 ? -100 : 0);
+  if (l < 0) return { id: "prejuizo", label: "Prejuizo", margem };
+  if (margem >= 30) return { id: "lucrativo", label: "Lucrativo", margem };
+  if (margem >= 10) return { id: "atencao", label: "Atencao", margem };
+  return { id: "margem-baixa", label: "Margem baixa", margem };
+}
+
+function monthKeyFromDate(iso) {
+  if (!iso) return null;
+  return `${String(iso).slice(0, 7)}-01`;
+}
+
+function monthLabel(value) {
+  if (!value) return "-";
+  const [year, month] = String(value).split("-");
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  if (Number.isNaN(date.getTime())) return value;
+  const label = new Intl.DateTimeFormat("pt-BR", { month: "short", timeZone: "UTC" }).format(date).replace(".", "");
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}/${String(year).slice(2)}`;
+}
+
 function formatGrupoId(grupoId) {
   const value = String(grupoId || "");
   const parts = value.split(":");
@@ -293,7 +317,8 @@ const BASE_QUERY = `
         WHEN vei.tipopropriedadevei::text = 'P' THEN 'Frota'
         WHEN COALESCE(vi.placa, g.placa) IS NULL THEN 'Sem placa'
         ELSE 'Terceiro'
-      END AS tipo_veiculo
+      END AS tipo_veiculo,
+      (vi.codigocvg IS NOT NULL) AS tem_viagem_vinculada
     FROM grupos g
     LEFT JOIN viagens_info vi ON vi.grupo_id = g.grupo_id
     LEFT JOIN despesas_viagem dv ON dv.viagem = g.viagem
@@ -356,7 +381,8 @@ export async function getLucroViagens(filters = {}) {
       custo_outros,
       custo_motorista,
       total_acerto,
-      saldo_motorista
+      saldo_motorista,
+      tem_viagem_vinculada
     FROM final
     ${where}
     ORDER BY data DESC, viagem DESC NULLS LAST, grupo_id DESC
@@ -365,7 +391,7 @@ export async function getLucroViagens(filters = {}) {
 
   const rowsRes = await clientPool.query(rowsQuery, params);
 
-  let viagens = rowsRes.rows.map((row) => {
+  const mapped = rowsRes.rows.map((row) => {
     const receita = num(row.receita);
     const custos = {
       motorista: r2(row.custo_motorista),
@@ -379,6 +405,7 @@ export async function getLucroViagens(filters = {}) {
     const custo = Object.values(custos).reduce((sum, value) => sum + num(value), 0);
     const lucro = receita - custo;
     const viagemLabel = row.viagem || formatGrupoId(row.grupo_id);
+    const margem = margemStatus(lucro, receita);
     return {
       id: String(row.grupo_id),
       viagem: viagemLabel,
@@ -396,22 +423,75 @@ export async function getLucroViagens(filters = {}) {
       receita: r2(receita),
       custo: r2(custo),
       lucro: r2(lucro),
-      margem: r2(receita > 0 ? (lucro / receita) * 100 : 0),
+      margem: r2(margem.margem),
       status: statusLucro(lucro),
+      statusDetalhado: margem.id,
+      statusDetalhadoLabel: margem.label,
       custos,
       totalAcerto: r2(row.total_acerto),
       saldoMotorista: r2(row.saldo_motorista),
+      temViagemVinculada: row.tem_viagem_vinculada === true,
     };
   });
 
-  if (status !== "todos") viagens = viagens.filter((row) => row.status === status);
+  // Registros sem viagem (logistica.controleviagens) vinculada nao tem base para estimar
+  // custo operacional: entram como "custo zero / margem 100%" na consulta, o que e enganoso.
+  // Ficam de fora do calculo de lucro por viagem e sao somados a parte, em semViagemVinculada.
+  const semViagem = mapped.filter((v) => !v.temViagemVinculada);
+  const comViagem = mapped.filter((v) => v.temViagemVinculada);
+
+  const viagens = status !== "todos" ? comViagem.filter((row) => row.status === status) : comViagem;
 
   const receitaTotal = r2(viagens.reduce((sum, row) => sum + row.receita, 0));
   const custoTotal = r2(viagens.reduce((sum, row) => sum + row.custo, 0));
   const lucroTotal = r2(receitaTotal - custoTotal);
   const filtros = {
-    clientes: [...new Set(rowsRes.rows.map((row) => row.cliente).filter(Boolean))].sort().slice(0, 300),
-    placas: [...new Set(rowsRes.rows.map((row) => row.placa).filter(Boolean))].sort().slice(0, 300),
+    clientes: [...new Set(comViagem.map((row) => row.cliente).filter(Boolean))].sort().slice(0, 300),
+    placas: [...new Set(comViagem.map((row) => row.placa).filter(Boolean))].sort().slice(0, 300),
+  };
+
+  const mensalMap = new Map();
+  for (const v of viagens) {
+    const key = monthKeyFromDate(v.data);
+    if (!key) continue;
+    if (!mensalMap.has(key)) mensalMap.set(key, { mes: key, receita: 0, custo: 0, quantidade: 0 });
+    const bucket = mensalMap.get(key);
+    bucket.receita += v.receita;
+    bucket.custo += v.custo;
+    bucket.quantidade += 1;
+  }
+  const mensal = Array.from(mensalMap.values())
+    .sort((a, b) => a.mes.localeCompare(b.mes))
+    .map((b) => ({
+      mes: b.mes,
+      label: monthLabel(b.mes),
+      receita: r2(b.receita),
+      custo: r2(b.custo),
+      lucro: r2(b.receita - b.custo),
+      margem: r2(b.receita > 0 ? ((b.receita - b.custo) / b.receita) * 100 : 0),
+      quantidade: b.quantidade,
+    }));
+
+  const rankings = {
+    lucro: [...viagens].sort((a, b) => b.lucro - a.lucro).slice(0, 10),
+    prejuizo: viagens.filter((v) => v.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 10),
+  };
+
+  const distribuicaoIds = ["lucrativo", "atencao", "margem-baixa", "prejuizo"];
+  const distribuicaoLabels = { lucrativo: "Lucrativo", atencao: "Atencao", "margem-baixa": "Margem baixa", prejuizo: "Prejuizo" };
+  const distribuicao = distribuicaoIds.map((id) => ({
+    id,
+    label: distribuicaoLabels[id],
+    quantidade: viagens.filter((v) => v.statusDetalhado === id).length,
+    receita: r2(viagens.filter((v) => v.statusDetalhado === id).reduce((sum, v) => sum + v.receita, 0)),
+  }));
+
+  const semViagemVinculada = {
+    quantidade: semViagem.length,
+    receita: r2(semViagem.reduce((sum, v) => sum + v.receita, 0)),
+    registros: semViagem
+      .map((v) => ({ id: v.id, viagem: v.viagem, data: v.data, cliente: v.cliente, receita: v.receita }))
+      .slice(0, 200),
   };
 
   return {
@@ -427,6 +507,10 @@ export async function getLucroViagens(filters = {}) {
       quantidadePrejuizo: viagens.filter((row) => row.lucro < 0).length,
     },
     viagens,
+    mensal,
+    rankings,
+    distribuicao,
+    semViagemVinculada,
     audit: {
       tabelas: [
         "financeiro.receber",
@@ -443,7 +527,8 @@ export async function getLucroViagens(filters = {}) {
         documento: "CT-e via financeiro.receberconhecimentosvinculados/receberconhecimentos",
         manifesto: "MDF-e via logistica.controleviagensfretes.empresamdfecvf/seriemdfecvf/mdfecvf",
         viagem: "COALESCE(conhecimentos.viagemcon, conhecimentos.cargacontroleviagemcon, conhecimentos.numeroviagemcon, controleviagensfretes.codigocvf, mdfe.viagemmdf)",
-        custos: "custos do acerto quando existe viagem vinculada; financeiro sem viagem fica com custo operacional zero",
+        custos: "custos do acerto quando existe viagem vinculada (logistica.controleviagens)",
+        semViagemVinculada: "registros de receita sem logistica.controleviagens vinculada nao entram no calculo de lucro por viagem (sem base para estimar custo); somados a parte em semViagemVinculada",
       },
     },
   };

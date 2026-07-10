@@ -59,6 +59,50 @@ function normalizeStatus(value) {
   return "todos";
 }
 
+function deriveMensalRows(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const iso = dateOnly(row.data);
+    if (!iso) continue;
+    const mesKey = `${iso.slice(0, 7)}-01`;
+    if (!map.has(mesKey)) map.set(mesKey, { mes: mesKey, receita: 0, custo: 0, quantidade: 0 });
+    const bucket = map.get(mesKey);
+    bucket.receita += num(row.receita);
+    bucket.custo += num(row.custo_total);
+    bucket.quantidade += 1;
+  }
+  return { rows: Array.from(map.values()).sort((a, b) => a.mes.localeCompare(b.mes)) };
+}
+
+function deriveOptionsRow(rows) {
+  const clientesSet = new Set();
+  const placasSet = new Set();
+  const origensSet = new Set();
+  const destinosSet = new Set();
+  const materiaisSet = new Set();
+  for (const row of rows) {
+    if (row.cliente_nome) clientesSet.add(row.cliente_nome);
+    const placa = String(row.placa || "").trim();
+    if (placa) placasSet.add(placa);
+    const origem = String(row.origem || "").trim();
+    if (origem) origensSet.add(origem);
+    const destino = String(row.destino || "").trim();
+    if (destino) destinosSet.add(destino);
+    const material = String(row.material || "").trim();
+    if (material) materiaisSet.add(material);
+  }
+  const sortSlice = (set) => Array.from(set).sort((a, b) => a.localeCompare(b)).slice(0, 300);
+  return {
+    rows: [{
+      clientes: sortSlice(clientesSet),
+      placas: sortSlice(placasSet),
+      origens: sortSlice(origensSet),
+      destinos: sortSlice(destinosSet),
+      materiais: sortSlice(materiaisSet),
+    }],
+  };
+}
+
 function logRentabilidade(label, { sql, params, rows, totals } = {}) {
   if (process.env.DEBUG_SQL !== "1") return;
   console.log("[rentabilidade-clientes]", label, {
@@ -402,16 +446,27 @@ export async function getRentabilidadeClientes(filters = {}) {
   `;
 
   const detailRes = await clientPool.query(detailQuery, params);
-  const mensalRes = await clientPool.query(mensalQuery, params);
-  const optionsRes = await clientPool.query(optionsQuery, params);
+
+  // mensal e filtros sao apenas agregacoes do mesmo resultado de "detail": derivar em JS
+  // evita rodar a cadeia pesada de CTEs (BASE_SQL) mais duas vezes no banco (~3x mais rapido).
+  // Fallback para consultas separadas apenas se o LIMIT 5000 do detail tiver sido atingido,
+  // caso em que a derivacao local ficaria incompleta.
+  const hitDetailLimit = detailRes.rowCount >= 5000;
+  const [mensalRes, optionsRes] = hitDetailLimit
+    ? await Promise.all([
+        clientPool.query(mensalQuery, params),
+        clientPool.query(optionsQuery, params),
+      ])
+    : [deriveMensalRows(detailRes.rows), deriveOptionsRow(detailRes.rows)];
 
   logRentabilidade("consultas-base", {
     sql: detailQuery,
     params,
     rows: {
       detalhes: detailRes.rowCount,
-      mensal: mensalRes.rowCount,
-      opcoes: optionsRes.rowCount,
+      mensal: mensalRes.rows.length,
+      opcoes: optionsRes.rows.length,
+      derivadoLocalmente: !hitDetailLimit,
     },
   });
 
