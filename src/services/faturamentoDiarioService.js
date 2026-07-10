@@ -79,7 +79,15 @@ function pctChange(current, previous) {
 
 function buildDias(period, lucroViagens) {
   const dailyMap = new Map();
-  for (const viagem of lucroViagens.viagens || []) {
+  const receitas = [
+    ...(lucroViagens.viagens || []).map((viagem) => ({ ...viagem, custoApurado: true })),
+    ...(lucroViagens.semViagemVinculada?.registros || []).map((registro) => ({
+      ...registro,
+      custo: 0,
+      custoApurado: false,
+    })),
+  ];
+  for (const viagem of receitas) {
     const data = dateOnly(viagem.dataFaturamento || viagem.data);
     if (!data) continue;
     const row = dailyMap.get(data) || {
@@ -88,12 +96,18 @@ function buildDias(period, lucroViagens) {
       custo: 0,
       documentos: 0,
       viagens: 0,
+      receitaSemCustoApurado: 0,
+      documentosSemCustoApurado: 0,
       clientesSet: new Set(),
     };
     row.faturamento += num(viagem.receita);
     row.custo += num(viagem.custo);
     row.documentos += num(viagem.documentos);
-    row.viagens += 1;
+    if (viagem.custoApurado) row.viagens += 1;
+    else {
+      row.receitaSemCustoApurado += num(viagem.receita);
+      row.documentosSemCustoApurado += Math.max(1, num(viagem.documentos));
+    }
     if (viagem.cliente) row.clientesSet.add(viagem.cliente);
     dailyMap.set(data, row);
   }
@@ -106,6 +120,8 @@ function buildDias(period, lucroViagens) {
       custo: 0,
       documentos: 0,
       viagens: 0,
+      receitaSemCustoApurado: 0,
+      documentosSemCustoApurado: 0,
       clientesSet: new Set(),
     });
   }
@@ -124,6 +140,8 @@ function buildDias(period, lucroViagens) {
       viagens: num(row.viagens),
       clientes: row.clientesSet?.size || 0,
       ticketMedio: r2(num(row.documentos) > 0 ? faturamento / num(row.documentos) : 0),
+      receitaSemCustoApurado: r2(row.receitaSemCustoApurado),
+      documentosSemCustoApurado: num(row.documentosSemCustoApurado),
     };
   });
   return dias;
@@ -144,6 +162,8 @@ function buildResumo(dias) {
   const custoTotal = r2(dias.reduce((sum, row) => sum + row.custo, 0));
   const lucroTotal = r2(faturamentoTotal - custoTotal);
   const documentos = dias.reduce((sum, row) => sum + row.documentos, 0);
+  const receitaSemCustoApurado = r2(dias.reduce((sum, row) => sum + row.receitaSemCustoApurado, 0));
+  const documentosSemCustoApurado = dias.reduce((sum, row) => sum + row.documentosSemCustoApurado, 0);
 
   return {
     faturamentoHoje: r2(faturamentoHoje),
@@ -161,6 +181,8 @@ function buildResumo(dias) {
     viagens: dias.reduce((sum, row) => sum + row.viagens, 0),
     clientesAtendidos: Math.max(0, ...dias.map((row) => row.clientes)),
     ticketMedio: r2(documentos > 0 ? faturamentoTotal / documentos : 0),
+    receitaSemCustoApurado,
+    documentosSemCustoApurado,
   };
 }
 
@@ -185,7 +207,7 @@ export async function getFaturamentoDiario(filters = {}) {
     audit: {
       tabelas: lucroViagens.audit?.tabelas || ["financeiro.receber", "logistica.conhecimentos", "logistica.controleviagens*"],
       regraTipoVeiculo: "P=Frota; T/NULL/outros=Terceiro",
-      observacao: "Faturamento diario usa a mesma base do Lucro por Viagem, agrupando as viagens por data.",
+      observacao: "Faturamento inclui toda a receita financeira do periodo. Receitas sem viagem vinculada entram no faturamento, mas ficam destacadas como custo nao apurado.",
     },
   };
 }

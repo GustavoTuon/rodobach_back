@@ -330,11 +330,13 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   });
 
   // ── Status filter (applied after classification) ──────────────────────────
-  let filteredClients = mapped;
+  // Na visao padrao, a tabela acompanha o periodo selecionado. O historico completo
+  // continua sendo usado nos KPIs de inatividade e fica acessivel pelo filtro dedicado.
+  let filteredClients = mapped.filter(c => c.totalPeriodo > 0);
   if (status === "ativo") {
     filteredClients = mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
   } else if (status === "sem-faturamento") {
-    filteredClients = mapped.filter(c => c.diasSemFaturar > 60);
+    filteredClients = mapped.filter(c => c.totalPeriodo === 0 && c.diasSemFaturar > 60);
   }
 
   // ── Inactive distribution ─────────────────────────────────────────────────
