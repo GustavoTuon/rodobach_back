@@ -490,7 +490,16 @@ export async function getLucroViagens(filters = {}) {
     quantidade: semViagem.length,
     receita: r2(semViagem.reduce((sum, v) => sum + v.receita, 0)),
     registros: semViagem
-      .map((v) => ({ id: v.id, viagem: v.viagem, data: v.data, cliente: v.cliente, receita: v.receita }))
+      .map((v) => ({
+        id: v.id,
+        viagem: v.viagem,
+        data: v.dataFaturamento || v.data,
+        dataFaturamento: v.dataFaturamento,
+        cliente: v.cliente,
+        placa: v.placa,
+        receita: v.receita,
+        documentos: v.documentos,
+      }))
       .slice(0, 200),
   };
 
