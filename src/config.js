@@ -17,6 +17,11 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || "rodobach-jwt-secret-TROQUE-EM-PRODUCAO",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "24h",
   telemetriaResumoDir: process.env.TELEMETRIA_RESUMO_DIR || "",
+  n8n: {
+    apiUrl: (process.env.N8N_API_URL || "").replace(/\/+$/, ""),
+    apiKey: process.env.N8N_API_KEY || "",
+    vencimentoClientesWorkflowId: process.env.N8N_VENCIMENTO_CLIENTES_WORKFLOW_ID || "",
+  },
   frontendOrigins: (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())

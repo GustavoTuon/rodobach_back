@@ -39,9 +39,11 @@ authRouter.post("/auth/login", async (req, res, next) => {
       "manutencoes-veiculos": user.perm_manutencoes_veiculos,
       clientes: user.perm_clientes,
       "clientes-lucro": user.perm_clientes_lucro ?? user.perm_clientes,
+      "status-carga": user.perm_status_carga ?? user.perm_viagens,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
       manutencao: user.perm_manutencao,
+      "automacoes-n8n": user.perm_automacoes_n8n ?? user.perm_manutencao,
     };
 
     const token = jwt.sign(

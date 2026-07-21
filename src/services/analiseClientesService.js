@@ -29,6 +29,16 @@ function toIso(d) {
   return d.toISOString().slice(0, 10);
 }
 
+function addYearsIso(base, years) {
+  const d = new Date(`${base}T00:00:00Z`);
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return toIso(d);
+}
+
+function pctChange(current, previous) {
+  return previous > 0 ? r2(((num(current) - num(previous)) / num(previous)) * 100) : null;
+}
+
 function monthLabel(v) {
   if (!v) return "-";
   return new Intl.DateTimeFormat("pt-BR", { month: "short", year: "2-digit", timeZone: "UTC" })
@@ -101,6 +111,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const prevStart = new Date(prevEnd.getTime() - durationMs);
   const prevSd = toIso(prevStart);
   const prevEd = toIso(prevEnd);
+  const yoySd = addYearsIso(sd, -1);
+  const yoyEd = addYearsIso(ed, -1);
 
   const clienteFilter = cliente && !isNaN(Number(cliente)) ? Number(cliente) : null;
 
@@ -178,6 +190,19 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
         AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec
     ),
+    rec_yoy AS (
+      SELECT
+        rec.clienterec   AS codigo,
+        SUM(rec.valorduplicatarec) AS total_ano_anterior,
+        COUNT(*)::int AS documentos_ano_anterior
+      FROM financeiro.receber rec
+      WHERE rec.dataemissaorec::date >= $8
+        AND rec.dataemissaorec::date <= $9
+        AND rec.statusrec IN (1,2)
+        AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
+      GROUP BY rec.clienterec
+    ),
     combined AS (
       SELECT
         COALESCE(rp.codigo, rh.codigo)           AS codigo,
@@ -191,11 +216,14 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
         rh.ultimo_global,
         rh.primeiro,
         (CURRENT_DATE - rh.ultimo_global)::int    AS dias_sem_faturar,
-        COALESCE(rprev.total_anterior, 0)         AS total_anterior
+        COALESCE(rprev.total_anterior, 0)         AS total_anterior,
+        COALESCE(ry.total_ano_anterior, 0)        AS total_ano_anterior,
+        COALESCE(ry.documentos_ano_anterior, 0)::int AS documentos_ano_anterior
       FROM rec_hist rh
       LEFT JOIN rec_period  rp    ON rp.codigo    = rh.codigo
       LEFT JOIN rec_recebido rr    ON rr.codigo    = rh.codigo
       LEFT JOIN rec_prev    rprev ON rprev.codigo = rh.codigo
+      LEFT JOIN rec_yoy     ry    ON ry.codigo    = rh.codigo
     )
     SELECT
       c.*,
@@ -270,7 +298,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
     ORDER BY m.mes, m.valor DESC
   `;
 
-  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate, empresaFilter];
+  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate, empresaFilter, yoySd, yoyEd];
   const monthParams = [sd, ed, empresaFilter];
 
   const dbClient = await clientPool.connect();
@@ -294,6 +322,9 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const totalAberto = allClients.reduce((s, c) => s + num(c.total_aberto), 0);
   const totalVencido = allClients.reduce((s, c) => s + num(c.total_vencido), 0);
   const totalInadimplente = allClients.reduce((s, c) => s + num(c.total_inadimplente), 0);
+  const documentosPeriodo = withBilling.reduce((s, c) => s + num(c.lancamentos_periodo), 0);
+  const totalAnoAnterior = allClients.reduce((s, c) => s + num(c.total_ano_anterior), 0);
+  const documentosAnoAnterior = allClients.reduce((s, c) => s + num(c.documentos_ano_anterior), 0);
   const clientesAtivos = withBilling.length;
   const ticketMedio = clientesAtivos > 0 ? totalFaturado / clientesAtivos : 0;
   const topCliente = withBilling.length > 0 ? withBilling[0] : null;
@@ -302,10 +333,14 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const mapped = allClients.map((c) => {
     const total = num(c.total_periodo);
     const anterior = num(c.total_anterior);
+    const totalYoY = num(c.total_ano_anterior);
+    const docsYoY = num(c.documentos_ano_anterior);
     const dias = num(c.dias_sem_faturar);
     const lanc = num(c.lancamentos_periodo);
     const ticketC = lanc > 0 ? total / lanc : 0;
     const crescimento = anterior > 0 ? ((total - anterior) / anterior) * 100 : null;
+    const crescimentoAnoAnterior = pctChange(total, totalYoY);
+    const variacaoDocumentosAnoAnterior = pctChange(lanc, docsYoY);
     const { status: statusComercial, acao } = classifyClient(total, anterior, dias, lanc, ticketMedio, totalFaturado);
 
     return {
@@ -320,12 +355,17 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
       totalVencido: r2(c.total_vencido),
       totalInadimplente: r2(c.total_inadimplente),
       totalAnterior: anterior,
+      totalAnoAnterior: r2(totalYoY),
       lancamentos: lanc,
+      documentosPeriodo: lanc,
+      documentosAnoAnterior: docsYoY,
       ticketMedio: ticketC,
       diasSemFaturar: dias,
       statusComercial,
       acaoSugerida: acao,
       crescimento,
+      crescimentoAnoAnterior,
+      variacaoDocumentosAnoAnterior,
     };
   });
 
@@ -369,6 +409,11 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
       totalAberto: r2(totalAberto),
       totalVencido: r2(totalVencido),
       totalInadimplente: r2(totalInadimplente),
+      totalAnoAnterior: r2(totalAnoAnterior),
+      documentosPeriodo,
+      documentosAnoAnterior,
+      variacaoAnoAnterior: pctChange(totalFaturado, totalAnoAnterior),
+      variacaoDocumentosAnoAnterior: pctChange(documentosPeriodo, documentosAnoAnterior),
       clientesAtivos,
       ticketMedio,
       topCliente: topCliente
