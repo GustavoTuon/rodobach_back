@@ -25,16 +25,16 @@ INSERT INTO antt_tabela (
   data_vigencia,
   versao
 ) VALUES
-  ('Truck', 3, 'geral', 'normal', 5.1295, 523.33, CURRENT_DATE, 'planilha_inicial'),
-  ('Bitruck', 4, 'geral', 'normal', 5.8178, 568.72, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 5e', 5, 'geral', 'normal', 6.7126, 635.08, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 6e', 6, 'geral', 'normal', 7.4124, 648.95, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 7e', 7, 'geral', 'normal', 8.1252, 803.22, CURRENT_DATE, 'planilha_inicial'),
-  ('Truck', 3, 'geral', 'alto_desempenho', 4.3727, 190.36, CURRENT_DATE, 'planilha_inicial'),
-  ('Bitruck', 4, 'geral', 'alto_desempenho', 4.9981, 205.98, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 5e', 5, 'geral', 'alto_desempenho', 5.7382, 220.28, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 6e', 6, 'geral', 'alto_desempenho', 6.4057, 223.27, CURRENT_DATE, 'planilha_inicial'),
-  ('Carreta 7e', 7, 'geral', 'alto_desempenho', 6.8012, 263.47, CURRENT_DATE, 'planilha_inicial')
+  ('Truck', 3, 'geral', 'normal', 5.0977, 541.86, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Bitruck', 4, 'geral', 'normal', 5.7822, 588.86, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 5e', 5, 'geral', 'normal', 6.6718, 657.56, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 6e', 6, 'geral', 'normal', 7.3547, 671.93, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 7e', 7, 'geral', 'normal', 8.0927, 831.66, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Truck', 3, 'geral', 'alto_desempenho', 4.3141, 195.81, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Bitruck', 4, 'geral', 'alto_desempenho', 4.9335, 213.27, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 5e', 5, 'geral', 'alto_desempenho', 5.6630, 228.08, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 6e', 6, 'geral', 'alto_desempenho', 6.3124, 231.17, DATE '2026-07-17', 'resolucao_antt_6084_2026'),
+  ('Carreta 7e', 7, 'geral', 'alto_desempenho', 6.7218, 272.80, DATE '2026-07-17', 'resolucao_antt_6084_2026')
 ON CONFLICT (eixos, operacao, tipo_carga, data_vigencia, versao) DO UPDATE SET
   tipo_veiculo = EXCLUDED.tipo_veiculo,
   km_valor = EXCLUDED.km_valor,

@@ -49,10 +49,11 @@ freteRouter.get("/frete/antt", async (_req, res, next) => {
   try {
     // Tenta tabela nova (antt_tabela) — pivot por tipo_carga
     const { rows } = await pool.query(`
-      SELECT id, tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga, data_vigencia, versao
+      SELECT DISTINCT ON (eixos, tipo_carga)
+        id, tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga, data_vigencia, versao
       FROM ${tableName("antt_tabela")}
       WHERE ativo = true
-      ORDER BY eixos, tipo_carga
+      ORDER BY eixos, tipo_carga, data_vigencia DESC, atualizado_em DESC, id DESC
     `);
 
     if (rows.length) {
@@ -128,7 +129,7 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
         SELECT tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga
         FROM ${tableName("antt_tabela")}
         WHERE ativo = true AND eixos = $1 AND tipo_carga = $2
-        ORDER BY data_vigencia DESC LIMIT 1
+        ORDER BY data_vigencia DESC, atualizado_em DESC, id DESC LIMIT 1
       `, [Number(eixos), tipoCarga]);
       tarifaRow = rows[0];
     } catch { /* ignora, tenta tabela antiga */ }

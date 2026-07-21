@@ -32,6 +32,12 @@ function addDaysIso(base, days) {
   return d.toISOString().slice(0, 10);
 }
 
+function addYearsIso(base, years) {
+  const d = new Date(`${base}T00:00:00Z`);
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return d.toISOString().slice(0, 10);
+}
+
 function monthStartIso(date = new Date()) {
   return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), "01"].join("-");
 }
@@ -186,24 +192,86 @@ function buildResumo(dias) {
   };
 }
 
+function buildComparativoAnoAnterior(period, dias, diasAnoAnterior, resumo, resumoAnoAnterior) {
+  const anterioresPorData = new Map(diasAnoAnterior.map((row) => [row.data, row]));
+  return {
+    periodo: {
+      startDate: addYearsIso(period.startDate, -1),
+      endDate: addYearsIso(period.endDate, -1),
+    },
+    resumo: {
+      faturamentoTotal: resumoAnoAnterior.faturamentoTotal,
+      custoTotal: resumoAnoAnterior.custoTotal,
+      lucroTotal: resumoAnoAnterior.lucroTotal,
+      margem: resumoAnoAnterior.margem,
+      documentos: resumoAnoAnterior.documentos,
+      viagens: resumoAnoAnterior.viagens,
+      ticketMedio: resumoAnoAnterior.ticketMedio,
+      receitaSemCustoApurado: resumoAnoAnterior.receitaSemCustoApurado,
+      documentosSemCustoApurado: resumoAnoAnterior.documentosSemCustoApurado,
+    },
+    variacao: {
+      faturamento: pctChange(resumo.faturamentoTotal, resumoAnoAnterior.faturamentoTotal),
+      custo: pctChange(resumo.custoTotal, resumoAnoAnterior.custoTotal),
+      lucro: pctChange(resumo.lucroTotal, resumoAnoAnterior.lucroTotal),
+      documentos: pctChange(resumo.documentos, resumoAnoAnterior.documentos),
+      viagens: pctChange(resumo.viagens, resumoAnoAnterior.viagens),
+      ticketMedio: pctChange(resumo.ticketMedio, resumoAnoAnterior.ticketMedio),
+    },
+    dias: dias.map((row) => {
+      const dataAnoAnterior = addYearsIso(row.data, -1);
+      const anterior = anterioresPorData.get(dataAnoAnterior) || {};
+      return {
+        data: row.data,
+        dataAnoAnterior,
+        faturamento: row.faturamento,
+        faturamentoAnoAnterior: r2(anterior.faturamento),
+        variacaoFaturamento: pctChange(row.faturamento, num(anterior.faturamento)),
+        lucro: row.lucro,
+        lucroAnoAnterior: r2(anterior.lucro),
+        variacaoLucro: pctChange(row.lucro, num(anterior.lucro)),
+        documentos: row.documentos,
+        documentosAnoAnterior: num(anterior.documentos),
+        variacaoDocumentos: pctChange(row.documentos, num(anterior.documentos)),
+      };
+    }),
+  };
+}
+
 export async function getFaturamentoDiario(filters = {}) {
   const period = resolvePeriod(filters);
+  const previousYearPeriod = {
+    startDate: addYearsIso(period.startDate, -1),
+    endDate: addYearsIso(period.endDate, -1),
+  };
   const tipoVeiculo = normalizeTipo(filters.tipoVeiculo || filters.tipo || filters.proprietario);
-  const lucroViagens = await getLucroViagens({
-    ...filters,
-    startDate: period.startDate,
-    endDate: period.endDate,
-    tipoVeiculo,
-    status: "todos",
-  });
+  const [lucroViagens, lucroViagensAnoAnterior] = await Promise.all([
+    getLucroViagens({
+      ...filters,
+      startDate: period.startDate,
+      endDate: period.endDate,
+      tipoVeiculo,
+      status: "todos",
+    }),
+    getLucroViagens({
+      ...filters,
+      startDate: previousYearPeriod.startDate,
+      endDate: previousYearPeriod.endDate,
+      tipoVeiculo,
+      status: "todos",
+    }),
+  ]);
   const dias = buildDias(period, lucroViagens);
+  const diasAnoAnterior = buildDias(previousYearPeriod, lucroViagensAnoAnterior);
   const resumo = buildResumo(dias);
+  const resumoAnoAnterior = buildResumo(diasAnoAnterior);
 
   return {
     periodo: period,
     filtros: lucroViagens.filtros || { clientes: [], placas: [] },
     resumo,
     dias,
+    comparativoAnoAnterior: buildComparativoAnoAnterior(period, dias, diasAnoAnterior, resumo, resumoAnoAnterior),
     audit: {
       tabelas: lucroViagens.audit?.tabelas || ["financeiro.receber", "logistica.conhecimentos", "logistica.controleviagens*"],
       regraTipoVeiculo: "P=Frota; T/NULL/outros=Terceiro",

@@ -20,11 +20,11 @@ INSERT INTO frete_tabela_antt (
   alto_desempenho_custo_deslocamento,
   alto_desempenho_carga_descarga
 ) VALUES
-  ('Truck', 3, 5.1295, 523.33, 4.3727, 190.36),
-  ('Bitruck', 4, 5.8178, 568.72, 4.9981, 205.98),
-  ('Carreta 5e', 5, 6.7126, 635.08, 5.7382, 220.28),
-  ('Carreta 6e', 6, 7.4124, 648.95, 6.4057, 223.27),
-  ('Carreta 7e', 7, 8.1252, 803.22, 6.8012, 263.47)
+  ('Truck', 3, 5.0977, 541.86, 4.3141, 195.81),
+  ('Bitruck', 4, 5.7822, 588.86, 4.9335, 213.27),
+  ('Carreta 5e', 5, 6.6718, 657.56, 5.6630, 228.08),
+  ('Carreta 6e', 6, 7.3547, 671.93, 6.3124, 231.17),
+  ('Carreta 7e', 7, 8.0927, 831.66, 6.7218, 272.80)
 ON CONFLICT (eixos) DO UPDATE SET
   tipo_veiculo = EXCLUDED.tipo_veiculo,
   normal_custo_deslocamento = EXCLUDED.normal_custo_deslocamento,
