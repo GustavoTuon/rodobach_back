@@ -280,14 +280,67 @@ const BASE_QUERY = `
     WHERE codigocvd IN (SELECT viagem FROM grupos WHERE viagem IS NOT NULL)
     GROUP BY codigocvd
   ),
-  abastecimentos_viagem AS (
-    SELECT cva.codigocva AS viagem, COALESCE(SUM(aba.totalaba), 0)::numeric AS abastecimentos
+  cartas_frete_documentos AS (
+    SELECT DISTINCT
+      de.viagem_resolvida AS viagem,
+      cfr.empresacfr,
+      cfr.seriecfr,
+      cfr.codigocfr,
+      COALESCE(cfr.valorliquidocfr, cfr.valorfretecfr, 0)::numeric AS motorista,
+      COALESCE(cfr.valorpedagiocfr, cfr.valorpedagionaoreembolsavelcfr, cfr.valorpedagioconhecimentocfr, 0)::numeric AS pedagio,
+      COALESCE(cfr.valordiariacfr, 0)::numeric AS diarias,
+      COALESCE(cfr.valorcombustivelcfr, 0)::numeric AS combustivel,
+      COALESCE(cfr.valoroutroscfr, cfr.totaldespesasacessoriascfr, 0)::numeric AS outros
+    FROM documento_enriquecido de
+    INNER JOIN logistica.cartasfretesconhecimentos cfc
+      ON cfc.empresaconhecimentocfc = de.empresacon
+     AND cfc.serieconhecimentocfc = de.seriecon
+     AND cfc.conhecimentocfc = de.codigocon
+    INNER JOIN logistica.cartasfretes cfr
+      ON cfr.empresacfr = cfc.empresacfc
+     AND cfr.seriecfr = cfc.seriecfc
+     AND cfr.codigocfr = cfc.codigocfc
+    WHERE de.viagem_resolvida IS NOT NULL
+      AND COALESCE(cfr.statuscfr, 0) <> 3
+  ),
+  cartas_frete_viagem AS (
+    SELECT
+      viagem,
+      COALESCE(SUM(motorista), 0)::numeric AS motorista,
+      COALESCE(SUM(pedagio), 0)::numeric AS pedagio,
+      COALESCE(SUM(diarias), 0)::numeric AS diarias,
+      COALESCE(SUM(combustivel), 0)::numeric AS combustivel,
+      COALESCE(SUM(outros), 0)::numeric AS outros
+    FROM cartas_frete_documentos
+    GROUP BY viagem
+  ),
+  abastecimentos_documentos AS (
+    SELECT DISTINCT
+      cva.codigocva AS viagem,
+      aba.empresaaba,
+      aba.codigoaba,
+      COALESCE(aba.totalaba, 0)::numeric AS total
     FROM logistica.controleviagensabastecimentos cva
     JOIN frotas.abastecimentos aba
       ON aba.empresaaba = cva.empresaabastecimentocva
      AND aba.codigoaba = cva.abastecimentocva
     WHERE cva.codigocva IN (SELECT viagem FROM grupos WHERE viagem IS NOT NULL)
-    GROUP BY cva.codigocva
+
+    UNION
+
+    SELECT DISTINCT
+      aba.viagemaba AS viagem,
+      aba.empresaaba,
+      aba.codigoaba,
+      COALESCE(aba.totalaba, 0)::numeric AS total
+    FROM frotas.abastecimentos aba
+    WHERE aba.viagemaba IN (SELECT viagem FROM grupos WHERE viagem IS NOT NULL)
+      AND COALESCE(aba.statusaba, 0) <> 3
+  ),
+  abastecimentos_viagem AS (
+    SELECT viagem, COALESCE(SUM(total), 0)::numeric AS abastecimentos
+    FROM abastecimentos_documentos
+    GROUP BY viagem
   ),
   final AS (
     SELECT
@@ -304,12 +357,12 @@ const BASE_QUERY = `
       g.manifestos,
       g.fretes,
       g.receita,
-      COALESCE(NULLIF(vi.totalabastecimentoscvg, 0), av.abastecimentos, 0)::numeric AS custo_abastecimentos,
+      COALESCE(NULLIF(vi.totalabastecimentoscvg, 0), av.abastecimentos, cf.combustivel, 0)::numeric AS custo_abastecimentos,
       COALESCE(NULLIF(vi.totaldespesascvg, 0), dv.despesas, 0)::numeric AS custo_despesas,
-      COALESCE(vi.totalpedagiocvg, 0)::numeric AS custo_pedagio,
-      COALESCE(vi.totaldiariascvg, 0)::numeric AS custo_diarias,
-      COALESCE(vi.totaldespesasextrascvg, 0)::numeric AS custo_outros,
-      COALESCE(NULLIF(vi.valorcomissaomotoristacvg, 0), NULLIF(vi.totaldespesasvalorcomissaocvg, 0), NULLIF(g.custo_motorista_fretes, 0), 0)::numeric AS custo_motorista,
+      COALESCE(NULLIF(vi.totalpedagiocvg, 0), cf.pedagio, 0)::numeric AS custo_pedagio,
+      COALESCE(NULLIF(vi.totaldiariascvg, 0), cf.diarias, 0)::numeric AS custo_diarias,
+      COALESCE(NULLIF(vi.totaldespesasextrascvg, 0), cf.outros, 0)::numeric AS custo_outros,
+      COALESCE(NULLIF(vi.valorcomissaomotoristacvg, 0), NULLIF(g.custo_motorista_fretes, 0), NULLIF(cf.motorista, 0), 0)::numeric AS custo_motorista,
       COALESCE(vi.totalviagemcvg, 0)::numeric AS total_acerto,
       COALESCE(vi.saldomotoristacvg, 0)::numeric AS saldo_motorista,
       vei.tipopropriedadevei AS tipo_propriedade,
@@ -323,6 +376,7 @@ const BASE_QUERY = `
     LEFT JOIN viagens_info vi ON vi.grupo_id = g.grupo_id
     LEFT JOIN despesas_viagem dv ON dv.viagem = g.viagem
     LEFT JOIN abastecimentos_viagem av ON av.viagem = g.viagem
+    LEFT JOIN cartas_frete_viagem cf ON cf.viagem = g.viagem
     LEFT JOIN LATERAL (
       SELECT v.tipopropriedadevei, v.nomevei
       FROM frotas.veiculos v
@@ -477,6 +531,40 @@ export async function getLucroViagens(filters = {}) {
     prejuizo: viagens.filter((v) => v.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 10),
   };
 
+  const veiculosMap = new Map();
+  for (const viagem of viagens) {
+    const key = viagem.placa || "SEM_PLACA";
+    if (!veiculosMap.has(key)) {
+      veiculosMap.set(key, {
+        placa: viagem.placa || "Sem placa",
+        tipoVeiculo: viagem.tipoVeiculo || "Sem placa",
+        viagens: 0,
+        documentos: 0,
+        faturamento: 0,
+        custo: 0,
+        lucro: 0,
+        ultimaData: viagem.data,
+      });
+    }
+    const item = veiculosMap.get(key);
+    item.viagens += 1;
+    item.documentos += num(viagem.documentos);
+    item.faturamento += viagem.receita;
+    item.custo += viagem.custo;
+    item.lucro += viagem.lucro;
+    if (!item.ultimaData || String(viagem.data || "").localeCompare(String(item.ultimaData || "")) > 0) item.ultimaData = viagem.data;
+  }
+
+  const veiculos = Array.from(veiculosMap.values())
+    .map((item) => ({
+      ...item,
+      faturamento: r2(item.faturamento),
+      custo: r2(item.custo),
+      lucro: r2(item.lucro),
+      margem: r2(item.faturamento > 0 ? (item.lucro / item.faturamento) * 100 : 0),
+    }))
+    .sort((a, b) => b.faturamento - a.faturamento);
+
   const distribuicaoIds = ["lucrativo", "atencao", "margem-baixa", "prejuizo"];
   const distribuicaoLabels = { lucrativo: "Lucrativo", atencao: "Atencao", "margem-baixa": "Margem baixa", prejuizo: "Prejuizo" };
   const distribuicao = distribuicaoIds.map((id) => ({
@@ -516,6 +604,7 @@ export async function getLucroViagens(filters = {}) {
       quantidadePrejuizo: viagens.filter((row) => row.lucro < 0).length,
     },
     viagens,
+    veiculos,
     mensal,
     rankings,
     distribuicao,
@@ -530,13 +619,18 @@ export async function getLucroViagens(filters = {}) {
         "logistica.controleviagensfretes",
         "logistica.mdfe",
         "logistica.controleviagens",
+        "logistica.controleviagensdespesas",
+        "logistica.controleviagensabastecimentos",
+        "logistica.cartasfretes",
+        "logistica.cartasfretesconhecimentos",
+        "frotas.abastecimentos",
       ],
       campos: {
         receita: "financeiro.valorliquidorateiosreceber.valorliquido, mesma base de receita bruta da DRE",
         documento: "CT-e via financeiro.receberconhecimentosvinculados/receberconhecimentos",
         manifesto: "MDF-e via logistica.controleviagensfretes.empresamdfecvf/seriemdfecvf/mdfecvf",
         viagem: "COALESCE(conhecimentos.viagemcon, conhecimentos.cargacontroleviagemcon, conhecimentos.numeroviagemcon, controleviagensfretes.codigocvf, mdfe.viagemmdf)",
-        custos: "custos do acerto quando existe viagem vinculada (logistica.controleviagens)",
+        custos: "somente custos operacionais vinculados a viagem: acerto da viagem, despesas, abastecimentos e carta-frete vinculada ao CT-e; custos fixos/financeiros ficam fora",
         semViagemVinculada: "registros de receita sem logistica.controleviagens vinculada nao entram no calculo de lucro por viagem (sem base para estimar custo); somados a parte em semViagemVinculada",
       },
     },
