@@ -13,7 +13,7 @@ function r2(value) {
 }
 
 function brl(value) {
-  return num(value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  return num(value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }).replace(/\u00a0/g, " ");
 }
 
 function pct(value) {
@@ -63,6 +63,14 @@ function monthLabel(value) {
   const date = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
   const label = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric", timeZone: "UTC" }).format(date);
   return label.replace(/^./, (char) => char.toUpperCase());
+}
+
+function monthTitle(value) {
+  const [year, month] = String(value || "").slice(0, 7).split("-");
+  if (!year || !month) return "-";
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  const label = new Intl.DateTimeFormat("pt-BR", { month: "long", timeZone: "UTC" }).format(date);
+  return `${label.toUpperCase()}/${year}`;
 }
 
 const RECEITA_SQL = `
@@ -143,33 +151,45 @@ function buildFiliais(rows) {
 
 function buildMessage({ dataReferencia, mesInicio, meta, dia, mes }) {
   const lines = [
-    "FATURAMENTO DIARIO",
-    `Faturamento do dia anterior: ${dateBR(dataReferencia)}`,
+    "📊 FATURAMENTO DIÁRIO",
+    "",
+    `📅 Referência: ${dateBR(dataReferencia)}`,
     "",
   ];
 
   for (const filial of dia.filiais) {
-    lines.push(`Filial ${filial.filial}:`);
-    if (filial.frota > 0) lines.push(`- FROTA: ${brl(filial.frota)}`);
-    if (filial.terceiro > 0) lines.push(`- TERCEIRO: ${brl(filial.terceiro)}`);
-    lines.push(`Total: ${brl(filial.total)}`, "");
+    lines.push(
+      `🏢 Filial ${filial.filial}`,
+      `🚛 Frota: ${brl(filial.frota)}`,
+      `🚚 Terceiros: ${brl(filial.terceiro)}`,
+      ""
+    );
   }
 
   lines.push(
-    "RESUMO POR TIPO:",
-    `- FROTA: ${brl(dia.frota)}`,
-    `- TERCEIRO: ${brl(dia.terceiro)}`,
+    `💰 Total do dia: ${brl(dia.total)}`,
     "",
-    `TOTAL DO DIA: ${brl(dia.total)}`,
+    "────────────────────",
     "",
-    `DADOS DE ${monthLabel(mesInicio).toUpperCase()}:`,
-    `- Frota: ${brl(mes.frota)}`,
-    `- Terceiro: ${brl(mes.terceiro)}`,
-    `- Total Mes: ${brl(mes.total)}`,
-    `- Meta: ${brl(meta)}`,
-    `- % Meta Atingida: ${pct(meta > 0 ? (mes.total / meta) * 100 : 0)}`,
+    `📈 ${monthTitle(mesInicio)}`,
     "",
-    `Contribuicao do dia para meta de ${monthLabel(mesInicio).split(" ")[0]}: ${pct(meta > 0 ? (dia.total / meta) * 100 : 0)}`
+    `🚛 Frota: ${brl(mes.frota)}`,
+    `🚚 Terceiros: ${brl(mes.terceiro)}`,
+    "",
+    "💰 Faturamento acumulado:",
+    brl(mes.total),
+    "",
+    "🎯 Meta do mês:",
+    brl(meta),
+    "",
+    "✅ Meta atingida:",
+    pct(meta > 0 ? (mes.total / meta) * 100 : 0),
+    "",
+    "📌 Faltam:",
+    brl(Math.max(0, meta - mes.total)),
+    "",
+    "📅 Contribuição de ontem para a meta:",
+    pct(meta > 0 ? (dia.total / meta) * 100 : 0)
   );
 
   return lines.join("\n");
