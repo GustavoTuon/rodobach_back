@@ -153,7 +153,7 @@ function buildMessage({ dataReferencia, mesInicio, meta, dia, mes }) {
   const lines = [
     "📊 FATURAMENTO DIÁRIO",
     "",
-    `📅 Referência: ${dateBR(dataReferencia)}`,
+    `📅 Faturamento do dia anterior: ${dateBR(dataReferencia)}`,
     "",
   ];
 
