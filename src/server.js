@@ -15,6 +15,7 @@ import { manutencaoRouter } from "./routes/manutencao.js";
 import { whatsappRouter } from "./routes/whatsapp.js";
 import { conducaoRouter } from "./routes/conducao.js";
 import { automacoesRouter } from "./routes/automacoes.js";
+import { abastecimentoAcordosRouter } from "./routes/abastecimentoAcordos.js";
 import { statusCargaRouter } from "./routes/statusCarga.js";
 
 const app = express();
@@ -97,6 +98,7 @@ app.use("/api", manutencaoRouter);
 app.use("/api", whatsappRouter);
 app.use("/api", conducaoRouter);
 app.use("/api", automacoesRouter);
+app.use("/api", abastecimentoAcordosRouter);
 app.use("/api", statusCargaRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
