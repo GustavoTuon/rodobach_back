@@ -16,6 +16,7 @@ function r2(value) {
 }
 
 function logAnaliseClientes(label, { sql, params, rows, totals } = {}) {
+  if (process.env.DEBUG_SQL !== "1") return;
   console.log("[analise-clientes]", label, {
     params,
     rows,
@@ -28,6 +29,16 @@ function toIso(d) {
   return d.toISOString().slice(0, 10);
 }
 
+function addYearsIso(base, years) {
+  const d = new Date(`${base}T00:00:00Z`);
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return toIso(d);
+}
+
+function pctChange(current, previous) {
+  return previous > 0 ? r2(((num(current) - num(previous)) / num(previous)) * 100) : null;
+}
+
 function monthLabel(v) {
   if (!v) return "-";
   return new Intl.DateTimeFormat("pt-BR", { month: "short", year: "2-digit", timeZone: "UTC" })
@@ -36,8 +47,12 @@ function monthLabel(v) {
 }
 
 function resolvePeriod(period, startDate, endDate) {
-  if (startDate && endDate) {
-    return { key: "custom", label: "Personalizado", startDate, endDate };
+  const start = dateOnly(startDate);
+  const end = dateOnly(endDate);
+  if (start || end) {
+    const now = new Date();
+    const today = toIso(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
+    return { key: "custom", label: "Personalizado", startDate: start || end, endDate: end || today };
   }
   const now = new Date();
   const ed = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -81,9 +96,12 @@ function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos
   return { status: "ativo", acao: "manter-relacionamento" };
 }
 
-export async function getAnaliseClientes({ period, startDate, endDate, cliente, status } = {}) {
+export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, incluirVencidosAntigos } = {}) {
   const resolved = resolvePeriod(period, startDate, endDate);
   const { startDate: sd, endDate: ed } = resolved;
+  const includeOldOverdue = ["1", "true", "sim", "yes"].includes(String(incluirVencidosAntigos || "").toLowerCase());
+  const overdueStartDate = includeOldOverdue ? "1900-01-01" : "2025-01-01";
+  const empresaFilter = empresa && String(empresa).toLowerCase() !== "todas" ? Number(empresa) || null : null;
 
   // Previous period (same duration before the current period)
   const sdDate = new Date(sd + "T00:00:00Z");
@@ -93,6 +111,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const prevStart = new Date(prevEnd.getTime() - durationMs);
   const prevSd = toIso(prevStart);
   const prevEd = toIso(prevEnd);
+  const yoySd = addYearsIso(sd, -1);
+  const yoyEd = addYearsIso(ed, -1);
 
   const clienteFilter = cliente && !isNaN(Number(cliente)) ? Number(cliente) : null;
 
@@ -105,12 +125,16 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         SUM(rec.valorduplicatarec)  AS total_periodo,
         SUM(COALESCE(rec.valorabertorec, 0)) AS total_aberto,
         SUM(CASE
-          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE
+          WHEN COALESCE(rec.valorabertorec, 0) > 0
+            AND rec.datavencimentorec::date >= $6::date
+            AND rec.datavencimentorec::date < CURRENT_DATE
             THEN COALESCE(rec.valorabertorec, 0)
           ELSE 0
         END) AS total_vencido,
         SUM(CASE
-          WHEN COALESCE(rec.valorabertorec, 0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE - INTERVAL '5 days'
+          WHEN COALESCE(rec.valorabertorec, 0) > 0
+            AND rec.datavencimentorec::date >= $6::date
+            AND rec.datavencimentorec::date < CURRENT_DATE - INTERVAL '5 days'
             THEN COALESCE(rec.valorabertorec, 0)
           ELSE 0
         END) AS total_inadimplente,
@@ -119,7 +143,9 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec::date >= $1
         AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec, rec.empresarec
     ),
     rec_recebido AS (
@@ -134,7 +160,9 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
        AND rec.parcelarec = rcb.parcelarcb
       WHERE rcb.datarecebimentorcb::date >= $1
         AND rcb.datarecebimentorcb::date <= $2
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR COALESCE(rcb.clientercb, rec.clienterec) = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY COALESCE(rcb.clientercb, rec.clienterec)
     ),
     rec_hist AS (
@@ -144,8 +172,10 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         MIN(rec.dataemissaorec::date) AS primeiro
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec IS NOT NULL
+        AND rec.statusrec IN (1,2)
         AND rec.dataemissaorec::date >= CURRENT_DATE - INTERVAL '3 years'
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec
     ),
     rec_prev AS (
@@ -155,7 +185,22 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       WHERE rec.dataemissaorec::date >= $3
         AND rec.dataemissaorec::date <= $4
+        AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
+      GROUP BY rec.clienterec
+    ),
+    rec_yoy AS (
+      SELECT
+        rec.clienterec   AS codigo,
+        SUM(rec.valorduplicatarec) AS total_ano_anterior,
+        COUNT(*)::int AS documentos_ano_anterior
+      FROM financeiro.receber rec
+      WHERE rec.dataemissaorec::date >= $8
+        AND rec.dataemissaorec::date <= $9
+        AND rec.statusrec IN (1,2)
+        AND ($5::int IS NULL OR rec.clienterec = $5::int)
+        AND ($7::int IS NULL OR rec.empresarec = $7::int)
       GROUP BY rec.clienterec
     ),
     combined AS (
@@ -171,11 +216,14 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         rh.ultimo_global,
         rh.primeiro,
         (CURRENT_DATE - rh.ultimo_global)::int    AS dias_sem_faturar,
-        COALESCE(rprev.total_anterior, 0)         AS total_anterior
+        COALESCE(rprev.total_anterior, 0)         AS total_anterior,
+        COALESCE(ry.total_ano_anterior, 0)        AS total_ano_anterior,
+        COALESCE(ry.documentos_ano_anterior, 0)::int AS documentos_ano_anterior
       FROM rec_hist rh
       LEFT JOIN rec_period  rp    ON rp.codigo    = rh.codigo
       LEFT JOIN rec_recebido rr    ON rr.codigo    = rh.codigo
       LEFT JOIN rec_prev    rprev ON rprev.codigo = rh.codigo
+      LEFT JOIN rec_yoy     ry    ON ry.codigo    = rh.codigo
     )
     SELECT
       c.*,
@@ -204,6 +252,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     FROM financeiro.receber rec
     WHERE rec.dataemissaorec::date >= $1
       AND rec.dataemissaorec::date <= $2
+      AND rec.statusrec IN (1,2)
+      AND ($3::int IS NULL OR rec.empresarec = $3::int)
     GROUP BY mes
     ORDER BY mes
   `;
@@ -215,6 +265,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber
       WHERE dataemissaorec::date >= $1 AND dataemissaorec::date <= $2
         AND dataemissaorec IS NOT NULL
+        AND statusrec IN (1,2)
+        AND ($3::int IS NULL OR empresarec = $3::int)
       GROUP BY clienterec
       ORDER BY total DESC
       LIMIT 10
@@ -227,6 +279,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       FROM financeiro.receber rec
       INNER JOIN top10 t ON t.codigo = rec.clienterec
       WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
+        AND ($3::int IS NULL OR rec.empresarec = $3::int)
       GROUP BY rec.clienterec, mes
     )
     SELECT
@@ -244,8 +298,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
     ORDER BY m.mes, m.valor DESC
   `;
 
-  const params = [sd, ed, prevSd, prevEd, clienteFilter];
-  const monthParams = [sd, ed];
+  const params = [sd, ed, prevSd, prevEd, clienteFilter, overdueStartDate, empresaFilter, yoySd, yoyEd];
+  const monthParams = [sd, ed, empresaFilter];
 
   const dbClient = await clientPool.connect();
   let clientsRes;
@@ -268,6 +322,9 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const totalAberto = allClients.reduce((s, c) => s + num(c.total_aberto), 0);
   const totalVencido = allClients.reduce((s, c) => s + num(c.total_vencido), 0);
   const totalInadimplente = allClients.reduce((s, c) => s + num(c.total_inadimplente), 0);
+  const documentosPeriodo = withBilling.reduce((s, c) => s + num(c.lancamentos_periodo), 0);
+  const totalAnoAnterior = allClients.reduce((s, c) => s + num(c.total_ano_anterior), 0);
+  const documentosAnoAnterior = allClients.reduce((s, c) => s + num(c.documentos_ano_anterior), 0);
   const clientesAtivos = withBilling.length;
   const ticketMedio = clientesAtivos > 0 ? totalFaturado / clientesAtivos : 0;
   const topCliente = withBilling.length > 0 ? withBilling[0] : null;
@@ -276,10 +333,14 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
   const mapped = allClients.map((c) => {
     const total = num(c.total_periodo);
     const anterior = num(c.total_anterior);
+    const totalYoY = num(c.total_ano_anterior);
+    const docsYoY = num(c.documentos_ano_anterior);
     const dias = num(c.dias_sem_faturar);
     const lanc = num(c.lancamentos_periodo);
     const ticketC = lanc > 0 ? total / lanc : 0;
     const crescimento = anterior > 0 ? ((total - anterior) / anterior) * 100 : null;
+    const crescimentoAnoAnterior = pctChange(total, totalYoY);
+    const variacaoDocumentosAnoAnterior = pctChange(lanc, docsYoY);
     const { status: statusComercial, acao } = classifyClient(total, anterior, dias, lanc, ticketMedio, totalFaturado);
 
     return {
@@ -294,21 +355,28 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
       totalVencido: r2(c.total_vencido),
       totalInadimplente: r2(c.total_inadimplente),
       totalAnterior: anterior,
+      totalAnoAnterior: r2(totalYoY),
       lancamentos: lanc,
+      documentosPeriodo: lanc,
+      documentosAnoAnterior: docsYoY,
       ticketMedio: ticketC,
       diasSemFaturar: dias,
       statusComercial,
       acaoSugerida: acao,
       crescimento,
+      crescimentoAnoAnterior,
+      variacaoDocumentosAnoAnterior,
     };
   });
 
   // ── Status filter (applied after classification) ──────────────────────────
-  let filteredClients = mapped;
+  // Na visao padrao, a tabela acompanha o periodo selecionado. O historico completo
+  // continua sendo usado nos KPIs de inatividade e fica acessivel pelo filtro dedicado.
+  let filteredClients = mapped.filter(c => c.totalPeriodo > 0);
   if (status === "ativo") {
     filteredClients = mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
   } else if (status === "sem-faturamento") {
-    filteredClients = mapped.filter(c => c.diasSemFaturar > 60);
+    filteredClients = mapped.filter(c => c.totalPeriodo === 0 && c.diasSemFaturar > 60);
   }
 
   // ── Inactive distribution ─────────────────────────────────────────────────
@@ -330,12 +398,22 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
 
   return {
     period: resolved,
+    filters: {
+      empresa: empresaFilter,
+      cliente: clienteFilter,
+      status: status || "todos",
+    },
     summary: {
       totalFaturado,
       totalRecebido: r2(totalRecebido),
       totalAberto: r2(totalAberto),
       totalVencido: r2(totalVencido),
       totalInadimplente: r2(totalInadimplente),
+      totalAnoAnterior: r2(totalAnoAnterior),
+      documentosPeriodo,
+      documentosAnoAnterior,
+      variacaoAnoAnterior: pctChange(totalFaturado, totalAnoAnterior),
+      variacaoDocumentosAnoAnterior: pctChange(documentosPeriodo, documentosAnoAnterior),
       clientesAtivos,
       ticketMedio,
       topCliente: topCliente
@@ -358,8 +436,13 @@ export async function getAnaliseClientes({ period, startDate, endDate, cliente, 
         abertoVencido: ["receber.valorabertorec", "receber.datavencimentorec"],
         cliente: ["gerais.clientes.codigocli", "nomecli", "fantasiacli", "cnpjcpfcli"],
       },
+      regras: {
+        statusReceber: "Somente statusrec IN (1,2), mesma base de recebiveis usada no DRE/Demonstrativo.",
+        vencidosAntigos: includeOldOverdue ? "incluidos" : "ignorados antes de 2025-01-01",
+        empresa: empresaFilter ? `Somente empresa ${empresaFilter}` : "Todas as empresas",
+      },
       pending: [
-        "A tela Clientes usa financeiro.receber para visao financeira; receita operacional por CT-e fica na tela Clientes Lucro.",
+        "A tela Clientes usa financeiro.receber por cliente; o DRE tambem pode incluir movimentacoes financeiras de receita sem cliente vinculado.",
         "Inadimplente foi definido como aberto vencido ha mais de 5 dias; ajuste a regra se a empresa usar outro prazo de tolerancia.",
       ],
     },

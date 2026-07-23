@@ -13,6 +13,7 @@ import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
 import { getRentabilidadeClientes } from "../services/rentabilidadeClientesService.js";
 import {
+  getAuditoriaCustosVeiculos,
   getCustosVeiculoDetalhe,
   getCustosVeiculos,
   getCustosVeiculosFiltros,
@@ -24,6 +25,10 @@ import {
 } from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
+import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
+import { getLucroViagens } from "../services/lucroViagensService.js";
+import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
+import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalComparativoService.js";
 
 export const financeiroRouter = Router();
 
@@ -191,8 +196,10 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
       period: req.query.period || req.query.periodo,
       startDate: req.query.dataInicio || req.query.startDate,
       endDate: req.query.dataFim || req.query.endDate,
+      empresa: req.query.empresa,
       cliente: req.query.cliente,
       status: req.query.status,
+      incluirVencidosAntigos: req.query.incluirVencidosAntigos,
     });
     res.json(data);
   } catch (error) {
@@ -218,6 +225,60 @@ financeiroRouter.get("/clientes/rentabilidade", async (req, res, next) => {
   }
 });
 
+financeiroRouter.get("/financeiro/lucro-viagens", async (req, res, next) => {
+  try {
+    const data = await getLucroViagens({
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      status: req.query.status,
+      origem: req.query.origem,
+      destino: req.query.destino,
+      material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-diario", async (req, res, next) => {
+  try {
+    const data = await getFaturamentoDiario({
+      period: req.query.period || req.query.periodo,
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      status: req.query.status,
+      material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-mensal-comparativo", async (req, res, next) => {
+  try {
+    const data = await getFaturamentoMensalComparativo({
+      ano: req.query.ano || req.query.year,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      tipoVeiculo: req.query.tipoVeiculo || req.query.proprietario,
+      mesAno: req.query.mesAno || req.query.monthYear,
+      mesReferencia: req.query.mesReferencia || req.query.mes || req.query.month,
+      modoMes: req.query.modoMes || req.query.somenteMes,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
   try {
     const data = await getFinanceiroPorPlaca({
@@ -225,6 +286,29 @@ financeiroRouter.get("/financeiro/por-placa", async (req, res, next) => {
       startDate: req.query.startDate || req.query.dataInicio,
       endDate: req.query.endDate || req.query.dataFim,
       tipoProprietario: req.query.tipoProprietario,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/frota/analise", async (req, res, next) => {
+  try {
+    const data = await getAnaliseFrota({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      centro: req.query.centro,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
+      tipoCusto: req.query.tipoCusto,
+      situacao: req.query.situacao,
+      modelo: req.query.modelo,
+      marca: req.query.marca,
+      ano: req.query.ano,
+      limit: req.query.limit,
     });
     res.json(data);
   } catch (error) {
@@ -263,6 +347,37 @@ financeiroRouter.get("/financeiro/custos-veiculos/filtros", async (_req, res, ne
   }
 });
 
+financeiroRouter.get("/frota/abastecimentos", async (req, res, next) => {
+  try {
+    const abastecimento = await getAbastecimento({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      centro: req.query.centro,
+      fornecedor: req.query.fornecedor,
+      empresa: req.query.empresa,
+      proprietario: req.query.proprietario,
+      modelo: req.query.modelo,
+      marca: req.query.marca,
+      ano: req.query.ano,
+    });
+    res.json({ abastecimento });
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/auditoria", async (req, res, next) => {
+  try {
+    res.json(await getAuditoriaCustosVeiculos({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
 financeiroRouter.get("/financeiro/custos-veiculos/:placa", async (req, res, next) => {
   try {
     const data = await getCustosVeiculoDetalhe(req.params.placa, {
@@ -294,6 +409,7 @@ financeiroRouter.get("/financeiro/manutencoes-veiculos", async (req, res, next) 
       fornecedor: req.query.fornecedor,
       centro: req.query.centro,
       produto: req.query.produto,
+      proprietario: req.query.proprietario,
       search: req.query.search,
       limit: req.query.limit,
     });

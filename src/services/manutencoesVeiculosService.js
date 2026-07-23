@@ -33,6 +33,12 @@ function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
 }
 
+function normalizeOwner(value) {
+  const v = normalizeText(value || "todos").toLowerCase();
+  if (["frota", "terceiro", "terceiros", "todos"].includes(v)) return v === "terceiros" ? "terceiro" : v;
+  return "todos";
+}
+
 function resolvePeriod({ startDate, endDate } = {}) {
   return {
     startDate: startDate || daysAgoIso(29),
@@ -433,6 +439,13 @@ function buildWhere(filters = {}, offset = 2) {
     where.push(`produto_nome ILIKE $${i}`);
     i += 1;
   }
+  const owner = normalizeOwner(filters.proprietario);
+  if (owner === "frota") {
+    where.push(`tipo_propriedade::text = 'P'`);
+  }
+  if (owner === "terceiro") {
+    where.push(`COALESCE(tipo_propriedade::text, 'T') <> 'P'`);
+  }
   if (filters.search) {
     values.push(`%${normalizeText(filters.search)}%`);
     where.push(
@@ -449,11 +462,13 @@ function buildWhere(filters = {}, offset = 2) {
 
 async function queryRows(sql, params) {
   const { rows } = await clientPool.query(sql, params);
-  console.log("[manutencoes-veiculos] sql", {
-    params,
-    rows: rows.length,
-    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
-  });
+  if (process.env.DEBUG_SQL === "1") {
+    console.log("[manutencoes-veiculos] sql", {
+      params,
+      rows: rows.length,
+      sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+    });
+  }
   return rows;
 }
 
@@ -514,7 +529,7 @@ export async function getManutencoesVeiculos(filters = {}) {
   const cte = custosVeiculoCte();
   const limit = Math.min(Math.max(Number(filters.limit) || 500, 50), 2000);
 
-  const [summaryRows, monthlyRows, rankingRows, categoriaRows, fornecedorRows, produtoRows, detalhesRows] = await Promise.all([
+  const [summaryRows, monthlyRows, rankingRows, categoriaRows, fornecedorRows, produtoRows, detalhesRows, semVeiculoRows] = await Promise.all([
     queryRows(
       `${cte}
       SELECT
@@ -601,6 +616,32 @@ export async function getManutencoesVeiculos(filters = {}) {
       LIMIT ${limit}`,
       params
     ),
+    // Lancamentos descartados do CTE principal por nao terem placa resolvida (usado so na auditoria).
+    queryRows(
+      `
+      SELECT
+        (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
+          WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
+            AND COALESCE(aba.totalaba, 0) <> 0
+            AND NULLIF(TRIM(aba.veiculoaba::text), '') IS NULL) AS abastecimento,
+        (SELECT COUNT(*)::int FROM frotas.ordensservicosexternaprodutos i
+          JOIN frotas.ordensservicosexterna o ON o.empresaose = i.empresaoep AND o.serieose = i.serieoep AND o.codigoose = i.codigooep AND o.fornecedorose = i.fornecedoroep
+          WHERE COALESCE(o.dataentradaose, o.dataemissaoose)::date >= $1::date AND COALESCE(o.dataentradaose, o.dataemissaoose)::date <= $2::date
+            AND COALESCE(i.totalitemoep, 0) <> 0
+            AND NULLIF(TRIM(COALESCE(NULLIF(i.veiculooep,''), o.veiculoose)::text), '') IS NULL) AS os_externa_produtos,
+        (SELECT COUNT(*)::int FROM frotas.ordensservicosexternaservicos i
+          JOIN frotas.ordensservicosexterna o ON o.empresaose = i.empresaoes AND o.serieose = i.serieoes AND o.codigoose = i.codigooes AND o.fornecedorose = i.fornecedoroes
+          WHERE COALESCE(o.dataentradaose, o.dataemissaoose)::date >= $1::date AND COALESCE(o.dataentradaose, o.dataemissaoose)::date <= $2::date
+            AND COALESCE(i.totalitemoes, 0) <> 0
+            AND NULLIF(TRIM(COALESCE(NULLIF(i.veiculooes,''), o.veiculoose)::text), '') IS NULL) AS os_externa_servicos,
+        (SELECT COUNT(*)::int FROM frotas.multastransito m
+          WHERE COALESCE(m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date >= $1::date
+            AND COALESCE(m.dataentradamtr, m.dataemissaomtr, m.datainfracaomtr)::date <= $2::date
+            AND (COALESCE(m.valormtr, 0) - COALESCE(m.valordescontomtr, 0) + COALESCE(m.valorjurosmtr, 0)) <> 0
+            AND NULLIF(TRIM(m.veiculomtr::text), '') IS NULL) AS multas
+      `,
+      [period.startDate, period.endDate]
+    ),
   ]);
 
   const summary = mapSummary(summaryRows[0] || {});
@@ -646,6 +687,17 @@ export async function getManutencoesVeiculos(filters = {}) {
       lancamentos: num(row.lancamentos),
     })),
     lancamentos: detalhesRows.map(mapLancamento),
+    semVeiculo: {
+      abastecimento: num(semVeiculoRows[0]?.abastecimento),
+      osExternaProdutos: num(semVeiculoRows[0]?.os_externa_produtos),
+      osExternaServicos: num(semVeiculoRows[0]?.os_externa_servicos),
+      multas: num(semVeiculoRows[0]?.multas),
+      total:
+        num(semVeiculoRows[0]?.abastecimento) +
+        num(semVeiculoRows[0]?.os_externa_produtos) +
+        num(semVeiculoRows[0]?.os_externa_servicos) +
+        num(semVeiculoRows[0]?.multas),
+    },
   };
 }
 

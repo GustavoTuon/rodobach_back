@@ -59,7 +59,52 @@ function normalizeStatus(value) {
   return "todos";
 }
 
+function deriveMensalRows(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const iso = dateOnly(row.data);
+    if (!iso) continue;
+    const mesKey = `${iso.slice(0, 7)}-01`;
+    if (!map.has(mesKey)) map.set(mesKey, { mes: mesKey, receita: 0, custo: 0, quantidade: 0 });
+    const bucket = map.get(mesKey);
+    bucket.receita += num(row.receita);
+    bucket.custo += num(row.custo_total);
+    bucket.quantidade += 1;
+  }
+  return { rows: Array.from(map.values()).sort((a, b) => a.mes.localeCompare(b.mes)) };
+}
+
+function deriveOptionsRow(rows) {
+  const clientesSet = new Set();
+  const placasSet = new Set();
+  const origensSet = new Set();
+  const destinosSet = new Set();
+  const materiaisSet = new Set();
+  for (const row of rows) {
+    if (row.cliente_nome) clientesSet.add(row.cliente_nome);
+    const placa = String(row.placa || "").trim();
+    if (placa) placasSet.add(placa);
+    const origem = String(row.origem || "").trim();
+    if (origem) origensSet.add(origem);
+    const destino = String(row.destino || "").trim();
+    if (destino) destinosSet.add(destino);
+    const material = String(row.material || "").trim();
+    if (material) materiaisSet.add(material);
+  }
+  const sortSlice = (set) => Array.from(set).sort((a, b) => a.localeCompare(b)).slice(0, 300);
+  return {
+    rows: [{
+      clientes: sortSlice(clientesSet),
+      placas: sortSlice(placasSet),
+      origens: sortSlice(origensSet),
+      destinos: sortSlice(destinosSet),
+      materiais: sortSlice(materiaisSet),
+    }],
+  };
+}
+
 function logRentabilidade(label, { sql, params, rows, totals } = {}) {
+  if (process.env.DEBUG_SQL !== "1") return;
   console.log("[rentabilidade-clientes]", label, {
     params,
     rows,
@@ -68,7 +113,7 @@ function logRentabilidade(label, { sql, params, rows, totals } = {}) {
   });
 }
 
-const BASE_SQL = `
+export const BASE_SQL = `
   WITH params AS (
     SELECT
       $1::date AS data_inicio,
@@ -139,6 +184,8 @@ const BASE_SQL = `
       con.dataemissaocon::date AS data,
       COALESCE(con.viagemcon, cvf.viagem, con.numeroviagemcon, con.cargacontroleviagemcon) AS viagem,
       COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), cvf.veiculo_cvf) AS placa,
+      vei.tipopropriedadevei AS tipo_propriedade,
+      CASE WHEN vei.tipopropriedadevei::text = 'P' THEN 'Frota' ELSE 'Terceiro' END AS tipo_veiculo,
       con.motoristacon AS motorista_codigo,
       COALESCE(mot.nomemot, NULLIF(TRIM(con.motoristacon::text), '')) AS motorista,
       COALESCE(cvf.cidade_origem, con.cidadecoletacon) AS cidade_origem_codigo,
@@ -180,6 +227,14 @@ const BASE_SQL = `
     LEFT JOIN localidades.cidades origem ON origem.codigocid = COALESCE(cvf.cidade_origem, con.cidadecoletacon)
     LEFT JOIN localidades.cidades destino ON destino.codigocid = COALESCE(cvf.cidade_destino, con.cidadeentregacon)
     LEFT JOIN frotas.motoristas mot ON mot.codigomot = con.motoristacon AND mot.empresamot = con.empresacon
+    LEFT JOIN LATERAL (
+      SELECT v.tipopropriedadevei
+      FROM frotas.veiculos v
+      WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(COALESCE(NULLIF(con.veiculocon::text, ''), cvf.veiculo_cvf)))
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+      ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+      LIMIT 1
+    ) vei ON true
     LEFT JOIN LATERAL (
       SELECT nomecli, fantasiacli, cnpjcpfcli
       FROM gerais.clientes
@@ -357,7 +412,7 @@ export async function getRentabilidadeClientes(filters = {}) {
   const detailQuery = `
     ${BASE_SQL}
     SELECT
-      id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, motorista_codigo, motorista,
+      id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, tipo_propriedade, tipo_veiculo, motorista_codigo, motorista,
       cidade_origem_codigo, cidade_destino_codigo, origem, destino, material,
       cliente_codigo, cliente_nome, cliente_documento, clientecon, destinatariocon, destinatario_nome,
       expedidorcon, expedidor_nome, recebedorcon, recebedor_nome, tomadorservicoctecon,
@@ -390,19 +445,28 @@ export async function getRentabilidadeClientes(filters = {}) {
       ARRAY(SELECT DISTINCT material FROM final WHERE NULLIF(TRIM(material::text), '') IS NOT NULL ORDER BY material LIMIT 300) AS materiais
   `;
 
-  const [detailRes, mensalRes, optionsRes] = await Promise.all([
-    clientPool.query(detailQuery, params),
-    clientPool.query(mensalQuery, params),
-    clientPool.query(optionsQuery, params),
-  ]);
+  const detailRes = await clientPool.query(detailQuery, params);
+
+  // mensal e filtros sao apenas agregacoes do mesmo resultado de "detail": derivar em JS
+  // evita rodar a cadeia pesada de CTEs (BASE_SQL) mais duas vezes no banco (~3x mais rapido).
+  // Fallback para consultas separadas apenas se o LIMIT 5000 do detail tiver sido atingido,
+  // caso em que a derivacao local ficaria incompleta.
+  const hitDetailLimit = detailRes.rowCount >= 5000;
+  const [mensalRes, optionsRes] = hitDetailLimit
+    ? await Promise.all([
+        clientPool.query(mensalQuery, params),
+        clientPool.query(optionsQuery, params),
+      ])
+    : [deriveMensalRows(detailRes.rows), deriveOptionsRow(detailRes.rows)];
 
   logRentabilidade("consultas-base", {
     sql: detailQuery,
     params,
     rows: {
       detalhes: detailRes.rowCount,
-      mensal: mensalRes.rowCount,
-      opcoes: optionsRes.rowCount,
+      mensal: mensalRes.rows.length,
+      opcoes: optionsRes.rows.length,
+      derivadoLocalmente: !hitDetailLimit,
     },
   });
 
@@ -420,6 +484,8 @@ export async function getRentabilidadeClientes(filters = {}) {
       data: dateOnly(row.data),
       viagem: row.viagem,
       placa: row.placa || "",
+      tipoPropriedade: row.tipo_propriedade || null,
+      tipoVeiculo: row.tipo_veiculo || "Terceiro",
       motorista: row.motorista || "",
       origem: row.origem || "",
       destino: row.destino || "",

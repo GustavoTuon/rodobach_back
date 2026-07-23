@@ -49,6 +49,15 @@ async function resolveContato(payload = {}) {
   return { contato_id: null, contato_nome: null, contato_numero: null, numeros: null };
 }
 
+// Aceita array ou string ("123, 456; 789") e devolve "123,456,789"
+function normalizarNumeros(input) {
+  const lista = Array.isArray(input) ? input : String(input || "").split(/[,;\n]+/);
+  return lista
+    .map(n => String(n).replace(/[^\d+]/g, ""))
+    .filter(Boolean)
+    .join(",");
+}
+
 const QUERY_VEICULOS = `
   SELECT placa, odometro
   FROM (

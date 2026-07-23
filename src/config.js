@@ -16,6 +16,12 @@ export const config = {
   port: Number(process.env.PORT || 3333),
   jwtSecret: process.env.JWT_SECRET || "rodobach-jwt-secret-TROQUE-EM-PRODUCAO",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "24h",
+  telemetriaResumoDir: process.env.TELEMETRIA_RESUMO_DIR || "",
+  n8n: {
+    apiUrl: (process.env.N8N_API_URL || "").replace(/\/+$/, ""),
+    apiKey: process.env.N8N_API_KEY || "",
+    vencimentoClientesWorkflowId: process.env.N8N_VENCIMENTO_CLIENTES_WORKFLOW_ID || "",
+  },
   frontendOrigins: (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())
@@ -48,8 +54,8 @@ export const config = {
     user: process.env.CLIENT_DB_USER || process.env.DB_USER,
     password: process.env.CLIENT_DB_PASSWORD || process.env.DB_PASSWORD,
     ssl: String(process.env.CLIENT_DB_SSL || "false").toLowerCase() === "true",
-    max: Number(process.env.CLIENT_DB_MAX_CONNECTIONS || 2),
-    connectionTimeoutMillis: Number(process.env.CLIENT_DB_CONNECTION_TIMEOUT_MS || 10000),
+    max: Number(process.env.CLIENT_DB_MAX_CONNECTIONS || 4),
+    connectionTimeoutMillis: Number(process.env.CLIENT_DB_CONNECTION_TIMEOUT_MS || 20000),
     queryTimeoutMillis: Number(process.env.CLIENT_DB_QUERY_TIMEOUT_MS || 30000),
     statementTimeoutMillis: Number(process.env.CLIENT_DB_STATEMENT_TIMEOUT_MS || 30000),
     lockTimeoutMillis: Number(process.env.CLIENT_DB_LOCK_TIMEOUT_MS || 5000),

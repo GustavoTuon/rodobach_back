@@ -8,8 +8,11 @@ export const usuariosRouter = express.Router();
 
 const COLS_RETORNO = `
   id, login, email, numero, admin, ativo,
-  perm_simulador, perm_viagens, perm_dre_empresarial, perm_custos_veiculos, perm_clientes, perm_clientes_lucro,
-  perm_pneus, perm_settings, perm_manutencao,
+  perm_diretoria, perm_simulador, perm_viagens, perm_dre_empresarial, perm_analise_frota,
+  perm_abastecimentos,
+  perm_faturamento_diario, perm_comparativo_faturamento, perm_lucro_viagens,
+  perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
+  perm_status_carga, perm_pneus, perm_settings, perm_manutencao, perm_automacoes_n8n,
   criado_em
 `;
 
@@ -31,9 +34,13 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
     const {
       login, senha, email, numero,
       admin = false, ativo = true,
-      perm_simulador = true, perm_viagens = true, perm_dre_empresarial = true, perm_custos_veiculos = true,
+      perm_diretoria = true, perm_simulador = true, perm_viagens = true,
+      perm_dre_empresarial = true, perm_analise_frota = true, perm_abastecimentos = true,
+      perm_faturamento_diario = true, perm_comparativo_faturamento = true, perm_lucro_viagens = true,
+      perm_custos_veiculos = true, perm_manutencoes_veiculos = true,
       perm_clientes = true, perm_clientes_lucro = true,
-      perm_pneus = true, perm_settings = true, perm_manutencao = true,
+      perm_status_carga = true, perm_pneus = true, perm_settings = true, perm_manutencao = true,
+      perm_automacoes_n8n = true,
     } = req.body;
 
     if (!login || !senha) {
@@ -45,18 +52,25 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
     const { rows } = await pool.query(
       `INSERT INTO ${tableName("usuarios")}
         (login, senha, email, numero, admin, ativo,
-         perm_simulador, perm_viagens, perm_dre_empresarial, perm_custos_veiculos, perm_clientes, perm_clientes_lucro,
-         perm_pneus, perm_settings, perm_manutencao)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         perm_diretoria, perm_simulador, perm_viagens, perm_dre_empresarial, perm_analise_frota,
+         perm_abastecimentos,
+         perm_faturamento_diario, perm_comparativo_faturamento, perm_lucro_viagens,
+         perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
+         perm_status_carga, perm_pneus, perm_settings, perm_manutencao, perm_automacoes_n8n)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
        RETURNING ${COLS_RETORNO}`,
       [
         String(login).trim().toLowerCase(), hash, email || null, numero || null,
         Boolean(admin), Boolean(ativo),
-        Boolean(perm_simulador), Boolean(perm_viagens), Boolean(perm_dre_empresarial), Boolean(perm_custos_veiculos),
+        Boolean(perm_diretoria), Boolean(perm_simulador), Boolean(perm_viagens), Boolean(perm_dre_empresarial),
+        Boolean(perm_analise_frota), Boolean(perm_abastecimentos), Boolean(perm_faturamento_diario), Boolean(perm_comparativo_faturamento),
+        Boolean(perm_lucro_viagens), Boolean(perm_custos_veiculos), Boolean(perm_manutencoes_veiculos),
         Boolean(perm_clientes), Boolean(perm_clientes_lucro),
+        Boolean(perm_status_carga),
         Boolean(perm_pneus),
         Boolean(perm_settings),
         Boolean(perm_manutencao),
+        Boolean(perm_automacoes_n8n),
       ]
     );
 
@@ -77,13 +91,21 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, async (req, res, next) => {
 
     const FIELDS = [
       "email", "numero", "admin", "ativo",
-      "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_custos_veiculos", "perm_clientes",
-      "perm_clientes_lucro", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_diretoria", "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_analise_frota",
+      "perm_abastecimentos",
+      "perm_faturamento_diario", "perm_comparativo_faturamento", "perm_lucro_viagens",
+      "perm_custos_veiculos", "perm_manutencoes_veiculos", "perm_clientes",
+      "perm_clientes_lucro", "perm_status_carga", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_automacoes_n8n",
     ];
     const BOOL_FIELDS = new Set([
       "admin", "ativo",
-      "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_custos_veiculos", "perm_clientes",
-      "perm_clientes_lucro", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_diretoria", "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_analise_frota",
+      "perm_abastecimentos",
+      "perm_faturamento_diario", "perm_comparativo_faturamento", "perm_lucro_viagens",
+      "perm_custos_veiculos", "perm_manutencoes_veiculos", "perm_clientes",
+      "perm_clientes_lucro", "perm_status_carga", "perm_pneus", "perm_settings", "perm_manutencao",
+      "perm_automacoes_n8n",
     ]);
 
     const sets = [];

@@ -103,9 +103,9 @@ function baseCostCte() {
         COALESCE(vei_doc.kmatualvei, vei_cc.kmatualvei) AS km_atual,
         COALESCE(vei_doc.centrocustovei, vei_cc.centrocustovei, prt.centrocustoprt)::int AS centro_veiculo,
         CASE
-          WHEN COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text = 'T' THEN 'terceiro'
           WHEN COALESCE(vei_doc.placavei, vei_cc.placavei) IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN COALESCE(vei_doc.tipopropriedadevei, vei_cc.tipopropriedadevei)::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(cfi.nomecfi, '') ILIKE '%combust%' OR COALESCE(cfi.nomecfi, '') ILIKE '%abastec%' THEN 'Abastecimento'::text
@@ -205,9 +205,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Abastecimento'::text AS tipo_custo,
         'frotas.abastecimentos'::text AS origem
@@ -262,9 +262,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(desp.nomecpv, '') ILIKE '%pedagio%' THEN 'Pedagio'::text
@@ -328,9 +328,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN COALESCE(prod.nomepro, '') ILIKE '%pneu%' THEN 'Pneus'
@@ -399,9 +399,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Manutencao'::text AS tipo_custo,
         'frotas.ordensservicosexternaservicos'::text AS origem
@@ -463,9 +463,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         CASE
           WHEN TRIM(COALESCE(i.combustivelnep::text, '')) = 'S'
@@ -546,9 +546,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Multas'::text AS tipo_custo,
         'frotas.multastransito'::text AS origem
@@ -597,9 +597,9 @@ function baseCostCte() {
         v.kmatualvei AS km_atual,
         v.centrocustovei::int AS centro_veiculo,
         CASE
-          WHEN v.tipopropriedadevei::text = 'T' THEN 'terceiro'
           WHEN v.placavei IS NULL THEN 'nao_identificado'
-          ELSE 'frota'
+          WHEN v.tipopropriedadevei::text = 'P' THEN 'frota'
+          ELSE 'terceiro'
         END AS proprietario,
         'Pneus'::text AS tipo_custo,
         'frotas.movimentacaopneus'::text AS origem
@@ -701,6 +701,42 @@ function buildWhere(filters = {}, offset = 2) {
       i += 1;
     }
   }
+  if (filters.modelo) {
+    values.push(`%${normalizeText(filters.modelo)}%`);
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND COALESCE(fv.modelovei::text, fv.marcamodelorenavamvei::text, '') ILIKE $${i}
+    )`);
+    i += 1;
+  }
+  if (filters.marca) {
+    values.push(`%${normalizeText(filters.marca)}%`);
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      LEFT JOIN frotas.marcas fm
+        ON fm.codigomar = fv.marcavei
+       AND (fm.empresamar = fv.empresavei OR fm.empresamar IS NULL)
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND COALESCE(fm.nomemar::text, fv.marcavei::text, '') ILIKE $${i}
+    )`);
+    i += 1;
+  }
+  if (filters.ano) {
+    values.push(String(filters.ano).trim());
+    where.push(`EXISTS (
+      SELECT 1
+      FROM frotas.veiculos fv
+      WHERE UPPER(TRIM(fv.placavei::text)) = UPPER(TRIM(placa_resolvida::text))
+        AND COALESCE(fv.situacaovei::text, '') <> 'I'
+        AND fv.anomodelovei::text = $${i}
+    )`);
+    i += 1;
+  }
   if (filters.empresa) {
     values.push(Number(filters.empresa));
     where.push(`empresa = $${i}`);
@@ -761,12 +797,27 @@ function buildRevenueWhere(filters = {}, offset = 2) {
     where.push(`CONCAT_WS(' ', con.veiculocon, vei.nomevei, con.codigocon::text, con.numeroctecon::text, con.chavectecon) ILIKE $${i}`);
     i += 1;
   }
+  if (filters.modelo) {
+    values.push(`%${normalizeText(filters.modelo)}%`);
+    where.push(`COALESCE(vei.modelovei::text, vei.marcamodelorenavamvei::text, '') ILIKE $${i}`);
+    i += 1;
+  }
+  if (filters.marca) {
+    values.push(`%${normalizeText(filters.marca)}%`);
+    where.push(`COALESCE(vei.marca_nome::text, vei.marcavei::text, '') ILIKE $${i}`);
+    i += 1;
+  }
+  if (filters.ano) {
+    values.push(String(filters.ano).trim());
+    where.push(`vei.anomodelovei::text = $${i}`);
+    i += 1;
+  }
 
   const owner = normalizeOwner(filters.proprietario);
   if (owner === "frota") {
-    where.push("vei.placavei IS NOT NULL AND COALESCE(vei.tipopropriedadevei::text, '') <> 'T'");
+    where.push("vei.placavei IS NOT NULL AND vei.tipopropriedadevei::text = 'P'");
   } else if (owner === "terceiro") {
-    where.push("vei.tipopropriedadevei::text = 'T'");
+    where.push("COALESCE(vei.tipopropriedadevei::text, 'T') <> 'P'");
   }
 
   return { clause: `WHERE ${where.join(" AND ")}`, values };
@@ -822,11 +873,13 @@ function mapLaunch(row) {
 
 async function queryCostRows(sql, params) {
   const { rows } = await clientPool.query(sql, params);
-  console.log("[custos-veiculos] sql", {
-    params,
-    rows: rows.length,
-    sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
-  });
+  if (process.env.DEBUG_SQL === "1") {
+    console.log("[custos-veiculos] sql", {
+      params,
+      rows: rows.length,
+      sql: String(sql || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+    });
+  }
   return rows;
 }
 
@@ -841,7 +894,7 @@ export async function getCustosVeiculos(filters = {}) {
 
   const cte = baseCostCte();
 
-  const [summaryRows, monthlyRows, rankingRows, costVehicleRows, typeRows, supplierRows, statusRows, launchesRows, revenueRows, validationRows, auditOriginRows, auditRows] = await Promise.all([
+  const [summaryRows, monthlyRows, revenueMonthlyRows, rankingRows, costVehicleRows, typeRows, supplierRows, statusRows, launchesRows, revenueRows, validationRows, auditOriginRows, auditRows, auditExtraRows] = await Promise.all([
     queryCostRows(`
       ${cte}
       SELECT
@@ -873,6 +926,27 @@ export async function getCustosVeiculos(filters = {}) {
       GROUP BY DATE_TRUNC('month', data), TO_CHAR(DATE_TRUNC('month', data), 'YYYY-MM')
       ORDER BY DATE_TRUNC('month', data)
     `, params),
+    queryCostRows(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', con.dataemissaocon), 'YYYY-MM') AS mes,
+        COALESCE(SUM(COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)), 0) AS receita
+      FROM logistica.conhecimentos con
+      LEFT JOIN LATERAL (
+      SELECT v.placavei, v.tipopropriedadevei, v.empresavei
+             , v.modelovei, v.marcamodelorenavamvei, v.marcavei, v.anomodelovei, m.nomemar AS marca_nome
+        FROM frotas.veiculos v
+        LEFT JOIN frotas.marcas m
+          ON m.codigomar = v.marcavei
+         AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
+        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
+          AND COALESCE(v.situacaovei::text, '') <> 'I'
+        ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+        LIMIT 1
+      ) vei ON true
+      ${revenueWhere.clause}
+      GROUP BY DATE_TRUNC('month', con.dataemissaocon), TO_CHAR(DATE_TRUNC('month', con.dataemissaocon), 'YYYY-MM')
+      ORDER BY DATE_TRUNC('month', con.dataemissaocon)
+    `, revenueParams),
     queryCostRows(`
       ${cte}
       SELECT
@@ -943,6 +1017,7 @@ export async function getCustosVeiculos(filters = {}) {
       ORDER BY data DESC, valor DESC
       LIMIT ${limit}
     `, params),
+    // Origem da receita por placa: logistica.conhecimentos (CT-e emitidos), status=2 = ativo, valor = totalcon ou valorfretecon.
     queryCostRows(`
       SELECT
         UPPER(TRIM(con.veiculocon::text)) AS placa,
@@ -958,8 +1033,23 @@ export async function getCustosVeiculos(filters = {}) {
         MAX(con.dataemissaocon)::date AS ultima_receita
       FROM logistica.conhecimentos con
       LEFT JOIN LATERAL (
-        SELECT v.placavei, v.nomevei, v.tipopropriedadevei, v.proprietariovei, v.kmatualvei, v.centrocustovei, v.empresavei
+        SELECT
+          v.placavei,
+          v.nomevei,
+          v.tipopropriedadevei,
+          v.proprietariovei,
+          v.kmatualvei,
+          v.centrocustovei,
+          v.empresavei,
+          v.modelovei,
+          v.marcamodelorenavamvei,
+          v.marcavei,
+          v.anomodelovei,
+          m.nomemar AS marca_nome
         FROM frotas.veiculos v
+        LEFT JOIN frotas.marcas m
+          ON m.codigomar = v.marcavei
+         AND (m.empresamar = v.empresavei OR m.empresamar IS NULL)
         WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
           AND COALESCE(v.situacaovei::text, '') <> 'I'
         ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
@@ -1010,6 +1100,26 @@ export async function getCustosVeiculos(filters = {}) {
       FROM custos_status
       ${where.clause}
     `, params),
+    queryCostRows(`
+      SELECT
+        (SELECT COUNT(*)::int FROM logistica.conhecimentos con
+          WHERE con.statuscon = 2
+            AND con.dataemissaocon::date >= $1::date AND con.dataemissaocon::date <= $2::date
+            AND NULLIF(TRIM(con.veiculocon::text), '') IS NULL) AS receitas_sem_veiculo,
+        (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
+          WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
+            AND COALESCE(aba.totalaba, 0) <> 0
+            AND aba.duplicatageradaaba IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM financeiro.pagar pag
+              WHERE pag.empresapag = COALESCE(aba.empresaaba, pag.empresapag)
+                AND pag.seriepag = COALESCE(aba.seriegeradaaba, aba.serieaba, pag.seriepag)
+                AND pag.duplicatapag = COALESCE(aba.duplicatageradaaba, aba.duplicataaba)
+            )) AS abastecimentos_ja_no_financeiro,
+        (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
+          WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
+            AND COALESCE(aba.diferencakilometragemaba, 0) = 0) AS abastecimentos_sem_km
+    `, [period.startDate, period.endDate]),
   ]);
 
   const costMap = new Map();
@@ -1037,7 +1147,7 @@ export async function getCustosVeiculos(filters = {}) {
       placa: placaKey,
       veiculoNome: row.veiculo_nome || "",
       centroCusto: row.centro_custo || "Sem centro de custo",
-      proprietario: row.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietario: row.tipo_propriedade === "P" ? "frota" : "terceiro",
       proprietarioCodigo: row.proprietario_codigo,
       kmAtual: num(row.km_atual),
       custo: 0,
@@ -1060,6 +1170,7 @@ export async function getCustosVeiculos(filters = {}) {
     const receita = num(item.receita);
     const custo = num(item.custo);
     const lucro = receita - custo;
+    // receita vem de logistica.conhecimentos (CT-e); sem receita no periodo + custo > 0 = prejuizo de -100%.
     const margem = receita > 0 ? (lucro / receita) * 100 : (lucro < 0 ? -100 : 0);
     return {
       ...item,
@@ -1079,17 +1190,32 @@ export async function getCustosVeiculos(filters = {}) {
   const totalCustoProfit = money(profitRows.reduce((sum, row) => sum + num(row.custo), 0));
   const totalLucro = money(totalReceita - totalCustoProfit);
 
-  return {
-    period,
-    summary: mapSummary(summaryRows[0]),
-    monthly: monthlyRows.map((row) => ({
+  const revenueByMonth = new Map(revenueMonthlyRows.map((row) => [row.mes, num(row.receita)]));
+  const monthly = monthlyRows.map((row) => {
+    const receita = revenueByMonth.get(row.mes) || 0;
+    const custo = num(row.custo);
+    return {
       mes: row.mes,
       label: monthLabel(row.mes),
-      custo: money(row.custo),
+      custo: money(custo),
       pago: money(row.pago),
       aberto: money(row.aberto),
       vencido: money(row.vencido),
-    })),
+      receita: money(receita),
+      lucro: money(receita - custo),
+    };
+  });
+  for (const [mes, receita] of revenueByMonth) {
+    if (!monthly.some((item) => item.mes === mes)) {
+      monthly.push({ mes, label: monthLabel(mes), custo: 0, pago: 0, aberto: 0, vencido: 0, receita: money(receita), lucro: money(receita) });
+    }
+  }
+  monthly.sort((a, b) => String(a.mes).localeCompare(String(b.mes)));
+
+  return {
+    period,
+    summary: mapSummary(summaryRows[0]),
+    monthly,
     ranking: rankingRows.map((row) => ({
       placa: row.placa || "Nao identificado",
       veiculoNome: row.veiculo_nome || "",
@@ -1123,10 +1249,12 @@ export async function getCustosVeiculos(filters = {}) {
         receitaTotal: totalReceita,
         custoTotal: totalCustoProfit,
         lucroTotal: totalLucro,
-        margem: totalReceita > 0 ? money((totalLucro / totalReceita) * 100) : 0,
+        // mesma regra usada por veiculo (linha ~1172): sem receita no periodo mas com custo = prejuizo de -100%, nao 0,00.
+        margem: totalReceita > 0 ? money((totalLucro / totalReceita) * 100) : (totalLucro < 0 ? -100 : 0),
         veiculos: profitRows.length,
         veiculosLucro: profitRows.filter((row) => row.statusResultado === "lucro").length,
         veiculosPrejuizo: profitRows.filter((row) => row.statusResultado === "prejuizo").length,
+        veiculosCustoSemReceita: profitRows.filter((row) => row.custo > 0 && row.receita === 0).length,
       },
       vehicles: profitRows,
       rankings: {
@@ -1171,8 +1299,11 @@ export async function getCustosVeiculos(filters = {}) {
       registrosCentroAdministrativo: num(auditRows[0]?.registros_centro_administrativo),
       possiveisDivergenciasPlaca: num(auditRows[0]?.possiveis_divergencias_placa),
       registrosFiltrados: num(auditRows[0]?.registros_filtrados),
+      receitasSemVeiculo: num(auditExtraRows[0]?.receitas_sem_veiculo),
+      abastecimentosJaNoFinanceiro: num(auditExtraRows[0]?.abastecimentos_ja_no_financeiro),
+      abastecimentosSemKm: num(auditExtraRows[0]?.abastecimentos_sem_km),
       observacoes: [
-        "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei diferente de 'T'.",
+        "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei = 'P'; NULL e demais valores sao terceiro.",
         "Centros administrativos sem placa resolvida ficam fora quando o filtro de proprietario e frota/terceiro.",
         "Receita de lucro por veiculo vem de conhecimentos/CT-e, nao de financeiro.receber.",
       ],
@@ -1202,6 +1333,271 @@ export async function getCustosVeiculosFiltros() {
     fornecedores: suppliers.map((row) => ({ codigo: row.codigo, nome: row.nome })),
     empresas: companies.map((row) => row.value).filter((v) => v !== null && v !== undefined),
     proprietarios: ["todos", "frota", "terceiro"],
+  };
+}
+
+export async function getAuditoriaCustosVeiculos(filters = {}) {
+  const period = resolvePeriod({
+    startDate: filters.startDate || filters.dataInicio,
+    endDate: filters.endDate || filters.dataFim,
+  });
+  const params = [period.startDate, period.endDate];
+
+  const [nfRows, cteRows, financeiroRows, amostrasRows] = await Promise.all([
+    queryCostRows(
+      `
+      WITH own AS (
+        SELECT UPPER(TRIM(placavei::text)) placa, centrocustovei
+        FROM frotas.veiculos
+        WHERE COALESCE(situacaovei::text,'') <> 'I'
+      ),
+      centers AS (
+        SELECT centrocustovei, COUNT(*) qtd, MIN(placa) placa_unica
+        FROM own
+        WHERE centrocustovei IS NOT NULL
+        GROUP BY centrocustovei
+      ),
+      nf AS (
+        SELECT i.empresanep, i.serienep, i.codigonep, i.fornecedornep, i.sequencianep,
+          UPPER(TRIM(COALESCE(NULLIF(i.veiculonep,''), n.veiculonfe)::text)) placa_nf,
+          COALESCE(i.totalitemestoquenep, i.totalitemnep,0)::numeric valor_nf
+        FROM compras.notasfiscaisentradaprodutos i
+        JOIN compras.notasfiscaisentrada n
+          ON n.empresanfe=i.empresanep
+         AND n.serienfe=i.serienep
+         AND n.codigonfe=i.codigonep
+         AND n.fornecedornfe=i.fornecedornep
+        JOIN own ov
+          ON ov.placa=UPPER(TRIM(COALESCE(NULLIF(i.veiculonep,''), n.veiculonfe)::text))
+        WHERE COALESCE(n.dataentradanfe,n.dataemissaonfe)::date BETWEEN $1::date AND $2::date
+          AND COALESCE(i.totalitemestoquenep, i.totalitemnep,0) <> 0
+      ),
+      match AS (
+        SELECT nf.*, pag.empresapag, pag.veiculopag, prt.centrocustoprt, prt.valorrateioprt,
+          COALESCE(NULLIF(UPPER(TRIM(pag.veiculopag::text)),''), CASE WHEN c.qtd=1 THEN c.placa_unica END) placa_pagar_resolvida
+        FROM nf
+        LEFT JOIN financeiro.pagar pag
+          ON pag.fornecedorpag=nf.fornecedornep
+         AND pag.duplicatapag=nf.codigonep
+         AND pag.datavencimentopag::date BETWEEN ($1::date - INTERVAL '90 days') AND ($2::date + INTERVAL '90 days')
+        LEFT JOIN financeiro.pagarrateios prt
+          ON pag.empresapag=prt.empresaprt
+         AND pag.seriepag=prt.serieprt
+         AND pag.duplicatapag=prt.duplicataprt
+         AND pag.parcelapag=prt.parcelaprt
+         AND pag.fornecedorpag=prt.fornecedorprt
+        LEFT JOIN centers c
+          ON c.centrocustovei=prt.centrocustoprt
+      )
+      SELECT CASE
+          WHEN empresapag IS NULL THEN 'sem_pagar'
+          WHEN placa_pagar_resolvida IS NULL THEN 'pagar_sem_placa_resolvida'
+          WHEN placa_pagar_resolvida = placa_nf THEN 'pagar_mesma_placa_nf'
+          ELSE 'pagar_placa_diferente_nf'
+        END AS situacao,
+        COUNT(*)::int AS linhas,
+        COUNT(DISTINCT (empresanep, serienep, codigonep, fornecedornep, sequencianep))::int AS itens,
+        COALESCE(SUM(valor_nf),0) AS valor_nf,
+        COALESCE(SUM(COALESCE(valorrateioprt,0)),0) AS valor_rateio
+      FROM match
+      GROUP BY 1
+      ORDER BY valor_nf DESC
+      `,
+      params,
+    ),
+    queryCostRows(
+      `
+      WITH cvf AS (
+        SELECT empresaconhecimentocvf empresa, serieconhecimentocvf serie, conhecimentocvf codigo,
+          COUNT(*)::int linhas_cvf,
+          COUNT(DISTINCT NULLIF(UPPER(TRIM(veiculocvf::text)),''))::int placas_cvf,
+          SUM(COALESCE(valortotalcvf, valorfretecvf, 0))::numeric valor_cvf
+        FROM logistica.controleviagensfretes
+        WHERE conhecimentocvf IS NOT NULL
+        GROUP BY 1,2,3
+      )
+      SELECT CASE
+          WHEN NULLIF(TRIM(con.veiculocon::text),'') IS NULL THEN 'cte_sem_placa'
+          WHEN cvf.placas_cvf > 1 THEN 'cte_cvf_multiplas_placas'
+          WHEN cvf.codigo IS NULL THEN 'cte_sem_cvf'
+          WHEN ABS(COALESCE(NULLIF(con.totalcon,0), con.valorfretecon,0) - COALESCE(cvf.valor_cvf,0)) > 1 THEN 'cte_cvf_valor_diferente'
+          ELSE 'cte_ok'
+        END AS situacao,
+        COUNT(*)::int AS ctes,
+        COALESCE(SUM(COALESCE(NULLIF(con.totalcon,0), con.valorfretecon,0)),0) AS receita_cte,
+        COALESCE(SUM(COALESCE(cvf.valor_cvf,0)),0) AS valor_cvf
+      FROM logistica.conhecimentos con
+      LEFT JOIN cvf
+        ON cvf.empresa=con.empresacon
+       AND cvf.serie=con.seriecon
+       AND cvf.codigo=con.codigocon
+      WHERE con.statuscon=2
+        AND con.dataemissaocon::date BETWEEN $1::date AND $2::date
+      GROUP BY 1
+      ORDER BY receita_cte DESC
+      `,
+      params,
+    ),
+    queryCostRows(
+      `
+      WITH own AS (
+        SELECT UPPER(TRIM(placavei::text)) placa, centrocustovei
+        FROM frotas.veiculos
+        WHERE COALESCE(situacaovei::text, '') <> 'I'
+      ),
+      centers AS (
+        SELECT centrocustovei, COUNT(*) qtd
+        FROM own
+        WHERE centrocustovei IS NOT NULL
+        GROUP BY centrocustovei
+      ),
+      base AS (
+        SELECT prt.valorrateioprt::numeric AS valor, pag.veiculopag, od.placa AS match_doc, c.qtd AS centro_qtd
+        FROM financeiro.pagarrateios prt
+        JOIN financeiro.pagar pag
+          ON pag.empresapag=prt.empresaprt
+         AND pag.seriepag=prt.serieprt
+         AND pag.duplicatapag=prt.duplicataprt
+         AND pag.parcelapag=prt.parcelaprt
+         AND pag.fornecedorpag=prt.fornecedorprt
+        LEFT JOIN own od
+          ON od.placa = UPPER(TRIM(pag.veiculopag::text))
+        LEFT JOIN centers c
+          ON c.centrocustovei = prt.centrocustoprt
+        WHERE pag.datavencimentopag::date BETWEEN $1::date AND $2::date
+          AND COALESCE(prt.valorrateioprt,0) <> 0
+      )
+      SELECT CASE
+          WHEN match_doc IS NOT NULL THEN 'placa_no_pagar_propria'
+          WHEN NULLIF(TRIM(veiculopag::text),'') IS NOT NULL AND match_doc IS NULL THEN 'placa_no_pagar_nao_encontrada_ou_terceiro'
+          WHEN centro_qtd = 1 THEN 'sem_placa_pagar_centro_unico'
+          WHEN centro_qtd > 1 THEN 'sem_placa_pagar_centro_ambiguo'
+          ELSE 'sem_placa_pagar_sem_centro_veiculo'
+        END AS situacao,
+        COUNT(*)::int AS lancamentos,
+        COALESCE(SUM(valor),0) AS valor
+      FROM base
+      GROUP BY 1
+      ORDER BY valor DESC
+      `,
+      params,
+    ),
+    queryCostRows(
+      `
+      WITH own AS (
+        SELECT UPPER(TRIM(placavei::text)) placa, centrocustovei
+        FROM frotas.veiculos
+        WHERE COALESCE(situacaovei::text,'') <> 'I'
+      ),
+      centers AS (
+        SELECT centrocustovei, COUNT(*) qtd, MIN(placa) placa_unica
+        FROM own
+        WHERE centrocustovei IS NOT NULL
+        GROUP BY centrocustovei
+      ),
+      nf AS (
+        SELECT i.empresanep, i.serienep, i.codigonep, i.fornecedornep, i.sequencianep,
+          COALESCE(n.dataentradanfe,n.dataemissaonfe)::date AS data_nf,
+          UPPER(TRIM(COALESCE(NULLIF(i.veiculonep,''), n.veiculonfe)::text)) placa_nf,
+          COALESCE(i.totalitemestoquenep, i.totalitemnep,0)::numeric valor_nf
+        FROM compras.notasfiscaisentradaprodutos i
+        JOIN compras.notasfiscaisentrada n
+          ON n.empresanfe=i.empresanep
+         AND n.serienfe=i.serienep
+         AND n.codigonfe=i.codigonep
+         AND n.fornecedornfe=i.fornecedornep
+        JOIN own ov
+          ON ov.placa=UPPER(TRIM(COALESCE(NULLIF(i.veiculonep,''), n.veiculonfe)::text))
+        WHERE COALESCE(n.dataentradanfe,n.dataemissaonfe)::date BETWEEN $1::date AND $2::date
+          AND COALESCE(i.totalitemestoquenep, i.totalitemnep,0) <> 0
+      )
+      SELECT nf.data_nf, nf.placa_nf, nf.empresanep, nf.serienep, nf.codigonep, nf.fornecedornep, nf.sequencianep,
+        nf.valor_nf, pag.veiculopag, prt.centrocustoprt, c.placa_unica AS placa_rateio, prt.valorrateioprt AS valor_rateio
+      FROM nf
+      LEFT JOIN financeiro.pagar pag
+        ON pag.fornecedorpag=nf.fornecedornep
+       AND pag.duplicatapag=nf.codigonep
+       AND pag.datavencimentopag::date BETWEEN ($1::date - INTERVAL '90 days') AND ($2::date + INTERVAL '90 days')
+      LEFT JOIN financeiro.pagarrateios prt
+        ON pag.empresapag=prt.empresaprt
+       AND pag.seriepag=prt.serieprt
+       AND pag.duplicatapag=prt.duplicataprt
+       AND pag.parcelapag=prt.parcelaprt
+       AND pag.fornecedorpag=prt.fornecedorprt
+      LEFT JOIN centers c
+        ON c.centrocustovei=prt.centrocustoprt
+      WHERE COALESCE(NULLIF(UPPER(TRIM(pag.veiculopag::text)),''), CASE WHEN c.qtd=1 THEN c.placa_unica END) IS DISTINCT FROM nf.placa_nf
+      ORDER BY nf.valor_nf DESC
+      LIMIT 20
+      `,
+      params,
+    ),
+  ]);
+
+  const nfDivergente = nfRows.find((row) => row.situacao === "pagar_placa_diferente_nf");
+  const nfSemPlaca = nfRows.find((row) => row.situacao === "pagar_sem_placa_resolvida");
+  const cteSemPlaca = cteRows.find((row) => row.situacao === "cte_sem_placa");
+  const cteMultiPlaca = cteRows.find((row) => row.situacao === "cte_cvf_multiplas_placas");
+  const centroAmbiguo = financeiroRows.find((row) => row.situacao === "sem_placa_pagar_centro_ambiguo");
+
+  return {
+    periodo: period,
+    resumo: {
+      nfPlacaDiferente: {
+        itens: num(nfDivergente?.itens),
+        valorNf: money(nfDivergente?.valor_nf),
+        valorRateio: money(nfDivergente?.valor_rateio),
+      },
+      nfSemPlacaResolvida: {
+        itens: num(nfSemPlaca?.itens),
+        valorNf: money(nfSemPlaca?.valor_nf),
+        valorRateio: money(nfSemPlaca?.valor_rateio),
+      },
+      cteSemPlaca: {
+        ctes: num(cteSemPlaca?.ctes),
+        receita: money(cteSemPlaca?.receita_cte),
+      },
+      cteMultiplasPlacas: {
+        ctes: num(cteMultiPlaca?.ctes),
+        receita: money(cteMultiPlaca?.receita_cte),
+      },
+      financeiroCentroAmbiguo: {
+        lancamentos: num(centroAmbiguo?.lancamentos),
+        valor: money(centroAmbiguo?.valor),
+      },
+    },
+    notasFiscais: nfRows.map((row) => ({
+      situacao: row.situacao,
+      linhas: num(row.linhas),
+      itens: num(row.itens),
+      valorNf: money(row.valor_nf),
+      valorRateio: money(row.valor_rateio),
+    })),
+    ctes: cteRows.map((row) => ({
+      situacao: row.situacao,
+      ctes: num(row.ctes),
+      receitaCte: money(row.receita_cte),
+      valorCvf: money(row.valor_cvf),
+    })),
+    financeiro: financeiroRows.map((row) => ({
+      situacao: row.situacao,
+      lancamentos: num(row.lancamentos),
+      valor: money(row.valor),
+    })),
+    amostras: amostrasRows.map((row) => ({
+      data: dateOnly(row.data_nf),
+      placaNf: row.placa_nf,
+      empresa: row.empresanep,
+      serie: row.serienep,
+      nota: row.codigonep,
+      fornecedor: row.fornecedornep,
+      item: row.sequencianep,
+      valorNf: money(row.valor_nf),
+      placaPagar: row.veiculopag || "",
+      centroCusto: row.centrocustoprt,
+      placaRateio: row.placa_rateio || "",
+      valorRateio: money(row.valor_rateio),
+    })),
   };
 }
 
@@ -1282,7 +1678,7 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
       placa: vehicle.placa || target,
       nome: vehicle.nome || "",
       modelo: vehicle.modelo || "",
-      proprietario: vehicle.tipo_propriedade === "T" ? "terceiro" : "frota",
+      proprietario: vehicle.tipo_propriedade === "P" ? "frota" : "terceiro",
       proprietarioCodigo: vehicle.proprietario_codigo,
       kmAtual: num(vehicle.km_atual),
       dataKm: dateOnly(vehicle.data_km),
