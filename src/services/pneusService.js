@@ -31,6 +31,14 @@ function apiTipo(value) {
   return normalizeText(value).toLowerCase();
 }
 
+const HEAVY_VEHICLE_SQL = `
+  AND (
+    COALESCE(veiculos.numeroeixosvei, 0) >= 3
+    OR CONCAT_WS(' ', veiculos.nomevei, veiculos.modelovei, veiculos.marcamodelorenavamvei) ~* '(CAMINH|CARRETA|CAVALO|TRUCK|BITRUCK|REBOQUE|SEM[I ]?REBOQUE|SR/|SCANIA|VOLVO|IVECO|ACTROS|AXOR|CONSTELLATION|ATEGO|RANDON|LIBRELATO|[468]X[24]|[0-9]E)'
+  )
+  AND CONCAT_WS(' ', veiculos.nomevei, veiculos.modelovei, veiculos.marcamodelorenavamvei) !~* '(PARATI|SAVEIRO|GOLF|UNO|PALIO|STRADA|FIORINO|MONTANA|S10|HILUX|COROLLA|CIVIC|ONIX|PRISMA|CELTA|GOL\\b)'
+`;
+
 function isTireActive(raw) {
   const v = normalizeText(raw).toLowerCase();
   if (!v) return true;
@@ -210,6 +218,7 @@ export async function fetchVehicles(search = "") {
       WHERE veiculos.placavei IS NOT NULL
         AND COALESCE(veiculos.situacaovei::text, '') <> 'I'
         AND veiculos.tipopropriedadevei::text = 'P'
+        ${HEAVY_VEHICLE_SQL}
         AND ($1::text = '%%' OR CONCAT_WS(' ', veiculos.placavei, veiculos.nomevei) ILIKE $1::text)
       ORDER BY veiculos.placavei
       LIMIT 80
@@ -224,6 +233,7 @@ export async function fetchVehicles(search = "") {
       FROM frotas.veiculos veiculos
       WHERE veiculos.placavei IS NOT NULL
         AND COALESCE(veiculos.situacaovei::text, '') <> 'I'
+        ${HEAVY_VEHICLE_SQL}
         AND ($1::text = '%%' OR CONCAT_WS(' ', veiculos.placavei, veiculos.nomevei) ILIKE $1::text)
       ORDER BY veiculos.placavei
       LIMIT 80

@@ -96,7 +96,7 @@ function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos
   return { status: "ativo", acao: "manter-relacionamento" };
 }
 
-export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, incluirVencidosAntigos } = {}) {
+export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, inativoMin, inativoMax, incluirVencidosAntigos } = {}) {
   const resolved = resolvePeriod(period, startDate, endDate);
   const { startDate: sd, endDate: ed } = resolved;
   const includeOldOverdue = ["1", "true", "sim", "yes"].includes(String(incluirVencidosAntigos || "").toLowerCase());
@@ -372,11 +372,21 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   // ── Status filter (applied after classification) ──────────────────────────
   // Na visao padrao, a tabela acompanha o periodo selecionado. O historico completo
   // continua sendo usado nos KPIs de inatividade e fica acessivel pelo filtro dedicado.
+  const inactiveMin = Number(inativoMin);
+  const inactiveMax = Number(inativoMax);
+  const hasInactiveMin = Number.isFinite(inactiveMin);
+  const hasInactiveMax = Number.isFinite(inactiveMax);
+
   let filteredClients = mapped.filter(c => c.totalPeriodo > 0);
   if (status === "ativo") {
     filteredClients = mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
   } else if (status === "sem-faturamento") {
-    filteredClients = mapped.filter(c => c.totalPeriodo === 0 && c.diasSemFaturar > 60);
+    filteredClients = mapped.filter(c => {
+      const dias = num(c.diasSemFaturar);
+      return c.totalPeriodo === 0
+        && (!hasInactiveMin || dias > inactiveMin)
+        && (!hasInactiveMax || dias <= inactiveMax);
+    });
   }
 
   // ── Inactive distribution ─────────────────────────────────────────────────
@@ -402,6 +412,8 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
       empresa: empresaFilter,
       cliente: clienteFilter,
       status: status || "todos",
+      inativoMin: hasInactiveMin ? inactiveMin : null,
+      inativoMax: hasInactiveMax ? inactiveMax : null,
     },
     summary: {
       totalFaturado,
