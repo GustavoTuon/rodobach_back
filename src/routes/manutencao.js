@@ -132,7 +132,30 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
     const { rows } = await pool.query(
       `SELECT * FROM ${TABLE()} ORDER BY criado_em DESC`
     );
-    res.json({ automacoes: rows });
+    let odometros = new Map();
+    try {
+      const { rows: veiculos } = await getVeiculosPool().query(QUERY_VEICULOS);
+      odometros = new Map(veiculos.map((veiculo) => [String(veiculo.placa).toUpperCase(), Number(veiculo.odometro)]));
+    } catch (error) {
+      console.warn("Odometros indisponiveis na listagem de manutencao:", error.message);
+    }
+
+    const automacoes = rows.map((item) => {
+      const odometro = odometros.get(String(item.placa).toUpperCase());
+      const kmAtual = Number.isFinite(odometro) ? odometro : Number(item.km_atual || 0);
+      const kmManutencao = Number(item.km_manutencao_prevista || item.km_proximo_envio || 0);
+      const kmAviso = Number(item.km_proximo_aviso || Math.max(0, kmManutencao - Number(item.antecedencia_km || 0)));
+      return {
+        ...item,
+        km_atual: kmAtual,
+        odometro_online: Number.isFinite(odometro),
+        km_manutencao_prevista: kmManutencao,
+        km_proximo_aviso: kmAviso,
+        km_faltante: kmManutencao - kmAtual,
+        aviso_disponivel: Boolean(item.ativo) && kmAtual >= kmAviso,
+      };
+    });
+    res.json({ automacoes });
   } catch (error) {
     next(error);
   }
@@ -142,6 +165,7 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
 manutencaoRouter.post("/manutencao", async (req, res, next) => {
   try {
     const { placas, titulo, mensagem, intervalo_km } = req.body;
+    const antecedenciaKm = Number(req.body.antecedencia_km ?? 1000);
     const contato = await resolveContato(req.body);
 
     if (!Array.isArray(placas) || placas.length === 0) {
@@ -149,6 +173,9 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
     }
     if (!titulo || !mensagem || !intervalo_km) {
       return res.status(400).json({ error: "Título, mensagem e intervalo_km são obrigatórios." });
+    }
+    if (!Number.isFinite(antecedenciaKm) || antecedenciaKm < 0 || antecedenciaKm >= Number(intervalo_km)) {
+      return res.status(400).json({ error: "A antecedencia deve ser positiva e menor que o intervalo." });
     }
 
     if (!contato.numeros) {
@@ -167,16 +194,19 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
       const intervalo = Number(intervalo_km);
       const { rows } = await pool.query(
         `INSERT INTO ${TABLE()} (
-           placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio,
+           placa, titulo, mensagem, intervalo_km, antecedencia_km, km_atual,
+           km_proximo_envio, km_manutencao_prevista, km_proximo_aviso,
            numeros, contato_id, contato_nome, contato_numero
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $7, $9, $10, $11, $12) RETURNING *`,
         [
           placa,
           titulo,
           mensagem,
           intervalo,
+          antecedenciaKm,
           km,
+          Math.max(0, km + intervalo - antecedenciaKm),
           km + intervalo,
           contato.numeros,
           contato.contato_id,
@@ -202,6 +232,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       titulo,
       mensagem,
       intervalo_km,
+      antecedencia_km,
       km_atual,
       ativo,
       numeros,
@@ -218,6 +249,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     if (titulo !== undefined)       { sets.push(`titulo = $${i++}`);       vals.push(titulo); }
     if (mensagem !== undefined)     { sets.push(`mensagem = $${i++}`);     vals.push(mensagem); }
     if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(Number(intervalo_km)); }
+    if (antecedencia_km !== undefined) { sets.push(`antecedencia_km = $${i++}`); vals.push(Number(antecedencia_km)); }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
     if (
@@ -236,18 +268,20 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       sets.push(`contato_numero = $${i++}`); vals.push(contato.contato_numero);
     }
     // Recalcula km_proximo_envio se km_atual ou intervalo_km mudar
-    if (km_atual !== undefined || intervalo_km !== undefined) {
-      sets.push(`km_proximo_envio = $${i++}`);
+    if (km_atual !== undefined || intervalo_km !== undefined || antecedencia_km !== undefined) {
       // Busca os valores atuais do registro para calcular corretamente
       const { rows: atual } = await pool.query(
-        `SELECT km_atual, intervalo_km FROM ${TABLE()} WHERE id = $1`, [id]
+        `SELECT km_atual, intervalo_km, antecedencia_km FROM ${TABLE()} WHERE id = $1`, [id]
       );
       if (atual.length > 0) {
         const novoKm = km_atual !== undefined ? Number(km_atual) : atual[0].km_atual;
         const novoIntervalo = intervalo_km !== undefined ? Number(intervalo_km) : atual[0].intervalo_km;
-        vals.push(novoKm + novoIntervalo);
-      } else {
-        vals.push(0);
+        const novaAntecedencia = antecedencia_km !== undefined ? Number(antecedencia_km) : atual[0].antecedencia_km;
+        const manutencaoPrevista = novoKm + novoIntervalo;
+        const proximoAviso = Math.max(0, manutencaoPrevista - novaAntecedencia);
+        sets.push(`km_manutencao_prevista = $${i++}`); vals.push(manutencaoPrevista);
+        sets.push(`km_proximo_aviso = $${i++}`); vals.push(proximoAviso);
+        sets.push(`km_proximo_envio = $${i++}`); vals.push(proximoAviso);
       }
     }
     sets.push(`atualizado_em = $${i++}`);
