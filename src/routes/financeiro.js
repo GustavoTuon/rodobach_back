@@ -28,6 +28,7 @@ import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
+import { getFaturamentoDiarioMensagem } from "../services/faturamentoDiarioMensagemService.js";
 import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalComparativoService.js";
 
 export const financeiroRouter = Router();
@@ -257,6 +258,18 @@ financeiroRouter.get("/financeiro/faturamento-diario", async (req, res, next) =>
       material: req.query.material || req.query.produto,
     });
     res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-diario/mensagem", async (req, res, next) => {
+  try {
+    res.json(await getFaturamentoDiarioMensagem({
+      data: req.query.data || req.query.date || req.query.dataReferencia,
+      mesInicio: req.query.mesInicio || req.query.monthStart,
+      meta: req.query.meta,
+    }));
   } catch (error) {
     next(error);
   }
