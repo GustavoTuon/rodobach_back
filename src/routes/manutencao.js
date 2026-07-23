@@ -1,5 +1,6 @@
 import express from "express";
 import { tableName } from "../config.js";
+import { clientPool } from "../db/clientPool.js";
 import { pool } from "../db/pool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 
@@ -58,11 +59,360 @@ function normalizarNumeros(input) {
     .join(",");
 }
 
+function proximoKmProgramado(kmAtual, intervaloKm) {
+  const km = Number(kmAtual || 0);
+  const intervalo = Number(intervaloKm || 0);
+  if (!Number.isFinite(km) || !Number.isFinite(intervalo) || intervalo <= 0) return 0;
+  if (km <= 0) return intervalo;
+  return Math.ceil(km / intervalo) * intervalo;
+}
+
+function normalizePlate(value) {
+  return String(value || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function maintenanceTags(value) {
+  const text = normalizeSearchText(value);
+  const tags = new Set();
+  if (text.includes("OLEOMOTOR") || text.includes("OLEO MOTOR") || text.includes("TROCA DE OLEO") || text.includes("FILTRO OLEO") || text.includes("FILTRO LUBRIFICANTE")) tags.add("oleo_motor");
+  if (text.includes("FILTROCOMBUSTIVEL") || text.includes("FILTRO COMBUSTIVEL") || text.includes("FILTRO SEPARADOR") || text.includes("RACOR") || text.includes("RACCOR")) tags.add("filtro_combustivel");
+  if (text.includes("FILTROAR") || text.includes("FILTRO AR")) tags.add("filtro_ar");
+  if (text.includes("OLEOCAIXA") || text.includes("OLEO CAIXA") || text.includes("OLEO CAMBIO") || text.includes("CAMBIO") || text.includes("I-SHIFT")) tags.add("oleo_cambio");
+  if (text.includes("OLEODIFERENCIAL") || text.includes("OLEO DIFERENCIAL") || text.includes("DIFERENCIAL")) tags.add("oleo_diferencial");
+  if (text.includes("LUBRIFIC")) tags.add("lubrificacao");
+  if (text.includes("ARLA")) tags.add("arla");
+  return [...tags];
+}
+
+function desiredMaintenanceTags(titulo) {
+  const tags = maintenanceTags(titulo);
+  if (tags.length) return tags;
+  return ["oleo_motor", "filtro_combustivel", "filtro_ar", "oleo_cambio", "oleo_diferencial", "lubrificacao"];
+}
+
+function eventToMaintenance(row) {
+  return {
+    data: row.data_manutencao,
+    km: row.km_manutencao,
+    tipoDocumento: row.tipo_documento,
+    numeroDocumento: row.numero_documento,
+    descricao: row.descricao,
+    fornecedor: row.fornecedor,
+    origem: row.origem,
+    tags: maintenanceTags(`${row.componente || ""} ${row.descricao || ""}`),
+  };
+}
+
+function pickUltimaManutencao(row, historico = []) {
+  const desired = desiredMaintenanceTags(row?.titulo);
+  const withKm = historico.filter((item) => item?.km != null);
+  const candidates = withKm.filter((item) => item.tags?.some((tag) => desired.includes(tag)));
+  return candidates[0] || null;
+}
+
+async function loadDetalhesVeiculos(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+
+  const { rows } = await clientPool.query(`
+    SELECT DISTINCT ON (placa_norm)
+      placa_norm,
+      placavei,
+      nomevei,
+      marca_nome,
+      marcavei,
+      modelovei,
+      marcamodelorenavamvei,
+      chassivei,
+      anomodelovei,
+      tipopropriedadevei,
+      numeroeixosvei
+    FROM (
+      SELECT
+        regexp_replace(upper(placavei::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        placavei,
+        nomevei,
+        marca.nomemar AS marca_nome,
+        marcavei,
+        modelovei,
+        marcamodelorenavamvei,
+        chassivei,
+        anomodelovei,
+        tipopropriedadevei,
+        numeroeixosvei,
+        empresavei
+      FROM frotas.veiculos
+      LEFT JOIN frotas.marcas marca ON marca.codigomar = marcavei
+      WHERE NULLIF(TRIM(placavei::text), '') IS NOT NULL
+    ) v
+    WHERE placa_norm = ANY($1::text[])
+    ORDER BY placa_norm, empresavei
+  `, [normalized]);
+
+  return new Map(rows.map((row) => [row.placa_norm, row]));
+}
+
+async function loadDetalhesTelemetria(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+
+  const vPool = getVeiculosPool();
+  const { rows } = await vPool.query(`
+    SELECT DISTINCT ON (placa_norm)
+      placa_norm,
+      placa,
+      vehicle_model,
+      identificacao_equipamento,
+      chassi
+    FROM (
+      SELECT
+        regexp_replace(upper(placa::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        placa,
+        vehicle_model,
+        identificacao_equipamento,
+        chassi,
+        updated_at
+      FROM rodobach.veiculos
+      WHERE NULLIF(TRIM(placa::text), '') IS NOT NULL
+    ) v
+    WHERE placa_norm = ANY($1::text[])
+    ORDER BY placa_norm, updated_at DESC NULLS LAST
+  `, [normalized]);
+
+  return new Map(rows.map((row) => [row.placa_norm, row]));
+}
+
+async function loadHistoricoManutencoes(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+
+  const { rows } = await clientPool.query(`
+    WITH produtos_uniq AS (
+      SELECT DISTINCT ON (codigopro) codigopro, nomepro
+      FROM estoque.produtos
+      ORDER BY codigopro, empresapro
+    ),
+    fornecedores_uniq AS (
+      SELECT DISTINCT ON (codigofor) codigofor, nomefor, fantasiafor
+      FROM gerais.fornecedores
+      ORDER BY codigofor, empresafor
+    ),
+    eventos AS (
+      SELECT
+        regexp_replace(upper(COALESCE(NULLIF(i.veiculooep, ''), o.veiculoose)::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS data_manutencao,
+        o.kilometragematualveiculoose AS km_manutencao,
+        'OS Externa'::text AS tipo_documento,
+        o.codigoose::text AS numero_documento,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto ' || i.produtooep::text) AS descricao,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto ' || i.produtooep::text) AS componente,
+        'frotas.ordensservicosexternaprodutos'::text AS origem
+      FROM frotas.ordensservicosexternaprodutos i
+      JOIN frotas.ordensservicosexterna o
+        ON o.empresaose = i.empresaoep
+       AND o.serieose = i.serieoep
+       AND o.codigoose = i.codigooep
+       AND o.fornecedorose = i.fornecedoroep
+      LEFT JOIN produtos_uniq prod ON prod.codigopro = i.produtooep
+      LEFT JOIN fornecedores_uniq forn ON forn.codigofor = o.fornecedorose
+      WHERE NULLIF(TRIM(COALESCE(NULLIF(i.veiculooep, ''), o.veiculoose)::text), '') IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        regexp_replace(upper(COALESCE(NULLIF(i.veiculooes, ''), o.veiculoose)::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS data_manutencao,
+        o.kilometragematualveiculoose AS km_manutencao,
+        'OS Externa'::text AS tipo_documento,
+        o.codigoose::text AS numero_documento,
+        'Servico ' || i.servicooes::text AS descricao,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        'Servico ' || i.servicooes::text AS componente,
+        'frotas.ordensservicosexternaservicos'::text AS origem
+      FROM frotas.ordensservicosexternaservicos i
+      JOIN frotas.ordensservicosexterna o
+        ON o.empresaose = i.empresaoes
+       AND o.serieose = i.serieoes
+       AND o.codigoose = i.codigooes
+       AND o.fornecedorose = i.fornecedoroes
+      LEFT JOIN fornecedores_uniq forn ON forn.codigofor = o.fornecedorose
+      WHERE NULLIF(TRIM(COALESCE(NULLIF(i.veiculooes, ''), o.veiculoose)::text), '') IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        regexp_replace(upper(veiculovum::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        datavum::date AS data_manutencao,
+        kmtrocavum AS km_manutencao,
+        'Controle manutencao'::text AS tipo_documento,
+        componentevum::text AS numero_documento,
+        componentevum::text AS descricao,
+        'Historico do veiculo'::text AS fornecedor,
+        componentevum::text AS componente,
+        'frotas.veiculosultimasmanutencoes'::text AS origem
+      FROM frotas.veiculosultimasmanutencoes
+      WHERE NULLIF(TRIM(veiculovum::text), '') IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        nf.placa_norm,
+        nf.data_manutencao,
+        NULLIF(regexp_replace(COALESCE(nf.km_texto, ''), '[^0-9]', '', 'g'), '')::integer AS km_manutencao,
+        'Nota Fiscal'::text AS tipo_documento,
+        nf.numero_documento,
+        nf.descricao,
+        nf.fornecedor,
+        nf.descricao AS componente,
+        'compras.notasfiscaisentradaprodutos'::text AS origem
+      FROM (
+        SELECT
+          regexp_replace(upper(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+          COALESCE(n.dataentradanfe, n.dataemissaonfe)::date AS data_manutencao,
+          n.codigonfe::text AS numero_documento,
+          COALESCE(NULLIF(prod.nomepro, ''), 'Produto ' || i.produtonep::text) AS descricao,
+          COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+          substring(upper(COALESCE(n.observacaonfe, '')) from 'KM[: ]+([0-9][0-9\\.]{1,10})') AS km_texto
+        FROM compras.notasfiscaisentradaprodutos i
+        JOIN compras.notasfiscaisentrada n
+          ON n.empresanfe = i.empresanep
+         AND n.serienfe = i.serienep
+         AND n.codigonfe = i.codigonep
+         AND n.fornecedornfe = i.fornecedornep
+        LEFT JOIN produtos_uniq prod ON prod.codigopro = i.produtonep
+        LEFT JOIN fornecedores_uniq forn ON forn.codigofor = n.fornecedornfe
+        WHERE NULLIF(TRIM(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '') IS NOT NULL
+          AND (
+            COALESCE(prod.nomepro, '') ILIKE ANY(ARRAY['%OLEO%','%ÓLEO%','%FILTRO%','%LUBRIF%','%CAMBIO%','%CÂMBIO%','%DIFERENCIAL%','%RETARDER%','%RACOR%','%SECADOR%'])
+            OR COALESCE(n.observacaonfe, '') ILIKE ANY(ARRAY['%OLEO DO MOTOR%','%ÓLEO DO MOTOR%','%FILTRO OLEO%','%FILTRO ÓLEO%','%OLEO CAMBIO%','%ÓLEO CÂMBIO%','%DIFERENCIAL%','%LUBRIFICA%','%TROCA DE OLEO%','%TROCA DE ÓLEO%'])
+          )
+          AND COALESCE(prod.nomepro, '') NOT ILIKE ALL(ARRAY['%DIESEL%','%ARLA%','%COMBUSTIVEL%','%COMBUSTÍVEL%'])
+      ) nf
+      WHERE NULLIF(regexp_replace(COALESCE(nf.km_texto, ''), '[^0-9]', '', 'g'), '') IS NOT NULL
+    )
+    SELECT
+      placa_norm,
+      data_manutencao,
+      km_manutencao,
+      tipo_documento,
+      numero_documento,
+      descricao,
+      fornecedor,
+      componente,
+      origem
+    FROM eventos
+    WHERE placa_norm = ANY($1::text[])
+      AND km_manutencao IS NOT NULL
+    ORDER BY placa_norm, data_manutencao DESC NULLS LAST, km_manutencao DESC NULLS LAST
+  `, [normalized]);
+
+  const byPlate = new Map();
+  for (const row of rows) {
+    const item = eventToMaintenance(row);
+    if (!item.tags.length) continue;
+    if (!byPlate.has(row.placa_norm)) byPlate.set(row.placa_norm, []);
+    byPlate.get(row.placa_norm).push(item);
+  }
+  return byPlate;
+}
+
+async function loadPlanosAutorizados(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+
+  const { rows } = await clientPool.query(`
+    WITH produtos_uniq AS (
+      SELECT DISTINCT ON (codigopro) codigopro, nomepro
+      FROM estoque.produtos
+      ORDER BY codigopro, empresapro
+    ),
+    fornecedores_uniq AS (
+      SELECT DISTINCT ON (codigofor) codigofor, nomefor, fantasiafor
+      FROM gerais.fornecedores
+      ORDER BY codigofor, empresafor
+    )
+    SELECT DISTINCT ON (placa_norm)
+      placa_norm,
+      data_doc,
+      documento,
+      fornecedor,
+      item,
+      valor
+    FROM (
+      SELECT
+        regexp_replace(upper(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
+        COALESCE(n.dataentradanfe, n.dataemissaonfe)::date AS data_doc,
+        n.codigonfe::text AS documento,
+        n.fornecedornfe AS fornecedor_codigo,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Nao informado') AS fornecedor,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto ' || i.produtonep::text) AS item,
+        COALESCE(i.totalitemestoquenep, i.totalitemnep, 0) AS valor
+      FROM compras.notasfiscaisentradaprodutos i
+      JOIN compras.notasfiscaisentrada n
+        ON n.empresanfe = i.empresanep
+       AND n.serienfe = i.serienep
+       AND n.codigonfe = i.codigonep
+       AND n.fornecedornfe = i.fornecedornep
+      LEFT JOIN produtos_uniq prod ON prod.codigopro = i.produtonep
+      LEFT JOIN fornecedores_uniq forn ON forn.codigofor = n.fornecedornfe
+      WHERE NULLIF(TRIM(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '') IS NOT NULL
+    ) nf
+    WHERE placa_norm = ANY($1::text[])
+      AND (
+        fornecedor_codigo IN (644, 469, 649, 984, 846, 1390, 2115, 2764)
+        OR fornecedor ILIKE ANY(ARRAY['%VOLVO%','%SCANIA%','%DICAVE%','%BRAVO%','%RF - SUL%','%RF SUL%','%SUL COMERCIO DE CAMINHOES%'])
+      )
+      AND item ILIKE ANY(ARRAY['%PLANO DE MANUT%','%PLANO MANUT%','%REVIS%','%MANUTEN%'])
+    ORDER BY placa_norm, data_doc DESC NULLS LAST, documento DESC
+  `, [normalized]);
+
+  return new Map(rows.map((row) => [row.placa_norm, {
+    data: row.data_doc,
+    documento: row.documento,
+    fornecedor: row.fornecedor,
+    item: row.item,
+    valor: row.valor,
+  }]));
+}
+
+function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria) {
+  const ultima = pickUltimaManutencao(row, historico || []);
+  const modelo = detalhe?.nomevei
+    || detalhe?.modelovei
+    || detalhe?.marcamodelorenavamvei
+    || telemetria?.vehicle_model
+    || telemetria?.identificacao_equipamento
+    || null;
+  return {
+    ...row,
+    km_proximo_envio: proximoKmProgramado(row.km_atual, row.intervalo_km),
+    modelo,
+    marca: detalhe?.marca_nome || detalhe?.marcavei || null,
+    anoModelo: detalhe?.anomodelovei || null,
+    tipoPropriedade: detalhe?.tipopropriedadevei || null,
+    eixos: detalhe?.numeroeixosvei || null,
+    chassi: detalhe?.chassivei || telemetria?.chassi || null,
+    ultimaManutencao: ultima,
+    planoAutorizado: planoAutorizado || null,
+  };
+}
+
 const QUERY_VEICULOS = `
-  SELECT placa, odometro
+  SELECT placa, odometro, vehicle_model, identificacao_equipamento, chassi
   FROM (
     SELECT
       v.placa,
+      v.vehicle_model,
+      v.identificacao_equipamento,
+      v.chassi,
       mcb.odometro,
       ROW_NUMBER() OVER (
         PARTITION BY v.placa
@@ -82,7 +432,20 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
   try {
     const vPool = getVeiculosPool();
     const { rows } = await vPool.query(QUERY_VEICULOS);
-    res.json({ veiculos: rows });
+    const placas = rows.map((row) => row.placa);
+    const [detalhes, historicos, planosAutorizados] = await Promise.all([
+      loadDetalhesVeiculos(placas),
+      loadHistoricoManutencoes(placas),
+      loadPlanosAutorizados(placas),
+    ]);
+    const telemetria = new Map(rows.map((row) => [normalizePlate(row.placa), row]));
+
+    res.json({
+      veiculos: rows.map((row) => {
+        const placaNorm = normalizePlate(row.placa);
+        return mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm));
+      }),
+    });
   } catch (error) {
     next(error);
   }
@@ -132,7 +495,19 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
     const { rows } = await pool.query(
       `SELECT * FROM ${TABLE()} ORDER BY criado_em DESC`
     );
-    res.json({ automacoes: rows });
+    const placas = rows.map((row) => row.placa);
+    const [detalhes, historicos, planosAutorizados, telemetria] = await Promise.all([
+      loadDetalhesVeiculos(placas),
+      loadHistoricoManutencoes(placas),
+      loadPlanosAutorizados(placas),
+      loadDetalhesTelemetria(placas),
+    ]);
+    res.json({
+      automacoes: rows.map((row) => {
+        const placaNorm = normalizePlate(row.placa);
+        return mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm));
+      }),
+    });
   } catch (error) {
     next(error);
   }
@@ -177,7 +552,7 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
           mensagem,
           intervalo,
           km,
-          km + intervalo,
+          proximoKmProgramado(km, intervalo),
           contato.numeros,
           contato.contato_id,
           contato.contato_nome,
@@ -245,7 +620,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       if (atual.length > 0) {
         const novoKm = km_atual !== undefined ? Number(km_atual) : atual[0].km_atual;
         const novoIntervalo = intervalo_km !== undefined ? Number(intervalo_km) : atual[0].intervalo_km;
-        vals.push(novoKm + novoIntervalo);
+        vals.push(proximoKmProgramado(novoKm, novoIntervalo));
       } else {
         vals.push(0);
       }

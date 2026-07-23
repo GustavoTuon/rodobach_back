@@ -2,6 +2,7 @@ import { Router } from "express";
 import { pool } from "../db/pool.js";
 import { tableName } from "../config.js";
 import { mapAnttRows, mapDiaria } from "../mappers.js";
+import { getFreteAnttTerceirosAlertas } from "../services/freteAnttAlertasService.js";
 
 export const freteRouter = Router();
 
@@ -90,6 +91,15 @@ freteRouter.get("/frete/antt", async (_req, res, next) => {
 });
 
 // ── GET /api/motoristas/diarias ───────────────────────────────────────────────
+freteRouter.get("/frete/antt/alertas-terceiros", async (req, res, next) => {
+  try {
+    const data = await getFreteAnttTerceirosAlertas(req.query);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 freteRouter.get("/motoristas/diarias", async (_req, res, next) => {
   try {
     const { rows } = await pool.query(`

@@ -28,7 +28,9 @@ import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
 import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
+import { getFaturamentoDiarioMensagem } from "../services/faturamentoDiarioMensagemService.js";
 import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalComparativoService.js";
+import { getAlertasOperacionaisMensagem } from "../services/alertasOperacionaisMensagemService.js";
 
 export const financeiroRouter = Router();
 
@@ -199,6 +201,8 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
       empresa: req.query.empresa,
       cliente: req.query.cliente,
       status: req.query.status,
+      inativoMin: req.query.inativoMin,
+      inativoMax: req.query.inativoMax,
       incluirVencidosAntigos: req.query.incluirVencidosAntigos,
     });
     res.json(data);
@@ -257,6 +261,40 @@ financeiroRouter.get("/financeiro/faturamento-diario", async (req, res, next) =>
       material: req.query.material || req.query.produto,
     });
     res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/faturamento-diario/mensagem", async (req, res, next) => {
+  try {
+    res.json(await getFaturamentoDiarioMensagem({
+      data: req.query.data || req.query.date || req.query.dataReferencia,
+      mesInicio: req.query.mesInicio || req.query.monthStart,
+      meta: req.query.meta,
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/alertas-operacionais/mensagem", async (req, res, next) => {
+  try {
+    res.json(await getAlertasOperacionaisMensagem({
+      numero: req.query.numero || req.query.phone,
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      diasPeriodo: req.query.diasPeriodo,
+      margemMinima: req.query.margemMinima || req.query.margem,
+      clienteDiasSemFaturar: req.query.clienteDiasSemFaturar,
+      clienteMinimoFaturamento: req.query.clienteMinimoFaturamento,
+      veiculoDiasSemViagem: req.query.veiculoDiasSemViagem,
+      veiculoMinimoCusto: req.query.veiculoMinimoCusto,
+      limit: req.query.limit,
+      viagemMargemBaixa: req.query.viagemMargemBaixa,
+      clienteSemFaturar: req.query.clienteSemFaturar,
+      veiculoParadoComCusto: req.query.veiculoParadoComCusto,
+    }));
   } catch (error) {
     next(error);
   }
