@@ -24,9 +24,10 @@ import {
   getManutencoesVeiculosFiltros,
 } from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
-import { getDreEmpresarial } from "../services/dreEmpresarialService.js";
+import { getDreEmpresarial, getDreLancamentoDetalhe } from "../services/dreEmpresarialService.js";
 import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
+import { getResultadoFretes } from "../services/resultadoFretesService.js";
 import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
 import { getFaturamentoDiarioMensagem } from "../services/faturamentoDiarioMensagemService.js";
 import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalComparativoService.js";
@@ -192,6 +193,14 @@ financeiroRouter.get("/financeiro/dre-empresarial/lancamentos", async (req, res,
   }
 });
 
+financeiroRouter.get("/financeiro/dre-empresarial/lancamento-detalhe", async (req, res, next) => {
+  try {
+    res.json(await getDreLancamentoDetalhe(req.query));
+  } catch (error) {
+    next(error);
+  }
+});
+
 financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
   try {
     const data = await getAnaliseClientes({
@@ -241,6 +250,25 @@ financeiroRouter.get("/financeiro/lucro-viagens", async (req, res, next) => {
       origem: req.query.origem,
       destino: req.query.destino,
       material: req.query.material || req.query.produto,
+    });
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/resultado-fretes", async (req, res, next) => {
+  try {
+    const data = await getResultadoFretes({
+      startDate: req.query.startDate || req.query.dataInicial || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFinal || req.query.dataFim,
+      cliente: req.query.cliente,
+      placa: req.query.placa,
+      origem: req.query.origem,
+      destino: req.query.destino,
+      material: req.query.material || req.query.produto,
+      direcao: req.query.direcao,
+      ufBase: req.query.ufBase,
     });
     res.json(data);
   } catch (error) {

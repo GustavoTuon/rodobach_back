@@ -17,6 +17,8 @@ import { conducaoRouter } from "./routes/conducao.js";
 import { automacoesRouter } from "./routes/automacoes.js";
 import { abastecimentoAcordosRouter } from "./routes/abastecimentoAcordos.js";
 import { statusCargaRouter } from "./routes/statusCarga.js";
+import { trafegusRouter } from "./routes/trafegus.js";
+import { oportunidadesRetornoRouter } from "./routes/oportunidadesRetorno.js";
 
 const app = express();
 
@@ -30,7 +32,7 @@ app.use(cors({
     callback(new Error(`Origin not allowed: ${origin}`));
   },
 }));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 // ── Rotas públicas ────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
@@ -100,6 +102,8 @@ app.use("/api", conducaoRouter);
 app.use("/api", automacoesRouter);
 app.use("/api", abastecimentoAcordosRouter);
 app.use("/api", statusCargaRouter);
+app.use("/api", trafegusRouter);
+app.use("/api", oportunidadesRetornoRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {
