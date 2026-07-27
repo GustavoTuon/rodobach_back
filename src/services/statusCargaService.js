@@ -1,6 +1,7 @@
 import { clientPool } from "../db/clientPool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { quoteIdent } from "../config.js";
+import { getTrafegusDashboard } from "./trafegusService.js";
 
 const PLACAS_STATUS_CARGA = [
   "RAA8G18",
@@ -173,7 +174,7 @@ async function getLatestLocations(plates = []) {
   }));
 }
 
-function classifyVehicle(vehicle, docs = [], thirdPartyFreights = []) {
+function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm = null) {
   const activeDocs = docs
     .filter((doc) =>
       !["CANCELADO", "INUTILIZADO", "ANULADO"].includes(doc.statusConhecimento)
@@ -197,7 +198,7 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = []) {
     )
     .sort((a, b) => String(b.emissaoAt || "").localeCompare(String(a.emissaoAt || "")))[0];
 
-  if (isBase && !activeThirdPartyFreight) {
+  if (isBase && !activeThirdPartyFreight && !trafegusSm) {
     return {
       ...vehicle,
       ...(lastDoc || {}),
@@ -234,10 +235,25 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = []) {
     const justEmitted = hoursSince(active.emissaoAt) <= 24;
     const descargaHoras = unloadGraceHours();
     const chegadaDestinoAt = active.chegadaViagemAt || active.entregaViagemAt;
-    const descargaExpirada = atDestino && chegadaDestinoAt && hoursSince(chegadaDestinoAt) >= descargaHoras;
+    // Em viagens com múltiplas entregas, chegar a um dos destinos não encerra a
+    // operação enquanto a SM permanecer ativa no Trafegus.
+    const descargaExpirada = !trafegusSm && atDestino && chegadaDestinoAt && hoursSince(chegadaDestinoAt) >= descargaHoras;
     const entregaRegistrada = active.entregaAt && isPastOrNow(active.entregaAt);
 
     if (entregaRegistrada) {
+      if (trafegusSm) {
+        return {
+          ...vehicle,
+          ...active,
+          trafegusSm,
+          trafegusDivergente: true,
+          estado: "carregado_confirmado",
+          estadoLabel: "Carregado",
+          confianca: "media",
+          evidencia: `SM ${trafegusSm.id} em viagem no Trafegus, mas o CT-e possui entrega registrada; conferir encerramento da SM ou nova operacao.`,
+          statusFonte: "trafegus",
+        };
+      }
       return {
         ...vehicle,
         ...active,
@@ -266,10 +282,13 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = []) {
     return {
       ...vehicle,
       ...active,
+      trafegusSm,
       estado: "carregado_confirmado",
       estadoLabel: "Carregado",
-      confianca: atOrigem || atDestino || justEmitted ? "alta" : "media",
-      evidencia: atDestino
+      confianca: trafegusSm || atOrigem || atDestino || justEmitted ? "alta" : "media",
+      evidencia: trafegusSm
+        ? `CT-e ativo sem entrega e SM ${trafegusSm.id} em viagem no Trafegus; operacao confirmada pelas duas fontes.`
+        : atDestino
         ? `CT-e recente com veiculo na cidade de destino/entrega; aguardando ate ${descargaHoras}h para descarga.`
         : atOrigem
           ? "CT-e recente com veiculo na cidade de coleta/origem."
@@ -291,6 +310,28 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = []) {
       confianca: "media",
       evidencia: "PEF/e-Frete ativo para esta placa; indica operacao de terceiro mesmo sem CT-e emitido.",
       statusFonte: "pef_terceiro",
+    };
+  }
+
+  if (trafegusSm) {
+    return {
+      ...vehicle,
+      trafegusSm,
+      estado: "carregado_confirmado",
+      estadoLabel: "Carregado",
+      confianca: "media",
+      evidencia: `SM ${trafegusSm.id} em viagem no Trafegus para ${trafegusSm.destino || "destino nao informado"}; ainda sem CT-e ativo confiavel no cruzamento.`,
+      statusFonte: "trafegus",
+      documento: "",
+      cliente: trafegusSm.embarcador || "",
+      origem: trafegusSm.origem || "",
+      destino: trafegusSm.destino || "",
+      pesoKg: 0,
+      emissaoAt: trafegusSm.inicio || trafegusSm.previsaoInicio || null,
+      saidaAt: trafegusSm.inicio || trafegusSm.previsaoInicio || null,
+      entregaAt: null,
+      chegadaViagemAt: null,
+      eventoReferenciaAt: trafegusSm.inicio || trafegusSm.previsaoInicio || null,
     };
   }
 
@@ -347,6 +388,14 @@ function buildDivergenceAlert(row) {
   const atOrigin = sameLocationCity(loc.municipio, loc.uf, row.origem);
   const isBase = BASE_EMPTY_CITIES.has(normalizeText(locationLabel(loc.municipio, loc.uf)));
   const evidence = normalizeText(row.evidencia || "");
+
+  if (row.trafegusDivergente) {
+    return {
+      nivel: "alto",
+      label: "SM x CT-e",
+      descricao: "Trafegus informa SM em viagem, mas o CT-e relacionado possui entrega registrada.",
+    };
+  }
 
   if (row.statusFonte === "pef_terceiro" && normalizeText(row.cartaFreteStatus) === "CANCELADA") {
     return {
@@ -455,6 +504,12 @@ export async function getStatusCargaFrota(filters = {}) {
   const vehicleParams = [targetPlates];
   const vehicleWhere = ["COALESCE(v.situacaovei::text, '') <> 'I'", "v.tipopropriedadevei::text = 'P'"];
   vehicleWhere.push(`regexp_replace(upper(v.placavei::text), '[^A-Z0-9]', '', 'g') = ANY($1::text[])`);
+
+  const trafegusDashboard = await getTrafegusDashboard().catch((error) => ({
+    sms: [],
+    indisponivel: true,
+    erro: error?.message || "Trafegus indisponivel",
+  }));
 
   const [vehicleResult, docsResult, pefResult, locations] = await Promise.all([
     clientPool.query(`
@@ -625,6 +680,12 @@ export async function getStatusCargaFrota(filters = {}) {
     getLatestLocations(targetPlates).catch(() => new Map()),
   ]);
 
+  const trafegusByPlate = new Map(
+    (Array.isArray(trafegusDashboard?.sms) ? trafegusDashboard.sms : [])
+      .map((sm) => [normalizePlate(sm.placa), sm])
+      .filter(([smPlate]) => smPlate)
+  );
+
   const docsByPlate = new Map();
   for (const row of docsResult.rows) {
     const rowPlate = normalizePlate(row.placa);
@@ -733,6 +794,7 @@ export async function getStatusCargaFrota(filters = {}) {
       normalized,
       docsByPlate.get(normalized.placa) || [],
       thirdPartyFreightsByPlate.get(normalized.placa) || [],
+      trafegusByPlate.get(normalized.placa) || null,
     );
     const alertaDivergencia = buildDivergenceAlert(classified);
     return {
@@ -771,6 +833,12 @@ export async function getStatusCargaFrota(filters = {}) {
 
   return {
     periodo: { startDate, endDate: dateOnly(new Date()) },
+    trafegus: {
+      disponivel: !trafegusDashboard?.indisponivel,
+      erro: trafegusDashboard?.erro || "",
+      smsAtivas: trafegusByPlate.size,
+      atualizadoEm: trafegusDashboard?.atualizadoEm || null,
+    },
     regra: {
       carregado: "CT-e recente sem entrega real registrada ou PEF/e-Frete ativo sem sinal de residuo.",
       vazioConfirmado: "Cidade-base/patio ou CT-e com datahoraentregacon/dataentregacon ja vencida.",

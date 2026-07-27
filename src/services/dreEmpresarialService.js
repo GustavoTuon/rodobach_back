@@ -162,7 +162,13 @@ function aggregate(rows) {
     add(categories, row.categoriaDre, values, { categoriaDre: row.categoriaDre, order: DRE_ORDER.indexOf(row.categoriaDre) });
     add(accounts, `${row.contaCodigo || "sem"}:${row.categoriaDre}`, values, { contaCodigo: row.contaCodigo, contaNome: row.contaFinanceira, contaMascara: row.contaMascara, categoriaDre: row.categoriaDre });
     add(centers, String(row.centroCodigo || "sem"), values, { centroCodigo: row.centroCodigo, centroCusto: row.centroCusto, centroMascara: row.centroMascara });
-    if (row.placa) add(plates, row.placa, values, { placa: row.placa, veiculoNome: row.veiculoNome, centroCusto: row.centroCusto });
+    if (row.placa) add(plates, row.placa, values, {
+      placa: row.placa,
+      veiculoNome: row.veiculoNome,
+      centroCusto: row.centroCusto,
+      tipoPropriedade: row.tipoPropriedade,
+      operacao: row.operacao,
+    });
   }
 
   return {
@@ -298,13 +304,20 @@ export async function getDreEmpresarial({
         COALESCE(NULLIF(rec.observacaorec, ''), '')::text AS historico,
         rota_info.rota::text AS rota,
         rota_info.ctes::text AS ctes,
+        NULL::smallint AS tipo_cte,
+        NULL::text AS chave_cte,
         CASE
           WHEN COALESCE(rec.valorabertorec,0) > 0 AND rec.datavencimentorec::date < CURRENT_DATE THEN 'vencido'
           WHEN COALESCE(rec.valorabertorec,0) > 0 THEN 'aberto'
           ELSE 'recebido'
         END AS status_financeiro,
         vlr.valorliquido::numeric AS valor,
-        1::int AS lancamentos
+        1::int AS lancamentos,
+        rec.empresarec::int AS source_empresa,
+        rec.serierec::text AS source_serie,
+        rec.duplicatarec::text AS source_documento,
+        rec.parcelarec::text AS source_parcela,
+        rec.clienterec::int AS source_pessoa
       FROM financeiro.receber rec
       INNER JOIN financeiro.valorliquidorateiosreceber vlr
         ON rec.empresarec = vlr.empresa
@@ -386,6 +399,130 @@ export async function getDreEmpresarial({
         AND (p.centro IS NULL OR vlr.centrocusto = p.centro)
         AND (p.conta IS NULL OR vlr.contafinanceira = p.conta)
     ),
+    receita_cte_sem_titulo AS (
+      SELECT
+        con.empresacon AS empresa,
+        con.dataemissaocon::date AS data_base,
+        date_trunc('month', con.dataemissaocon::date)::date AS mes,
+        'RECEITA BRUTA'::text AS categoria_dre,
+        'Receita'::text AS tipo,
+        'cte_sem_titulo'::text AS origem,
+        UPPER(NULLIF(TRIM(con.veiculocon::text), '')) AS placa,
+        vei.nomevei::text AS veiculo_nome,
+        vei.tipopropriedadevei::text AS tipo_propriedade,
+        vei.centrocustovei AS centro_codigo,
+        cc.nomeccs AS centro_nome,
+        cc.mascaraccs AS centro_mascara,
+        NULL::int AS conta_codigo,
+        'CT-e sem título financeiro'::text AS conta_nome,
+        NULL::text AS conta_mascara,
+        con.clientecon AS cliente_codigo,
+        COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, '')) AS pessoa_nome,
+        COALESCE(NULLIF(con.numeroctecon::text, ''), con.codigocon::text) AS documento,
+        'CT-e ativo sem título no contas a receber'::text AS historico,
+        NULLIF(CONCAT_WS(' ate ',
+          NULLIF(CONCAT_WS('/', NULLIF(origem.nomecid, ''), NULLIF(TRIM(uf_origem.abreviaturaest), '')), ''),
+          NULLIF(CONCAT_WS('/', NULLIF(destino.nomecid, ''), NULLIF(TRIM(uf_destino.abreviaturaest), '')), '')
+        ), '')::text AS rota,
+        COALESCE(NULLIF(con.numeroctecon::text, ''), con.codigocon::text) AS ctes,
+        con.tipoctecon::smallint AS tipo_cte,
+        NULLIF(TRIM(con.chavectecon), '')::text AS chave_cte,
+        'pendente'::text AS status_financeiro,
+        COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)::numeric AS valor,
+        1::int AS lancamentos,
+        con.empresacon::int AS source_empresa,
+        con.seriecon::text AS source_serie,
+        con.codigocon::text AS source_documento,
+        NULL::text AS source_parcela,
+        con.clientecon::int AS source_pessoa
+      FROM logistica.conhecimentos con
+      CROSS JOIN params p
+      LEFT JOIN LATERAL (
+        SELECT v.nomevei, v.tipopropriedadevei, v.centrocustovei, v.empresavei
+        FROM frotas.veiculos v
+        WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(con.veiculocon::text))
+        ORDER BY (v.empresavei = con.empresacon) DESC, v.empresavei
+        LIMIT 1
+      ) vei ON true
+      LEFT JOIN LATERAL (
+        SELECT c.nomeccs, c.mascaraccs
+        FROM financeiro.centroscustos c
+        WHERE c.codigoccs = vei.centrocustovei
+        ORDER BY (c.empresaccs = con.empresacon) DESC, c.empresaccs
+        LIMIT 1
+      ) cc ON true
+      LEFT JOIN LATERAL (
+        SELECT nomecli, fantasiacli
+        FROM gerais.clientes
+        WHERE codigocli = con.clientecon
+        LIMIT 1
+      ) cli ON true
+      LEFT JOIN localidades.cidades origem ON origem.codigocid = con.cidadecoletacon
+      LEFT JOIN localidades.cidades destino ON destino.codigocid = con.cidadeentregacon
+      LEFT JOIN localidades.estados uf_origem ON uf_origem.codigoest = origem.estadocid
+      LEFT JOIN localidades.estados uf_destino ON uf_destino.codigoest = destino.estadocid
+      WHERE con.statuscon = 2
+        AND NULLIF(TRIM(con.veiculocon::text), '') IS NOT NULL
+        AND con.dataemissaocon::date >= p.data_inicio
+        AND con.dataemissaocon::date <= p.data_fim
+        AND (p.empresa IS NULL OR con.empresacon = p.empresa)
+        AND (p.centro IS NULL OR vei.centrocustovei = p.centro)
+        AND p.conta IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM (
+            SELECT rcv.empresa,
+                   rcv.serieconhecimento AS serie_cte, rcv.codigoconhecimento AS codigo_cte
+            FROM financeiro.receberconhecimentosvinculados rcv
+            UNION ALL
+            SELECT rcc.empresarcc,
+                   NULL::varchar, rcc.conhecimentorcc
+            FROM financeiro.receberconhecimentos rcc
+          ) vinc
+          WHERE vinc.empresa = con.empresacon
+            AND vinc.codigo_cte = con.codigocon
+            AND (vinc.serie_cte IS NULL OR vinc.serie_cte = con.seriecon)
+        )
+        -- A chave fiscal identifica o CT-e, mesmo quando o sistema mantém uma
+        -- cópia interna em outra empresa/série. Não considerar a cópia quando
+        -- a mesma chave foi cancelada ou já gerou título em outro registro.
+        AND NOT EXISTS (
+          SELECT 1
+          FROM logistica.conhecimentos con_cancelado
+          WHERE NULLIF(TRIM(con.chavectecon), '') IS NOT NULL
+            AND con_cancelado.chavectecon = con.chavectecon
+            AND (
+              con_cancelado.statuscon = 3
+              OR EXISTS (
+                SELECT 1
+                FROM logistica.conhecimentoscancelados cancelamento
+                WHERE cancelamento.empresacca = con_cancelado.empresacon
+                  AND cancelamento.seriecca = con_cancelado.seriecon
+                  AND cancelamento.codigocca = con_cancelado.codigocon
+              )
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM logistica.conhecimentos con_financeiro
+          INNER JOIN (
+            SELECT rcv.empresa,
+                   rcv.serieconhecimento AS serie_cte,
+                   rcv.codigoconhecimento AS codigo_cte
+            FROM financeiro.receberconhecimentosvinculados rcv
+            UNION ALL
+            SELECT rcc.empresarcc,
+                   NULL::varchar,
+                   rcc.conhecimentorcc
+            FROM financeiro.receberconhecimentos rcc
+          ) vinc_chave
+            ON vinc_chave.empresa = con_financeiro.empresacon
+           AND vinc_chave.codigo_cte = con_financeiro.codigocon
+           AND (vinc_chave.serie_cte IS NULL OR vinc_chave.serie_cte = con_financeiro.seriecon)
+          WHERE NULLIF(TRIM(con.chavectecon), '') IS NOT NULL
+            AND con_financeiro.chavectecon = con.chavectecon
+        )
+    ),
     pagar AS (
       SELECT
         pag.empresapag AS empresa,
@@ -409,13 +546,20 @@ export async function getDreEmpresarial({
         COALESCE(NULLIF(pag.observacaopag, ''), '')::text AS historico,
         NULL::text AS rota,
         NULL::text AS ctes,
+        NULL::smallint AS tipo_cte,
+        NULL::text AS chave_cte,
         CASE
           WHEN COALESCE(pag.valorabertopag,0) > 0 AND pag.datavencimentopag::date < CURRENT_DATE THEN 'vencido'
           WHEN COALESCE(pag.valorabertopag,0) > 0 THEN 'aberto'
           ELSE 'pago'
         END AS status_financeiro,
         vlp.valorliquido::numeric * -1 AS valor,
-        1::int AS lancamentos
+        1::int AS lancamentos,
+        pag.empresapag::int AS source_empresa,
+        pag.seriepag::text AS source_serie,
+        pag.duplicatapag::text AS source_documento,
+        pag.parcelapag::text AS source_parcela,
+        pag.fornecedorpag::int AS source_pessoa
       FROM financeiro.pagar pag
       INNER JOIN financeiro.valorliquidorateiospagar vlp
         ON pag.empresapag = vlp.empresa
@@ -490,9 +634,16 @@ export async function getDreEmpresarial({
         COALESCE(NULLIF(mfr.historico, ''), '')::text AS historico,
         NULL::text AS rota,
         NULL::text AS ctes,
+        NULL::smallint AS tipo_cte,
+        NULL::text AS chave_cte,
         CASE WHEN mfr.valor >= 0 THEN 'recebido' ELSE 'pago' END AS status_financeiro,
         mfr.valor::numeric AS valor,
-        1::int AS lancamentos
+        1::int AS lancamentos,
+        mfr.empresa::int AS source_empresa,
+        NULL::text AS source_serie,
+        COALESCE(NULLIF(mfr.documento, ''), '')::text AS source_documento,
+        NULL::text AS source_parcela,
+        NULL::int AS source_pessoa
       FROM financeiro.movimentacaofinanceirarateadasinalizada mfr
       CROSS JOIN params p
       LEFT JOIN LATERAL (
@@ -526,6 +677,7 @@ export async function getDreEmpresarial({
     ),
     base AS (
       SELECT * FROM receita
+      UNION ALL SELECT * FROM receita_cte_sem_titulo
       UNION ALL SELECT * FROM pagar
       UNION ALL SELECT * FROM movimentacao
     )
@@ -560,6 +712,7 @@ export async function getDreEmpresarial({
   const rows = result.rows.map((row) => {
     const categoria = row.categoria_dre;
     const valor = r2(row.valor);
+    const placa = extractPlate(row.placa, row.centro_nome, row.historico);
     return {
       data: dateOnly(row.data_base),
       mes: dateOnly(row.mes),
@@ -572,28 +725,45 @@ export async function getDreEmpresarial({
       contaMascara: row.conta_mascara,
       categoriaDre: categoria,
       tipo: row.tipo,
-      placa: extractPlate(row.placa, row.centro_nome, row.historico),
+      placa,
       veiculoNome: row.veiculo_nome,
       tipoPropriedade: row.tipo_propriedade,
-      operacao: row.tipo_propriedade === "P" ? "frota" : (row.placa ? "terceiro" : "sem_placa"),
+      operacao: row.tipo_propriedade === "P" ? "frota" : (placa ? "terceiro" : "sem_placa"),
       clienteCodigo: row.cliente_codigo,
       pessoaNome: row.pessoa_nome,
       documento: row.documento,
       historico: row.historico,
       rota: row.rota,
       ctes: row.ctes,
+      tipoCte: row.tipo_cte,
+      chaveCte: row.chave_cte,
       valor,
       valorAbs: Math.abs(valor),
       status: row.status_financeiro,
       origem: row.origem,
       lancamentos: n(row.lancamentos),
       sinal: dreSign(categoria),
+      detailKey: {
+        origem: row.origem,
+        empresa: row.source_empresa,
+        serie: row.source_serie,
+        documento: row.source_documento,
+        parcela: row.source_parcela,
+        pessoa: row.source_pessoa,
+        centro: row.centro_codigo,
+        conta: row.conta_codigo,
+      },
     };
   });
 
-  const summary = buildSummary(rows);
-  const aggregations = aggregate(rows);
-  const management = buildManagement(rows, aggregations);
+  // CT-es sem titulo financeiro sao uma fila de auditoria, nao faturamento
+  // realizado. Mantemos os documentos no retorno separado para revisao, mas
+  // eles nao participam dos totais, graficos, rankings ou detalhes por placa.
+  const cteAuditRows = rows.filter((row) => row.origem === "cte_sem_titulo");
+  const financialRows = rows.filter((row) => row.origem !== "cte_sem_titulo");
+  const summary = buildSummary(financialRows);
+  const aggregations = aggregate(financialRows);
+  const management = buildManagement(financialRows, aggregations);
 
   return {
     period: resolved,
@@ -606,7 +776,12 @@ export async function getDreEmpresarial({
     centers: aggregations.centers,
     plates: aggregations.plates,
     management,
-    rows,
+    rows: financialRows,
+    cteAudit: {
+      count: cteAuditRows.length,
+      value: r2(cteAuditRows.reduce((total, row) => total + n(row.valor), 0)),
+      rows: cteAuditRows,
+    },
     sources: [
       "financeiro.receber",
       "financeiro.valorliquidorateiosreceber",
@@ -619,5 +794,117 @@ export async function getDreEmpresarial({
       "gerais.clientes",
       "gerais.fornecedores",
     ],
+  };
+}
+
+export async function getDreLancamentoDetalhe({
+  origem,
+  empresa,
+  serie,
+  documento,
+  parcela,
+  pessoa,
+} = {}) {
+  if (origem !== "pagar") {
+    return { origem, itens: [], observacao: "Este tipo de lançamento não possui itens operacionais vinculados." };
+  }
+
+  const params = [
+    Number(empresa),
+    String(serie || ""),
+    String(documento || ""),
+    Number(pessoa),
+  ];
+  if (!params[0] || !params[2] || !params[3]) {
+    throw new Error("Chave do lançamento incompleta.");
+  }
+
+  const { rows } = await clientPool.query(
+    `
+    WITH itens AS (
+      SELECT
+        'nota_fiscal'::text AS origem_item,
+        i.sequencianep::text AS item,
+        i.produtonep::text AS codigo,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto sem descrição')::text AS descricao,
+        i.unidadenep::text AS unidade,
+        COALESCE(i.quantidadenep, 0)::numeric AS quantidade,
+        COALESCE(i.valorunitarionep, 0)::numeric AS valor_unitario,
+        COALESCE(i.totalitemestoquenep, i.totalitemnep, 0)::numeric AS total
+      FROM compras.notasfiscaisentradaprodutos i
+      LEFT JOIN LATERAL (
+        SELECT p.nomepro
+        FROM estoque.produtos p
+        WHERE p.codigopro = i.produtonep
+        ORDER BY (p.empresapro = i.empresanep) DESC, p.empresapro
+        LIMIT 1
+      ) prod ON true
+      WHERE i.empresanep = $1
+        AND i.serienep::text = $2
+        AND i.codigonep::text = $3
+        AND i.fornecedornep = $4
+
+      UNION ALL
+
+      SELECT
+        'os_produto'::text,
+        i.sequenciaoep::text,
+        i.produtooep::text,
+        COALESCE(NULLIF(prod.nomepro, ''), 'Produto de manutenção')::text,
+        NULL::text,
+        COALESCE(i.quantidadeoep, 0)::numeric,
+        COALESCE(i.valorunitariooep, 0)::numeric,
+        COALESCE(i.totalitemoep, 0)::numeric
+      FROM frotas.ordensservicosexternaprodutos i
+      LEFT JOIN LATERAL (
+        SELECT p.nomepro
+        FROM estoque.produtos p
+        WHERE p.codigopro = i.produtooep
+        ORDER BY (p.empresapro = i.empresaoep) DESC, p.empresapro
+        LIMIT 1
+      ) prod ON true
+      WHERE i.empresaoep = $1
+        AND i.serieoep::text = $2
+        AND i.codigooep::text = $3
+        AND i.fornecedoroep = $4
+
+      UNION ALL
+
+      SELECT
+        'os_servico'::text,
+        i.sequenciaoes::text,
+        i.servicooes::text,
+        ('Serviço ' || COALESCE(i.servicooes::text, 'sem descrição'))::text,
+        NULL::text,
+        COALESCE(i.quantidadeoes, 0)::numeric,
+        COALESCE(i.valorunitariooes, 0)::numeric,
+        COALESCE(i.totalitemoes, 0)::numeric
+      FROM frotas.ordensservicosexternaservicos i
+      WHERE i.empresaoes = $1
+        AND i.serieoes::text = $2
+        AND i.codigooes::text = $3
+        AND i.fornecedoroes = $4
+    )
+    SELECT * FROM itens ORDER BY origem_item, item
+    `,
+    params,
+  );
+
+  return {
+    origem,
+    documento: params[2],
+    itens: rows.map((row) => ({
+      origem: row.origem_item,
+      item: row.item,
+      codigo: row.codigo,
+      descricao: row.descricao,
+      unidade: row.unidade,
+      quantidade: n(row.quantidade),
+      valorUnitario: r2(row.valor_unitario),
+      total: r2(row.total),
+    })),
+    observacao: rows.length
+      ? ""
+      : "O título financeiro não possui produtos ou serviços vinculados nas notas fiscais/ordens de serviço.",
   };
 }

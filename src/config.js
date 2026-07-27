@@ -21,6 +21,8 @@ export const config = {
     apiUrl: (process.env.N8N_API_URL || "").replace(/\/+$/, ""),
     apiKey: process.env.N8N_API_KEY || "",
     vencimentoClientesWorkflowId: process.env.N8N_VENCIMENTO_CLIENTES_WORKFLOW_ID || "",
+    oportunidadesRetornoWebhookUrl: process.env.N8N_OPORTUNIDADES_RETORNO_WEBHOOK_URL || "",
+    oportunidadesRetornoDestinatario: process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO || "",
   },
   frontendOrigins: (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
     .split(",")

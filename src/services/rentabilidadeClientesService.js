@@ -190,8 +190,14 @@ export const BASE_SQL = `
       COALESCE(mot.nomemot, NULLIF(TRIM(con.motoristacon::text), '')) AS motorista,
       COALESCE(cvf.cidade_origem, con.cidadecoletacon) AS cidade_origem_codigo,
       COALESCE(cvf.cidade_destino, con.cidadeentregacon) AS cidade_destino_codigo,
-      COALESCE(NULLIF(origem.nomecid, ''), con.cidadecoletacon::text) AS origem,
-      COALESCE(NULLIF(destino.nomecid, ''), con.cidadeentregacon::text) AS destino,
+      COALESCE(
+        NULLIF(CONCAT_WS('/', NULLIF(origem.nomecid, ''), NULLIF(TRIM(origem_uf.abreviaturaest), '')), ''),
+        con.cidadecoletacon::text
+      ) AS origem,
+      COALESCE(
+        NULLIF(CONCAT_WS('/', NULLIF(destino.nomecid, ''), NULLIF(TRIM(destino_uf.abreviaturaest), '')), ''),
+        con.cidadeentregacon::text
+      ) AS destino,
       COALESCE(NULLIF(con.naturezacargacon::text, ''), NULLIF(con.tipocargacon::text, ''), 'Nao informado') AS material,
       CASE
         WHEN con.tomadorservicoctecon = 4 AND con.tomadorservicooutroscon IS NOT NULL THEN con.tomadorservicooutroscon
@@ -226,6 +232,8 @@ export const BASE_SQL = `
      AND carta.codigo_con = con.codigocon
     LEFT JOIN localidades.cidades origem ON origem.codigocid = COALESCE(cvf.cidade_origem, con.cidadecoletacon)
     LEFT JOIN localidades.cidades destino ON destino.codigocid = COALESCE(cvf.cidade_destino, con.cidadeentregacon)
+    LEFT JOIN localidades.estados origem_uf ON origem_uf.codigoest = origem.estadocid
+    LEFT JOIN localidades.estados destino_uf ON destino_uf.codigoest = destino.estadocid
     LEFT JOIN frotas.motoristas mot ON mot.codigomot = con.motoristacon AND mot.empresamot = con.empresacon
     LEFT JOIN LATERAL (
       SELECT v.tipopropriedadevei
