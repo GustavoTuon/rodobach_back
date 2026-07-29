@@ -269,6 +269,7 @@ financeiroRouter.get("/financeiro/resultado-fretes", async (req, res, next) => {
       material: req.query.material || req.query.produto,
       direcao: req.query.direcao,
       ufBase: req.query.ufBase,
+      valorMaximoPequeno: req.query.valorMaximoPequeno,
     });
     res.json(data);
   } catch (error) {

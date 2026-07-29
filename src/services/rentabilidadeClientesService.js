@@ -188,6 +188,8 @@ export const BASE_SQL = `
       CASE WHEN vei.tipopropriedadevei::text = 'P' THEN 'Frota' ELSE 'Terceiro' END AS tipo_veiculo,
       con.motoristacon AS motorista_codigo,
       COALESCE(mot.nomemot, NULLIF(TRIM(con.motoristacon::text), '')) AS motorista,
+      con.representantecon AS comercial_codigo,
+      COALESCE(NULLIF(TRIM(comercial.nome), ''), NULLIF(TRIM(con.representantecon::text), '')) AS comercial,
       COALESCE(cvf.cidade_origem, con.cidadecoletacon) AS cidade_origem_codigo,
       COALESCE(cvf.cidade_destino, con.cidadeentregacon) AS cidade_destino_codigo,
       COALESCE(
@@ -235,6 +237,14 @@ export const BASE_SQL = `
     LEFT JOIN localidades.estados origem_uf ON origem_uf.codigoest = origem.estadocid
     LEFT JOIN localidades.estados destino_uf ON destino_uf.codigoest = destino.estadocid
     LEFT JOIN frotas.motoristas mot ON mot.codigomot = con.motoristacon AND mot.empresamot = con.empresacon
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(NULLIF(TRIM(p.nomepes), ''), NULLIF(TRIM(p.fantasiapes), ''), r.codigorep::text) AS nome
+      FROM logistica.representantes r
+      LEFT JOIN gerais.pessoas p ON p.codigorepresentantepes = r.codigorep
+      WHERE r.codigorep = con.representantecon
+      ORDER BY (NULLIF(TRIM(p.nomepes), '') IS NOT NULL) DESC
+      LIMIT 1
+    ) comercial ON true
     LEFT JOIN LATERAL (
       SELECT v.tipopropriedadevei
       FROM frotas.veiculos v
@@ -421,6 +431,7 @@ export async function getRentabilidadeClientes(filters = {}) {
     ${BASE_SQL}
     SELECT
       id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, tipo_propriedade, tipo_veiculo, motorista_codigo, motorista,
+      comercial_codigo, comercial,
       cidade_origem_codigo, cidade_destino_codigo, origem, destino, material,
       cliente_codigo, cliente_nome, cliente_documento, clientecon, destinatariocon, destinatario_nome,
       expedidorcon, expedidor_nome, recebedorcon, recebedor_nome, tomadorservicoctecon,
@@ -495,6 +506,8 @@ export async function getRentabilidadeClientes(filters = {}) {
       tipoPropriedade: row.tipo_propriedade || null,
       tipoVeiculo: row.tipo_veiculo || "Terceiro",
       motorista: row.motorista || "",
+      comercialCodigo: row.comercial_codigo || null,
+      comercial: row.comercial || "Nao informado",
       origem: row.origem || "",
       destino: row.destino || "",
       material: row.material || "",

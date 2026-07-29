@@ -8,6 +8,11 @@ export const manutencaoRouter = express.Router();
 
 const TABLE = () => tableName("automacao_mensagem_manutencao");
 const CONTACT_TABLE = () => tableName("manutencao_contatos");
+const HISTORY_TABLE = () => tableName("historico_manutencao_veiculo");
+const HISTORY_TYPES = new Set([
+  "troca_oleo_motor", "revisao", "filtro_combustivel", "filtro_ar",
+  "oleo_cambio", "oleo_diferencial", "lubrificacao", "afericao_tacografo", "outro",
+]);
 
 function normalizePhone(value) {
   return String(value || "").replace(/[^\d]/g, "");
@@ -108,6 +113,57 @@ function eventToMaintenance(row) {
     origem: row.origem,
     tags: maintenanceTags(`${row.componente || ""} ${row.descricao || ""}`),
   };
+}
+
+function addDays(dateValue, days) {
+  if (!dateValue || !Number.isFinite(Number(days)) || Number(days) <= 0) return null;
+  const date = new Date(`${String(dateValue).slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + Number(days));
+  return date.toISOString().slice(0, 10);
+}
+
+async function loadHistoricoManual(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+  const { rows } = await pool.query(`
+    SELECT id, automacao_id, placa, tipo_movimento, descricao, data_servico,
+           km_servico, fornecedor, documento, observacao
+    FROM ${HISTORY_TABLE()}
+    WHERE regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
+    ORDER BY data_servico DESC, km_servico DESC, id DESC
+  `, [normalized]);
+  const byPlate = new Map();
+  for (const row of rows) {
+    const plate = normalizePlate(row.placa);
+    if (!byPlate.has(plate)) byPlate.set(plate, []);
+    byPlate.get(plate).push({
+      id: row.id,
+      automacaoId: row.automacao_id,
+      data: row.data_servico,
+      km: row.km_servico,
+      tipoDocumento: "Registro manual",
+      numeroDocumento: row.documento || "",
+      descricao: row.descricao,
+      fornecedor: row.fornecedor || "",
+      origem: "historico_manutencao_veiculo",
+      observacao: row.observacao || "",
+      tags: row.tipo_movimento === "revisao"
+        ? ["oleo_motor", "filtro_combustivel", "filtro_ar", "oleo_cambio", "oleo_diferencial", "lubrificacao"]
+        : [row.tipo_movimento],
+    });
+  }
+  return byPlate;
+}
+
+function mergeHistoricos(systemHistory, manualHistory) {
+  const result = new Map(systemHistory);
+  for (const [plate, items] of manualHistory) {
+    result.set(plate, [...(result.get(plate) || []), ...items].sort((a, b) =>
+      String(b.data || "").localeCompare(String(a.data || "")) || Number(b.km || 0) - Number(a.km || 0)
+    ));
+  }
+  return result;
 }
 
 function pickUltimaManutencao(row, historico = []) {
@@ -393,7 +449,9 @@ function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria)
     || null;
   return {
     ...row,
-    km_proximo_envio: proximoKmProgramado(row.km_atual, row.intervalo_km),
+    km_proximo_envio: ultima?.km != null
+      ? Number(ultima.km) + Number(row.intervalo_km || 0)
+      : proximoKmProgramado(row.km_atual, row.intervalo_km),
     modelo,
     marca: detalhe?.marca_nome || detalhe?.marcavei || null,
     anoModelo: detalhe?.anomodelovei || null,
@@ -433,11 +491,13 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
     const vPool = getVeiculosPool();
     const { rows } = await vPool.query(QUERY_VEICULOS);
     const placas = rows.map((row) => row.placa);
-    const [detalhes, historicos, planosAutorizados] = await Promise.all([
+    const [detalhes, historicosSistema, historicosManuais, planosAutorizados] = await Promise.all([
       loadDetalhesVeiculos(placas),
       loadHistoricoManutencoes(placas),
+      loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
     ]);
+    const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     const telemetria = new Map(rows.map((row) => [normalizePlate(row.placa), row]));
 
     res.json({
@@ -460,6 +520,64 @@ manutencaoRouter.get("/manutencao/contatos", async (_req, res, next) => {
        ORDER BY lower(nome), numero`
     );
     res.json({ contatos: rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+manutencaoRouter.get("/manutencao/registros", async (req, res, next) => {
+  try {
+    const placa = normalizePlate(req.query.placa);
+    const params = [];
+    const where = placa ? `WHERE regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $1` : "";
+    if (placa) params.push(placa);
+    const { rows } = await pool.query(`
+      SELECT * FROM ${HISTORY_TABLE()}
+      ${where}
+      ORDER BY data_servico DESC, km_servico DESC, id DESC
+      LIMIT 500
+    `, params);
+    res.json({ registros: rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+manutencaoRouter.post("/manutencao/registros", async (req, res, next) => {
+  try {
+    const placa = normalizePlate(req.body.placa);
+    const tipo = String(req.body.tipo_movimento || "").trim();
+    const descricao = String(req.body.descricao || "").trim();
+    const dataServico = String(req.body.data_servico || "").slice(0, 10);
+    const kmServico = Number(req.body.km_servico);
+    const automacaoId = req.body.automacao_id ? Number(req.body.automacao_id) : null;
+    if (!placa || !HISTORY_TYPES.has(tipo) || !descricao || !dataServico || !Number.isInteger(kmServico) || kmServico < 0) {
+      return res.status(400).json({ error: "Placa, tipo, descricao, data e KM validos sao obrigatorios." });
+    }
+    const { rows } = await pool.query(`
+      INSERT INTO ${HISTORY_TABLE()} (
+        automacao_id, placa, tipo_movimento, descricao, data_servico, km_servico,
+        fornecedor, documento, observacao, criado_por
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING *
+    `, [
+      automacaoId, placa, tipo, descricao, dataServico, kmServico,
+      String(req.body.fornecedor || "").trim() || null,
+      String(req.body.documento || "").trim() || null,
+      String(req.body.observacao || "").trim() || null,
+      req.user?.id || null,
+    ]);
+    if (automacaoId) {
+      await pool.query(`
+        UPDATE ${TABLE()}
+        SET km_proximo_envio = CASE WHEN tipo_controle = 'km' THEN $1 + intervalo_km ELSE km_proximo_envio END,
+            data_ultimo_servico = CASE WHEN tipo_controle = 'data' THEN $2::date ELSE data_ultimo_servico END,
+            data_proximo_envio = CASE WHEN tipo_controle = 'data' THEN $2::date + intervalo_dias ELSE data_proximo_envio END,
+            atualizado_em = NOW()
+        WHERE id = $3 AND regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $4
+      `, [kmServico, dataServico, automacaoId, placa]);
+    }
+    res.status(201).json({ registro: rows[0] });
   } catch (error) {
     next(error);
   }
@@ -496,12 +614,14 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
       `SELECT * FROM ${TABLE()} ORDER BY criado_em DESC`
     );
     const placas = rows.map((row) => row.placa);
-    const [detalhes, historicos, planosAutorizados, telemetria] = await Promise.all([
+    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, telemetria] = await Promise.all([
       loadDetalhesVeiculos(placas),
       loadHistoricoManutencoes(placas),
+      loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
       loadDetalhesTelemetria(placas),
     ]);
+    const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     res.json({
       automacoes: rows.map((row) => {
         const placaNorm = normalizePlate(row.placa);
@@ -516,14 +636,15 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
 // POST /api/manutencao — cria um registro por placa selecionada
 manutencaoRouter.post("/manutencao", async (req, res, next) => {
   try {
-    const { placas, titulo, mensagem, intervalo_km } = req.body;
+    const { placas, titulo, mensagem, intervalo_km, intervalo_dias, data_ultimo_servico } = req.body;
+    const tipoControle = req.body.tipo_controle === "data" ? "data" : "km";
     const contato = await resolveContato(req.body);
 
     if (!Array.isArray(placas) || placas.length === 0) {
       return res.status(400).json({ error: "Selecione ao menos uma placa." });
     }
-    if (!titulo || !mensagem || !intervalo_km) {
-      return res.status(400).json({ error: "Título, mensagem e intervalo_km são obrigatórios." });
+    if (!titulo || !mensagem || (tipoControle === "km" ? Number(intervalo_km) <= 0 : Number(intervalo_dias) <= 0)) {
+      return res.status(400).json({ error: "Titulo, mensagem e intervalo do plano sao obrigatorios." });
     }
 
     if (!contato.numeros) {
@@ -539,24 +660,30 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
     const criados = [];
     for (const { placa, km_atual } of entradas) {
       const km = Number(km_atual || 0);
-      const intervalo = Number(intervalo_km);
+      const intervalo = tipoControle === "km" ? Number(intervalo_km) : null;
+      const intervaloDias = tipoControle === "data" ? Number(intervalo_dias) : null;
       const { rows } = await pool.query(
         `INSERT INTO ${TABLE()} (
            placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio,
-           numeros, contato_id, contato_nome, contato_numero
+           numeros, contato_id, contato_nome, contato_numero,
+           tipo_controle, intervalo_dias, data_ultimo_servico, data_proximo_envio
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
         [
           placa,
           titulo,
           mensagem,
           intervalo,
           km,
-          proximoKmProgramado(km, intervalo),
+          tipoControle === "km" ? proximoKmProgramado(km, intervalo) : 0,
           contato.numeros,
           contato.contato_id,
           contato.contato_nome,
           contato.contato_numero,
+          tipoControle,
+          intervaloDias,
+          tipoControle === "data" ? data_ultimo_servico || null : null,
+          tipoControle === "data" ? addDays(data_ultimo_servico, intervaloDias) : null,
         ]
       );
       criados.push(rows[0]);
@@ -577,6 +704,9 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       titulo,
       mensagem,
       intervalo_km,
+      intervalo_dias,
+      tipo_controle,
+      data_ultimo_servico,
       km_atual,
       ativo,
       numeros,
@@ -593,6 +723,14 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     if (titulo !== undefined)       { sets.push(`titulo = $${i++}`);       vals.push(titulo); }
     if (mensagem !== undefined)     { sets.push(`mensagem = $${i++}`);     vals.push(mensagem); }
     if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(Number(intervalo_km)); }
+    if (intervalo_dias !== undefined) { sets.push(`intervalo_dias = $${i++}`); vals.push(Number(intervalo_dias)); }
+    if (tipo_controle !== undefined) { sets.push(`tipo_controle = $${i++}`); vals.push(tipo_controle === "data" ? "data" : "km"); }
+    if (data_ultimo_servico !== undefined) {
+      sets.push(`data_ultimo_servico = $${i++}`); vals.push(data_ultimo_servico || null);
+      if (intervalo_dias !== undefined) {
+        sets.push(`data_proximo_envio = $${i++}`); vals.push(addDays(data_ultimo_servico, intervalo_dias));
+      }
+    }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
     if (

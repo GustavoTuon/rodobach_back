@@ -1,10 +1,16 @@
 import XLSX from "xlsx";
 import { pool } from "../db/pool.js";
+import { clientPool } from "../db/clientPool.js";
 import { config, tableName } from "../config.js";
 import { getTrafegusDashboard, getTrafegusGoogleRoute } from "./trafegusService.js";
 
 const CLIENTES_TABLE = tableName("oportunidades_retorno_clientes");
 const N8N_WEBHOOK_PATH = "rodobach-oportunidades-retorno";
+const cityCoordinatesCache = new Map();
+
+function sendingEnabled() {
+  return String(process.env.N8N_OPORTUNIDADES_RETORNO_ENVIO_HABILITADO || "").toLowerCase() === "true";
+}
 
 function opportunitiesWebhookUrl() {
   return text(process.env.N8N_OPORTUNIDADES_RETORNO_WEBHOOK_URL)
@@ -71,6 +77,154 @@ function haversineKm(a, b) {
   const value = Math.sin(dLat / 2) ** 2
     + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon / 2) ** 2;
   return earthKm * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+async function geocodeCity(city, uf) {
+  const key = `${text(city).toUpperCase()}/${text(uf).toUpperCase()}`;
+  if (cityCoordinatesCache.has(key)) return await cityCoordinatesCache.get(key);
+  const pending = (async () => {
+    try {
+    const query = new URLSearchParams({
+      name: text(city),
+      count: "10",
+      language: "pt",
+      format: "json",
+      countryCode: "BR",
+    });
+    const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${query}`, {
+      headers: { "user-agent": "Rodobach/1.0 oportunidades-retorno" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const normalizedUf = text(uf).toUpperCase();
+    const normalizeName = (value) => text(value).toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const match = (payload.results || []).find((item) =>
+      normalizeName(item.admin1) === normalizeName({
+        AC: "ACRE", AL: "ALAGOAS", AP: "AMAPA", AM: "AMAZONAS", BA: "BAHIA", CE: "CEARA",
+        DF: "DISTRITO FEDERAL", ES: "ESPIRITO SANTO", GO: "GOIAS", MA: "MARANHAO",
+        MT: "MATO GROSSO", MS: "MATO GROSSO DO SUL", MG: "MINAS GERAIS", PA: "PARA",
+        PB: "PARAIBA", PR: "PARANA", PE: "PERNAMBUCO", PI: "PIAUI", RJ: "RIO DE JANEIRO",
+        RN: "RIO GRANDE DO NORTE", RS: "RIO GRANDE DO SUL", RO: "RONDONIA", RR: "RORAIMA",
+        SC: "SANTA CATARINA", SP: "SAO PAULO", SE: "SERGIPE", TO: "TOCANTINS",
+      }[normalizedUf] || normalizedUf)
+    ) || payload.results?.[0];
+    const result = match && Number.isFinite(Number(match.latitude)) && Number.isFinite(Number(match.longitude))
+      ? { latitude: Number(match.latitude), longitude: Number(match.longitude) }
+      : null;
+    return result;
+    } catch {
+      return null;
+    }
+  })();
+  cityCoordinatesCache.set(key, pending);
+  const result = await pending;
+  cityCoordinatesCache.set(key, result);
+  return result;
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+async function listBilledClientsNear(destination, destinationUf, radiusKm, limit = 10) {
+  const neighboringStates = {
+    MA: ["MA", "PI", "PA", "TO"],
+    PI: ["PI", "MA", "CE", "PE", "BA", "TO"],
+    PA: ["PA", "MA", "TO", "MT", "AP", "RR", "AM"],
+    TO: ["TO", "MA", "PI", "BA", "GO", "MT", "PA"],
+  };
+  const states = neighboringStates[destinationUf] || [destinationUf].filter(Boolean);
+  const { rows } = await clientPool.query(`
+    WITH historico AS (
+      SELECT
+        CASE
+          WHEN con.tomadorservicoctecon = 4 AND con.tomadorservicooutroscon IS NOT NULL THEN con.tomadorservicooutroscon
+          WHEN con.tomadorservicoctecon = 3 AND con.destinatariocon IS NOT NULL THEN con.destinatariocon
+          WHEN con.tomadorservicoctecon = 2 AND con.recebedorcon IS NOT NULL THEN con.recebedorcon
+          WHEN con.tomadorservicoctecon = 1 AND con.expedidorcon IS NOT NULL THEN con.expedidorcon
+          ELSE con.clientecon
+        END AS cliente_codigo,
+        con.empresacon,
+        con.cidadecoletacon AS cidade_codigo,
+        con.dataemissaocon::date AS data,
+        COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)::numeric AS receita
+      FROM logistica.conhecimentos con
+      WHERE con.statuscon = 2
+        AND con.dataemissaocon::date >= CURRENT_DATE - INTERVAL '24 months'
+        AND con.cidadecoletacon IS NOT NULL
+    )
+    SELECT
+      h.cliente_codigo,
+      COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, ''), 'Cliente sem nome') AS nome,
+      cli.cnpjcpfcli AS documento,
+      cli.contatocli AS contato,
+      CONCAT_WS('', NULLIF(cli.dddcli, ''), NULLIF(cli.telefone1cli, '')) AS telefone,
+      cli.emailcli AS email,
+      cid.nomecid AS cidade,
+      TRIM(est.abreviaturaest) AS uf,
+      COUNT(*)::int AS quantidade_fretes,
+      SUM(h.receita)::numeric AS faturamento,
+      MAX(h.data)::date AS ultimo_frete
+    FROM historico h
+    JOIN localidades.cidades cid ON cid.codigocid = h.cidade_codigo
+    JOIN localidades.estados est ON est.codigoest = cid.estadocid
+    LEFT JOIN LATERAL (
+      SELECT c.*
+      FROM gerais.clientes c
+      WHERE c.codigocli = h.cliente_codigo
+      ORDER BY (c.empresacli = h.empresacon) DESC, c.empresacli
+      LIMIT 1
+    ) cli ON true
+    WHERE h.cliente_codigo IS NOT NULL
+      AND (CARDINALITY($1::text[]) = 0 OR TRIM(est.abreviaturaest) = ANY($1::text[]))
+    GROUP BY h.cliente_codigo, cli.fantasiacli, cli.nomecli, cli.cnpjcpfcli, cli.contatocli,
+             cli.dddcli, cli.telefone1cli, cli.emailcli, cid.nomecid, est.abreviaturaest
+    ORDER BY SUM(h.receita) DESC
+    LIMIT 250
+  `, [states]);
+
+  const located = await mapWithConcurrency(rows, 6, async (row) => {
+    const coordinates = await geocodeCity(row.cidade, row.uf);
+    if (!coordinates) return null;
+    return {
+      id: `tms:${row.cliente_codigo}:${row.cidade}:${row.uf}`,
+      clienteCodigo: row.cliente_codigo,
+      nome: row.nome,
+      documento: row.documento || "",
+      contato: row.contato || "",
+      telefone: row.telefone || "",
+      email: row.email || "",
+      cidade: row.cidade,
+      uf: text(row.uf).toUpperCase(),
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+      distanciaKm: haversineKm(destination, coordinates),
+      quantidadeFretes: Number(row.quantidade_fretes) || 0,
+      faturamento: Number(row.faturamento) || 0,
+      ultimoFrete: row.ultimo_frete,
+      mapsUrl: `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}`,
+      fonte: "Histórico de CT-es dos últimos 24 meses",
+    };
+  });
+
+  return located
+    .filter((client) =>
+      client
+      && client.distanciaKm <= radiusKm
+      && !/^(DESTINATARIO|SEM IDENTIFICA)/i.test(client.nome)
+    )
+    .sort((a, b) => a.distanciaKm - b.distanciaKm || b.faturamento - a.faturamento)
+    .slice(0, limit);
 }
 
 export function createClientesTemplate() {
@@ -163,6 +317,7 @@ export async function getOportunidadesOverview() {
     configuracao: {
       raioPadraoKm: 200,
       n8nConfigurado: Boolean(opportunitiesWebhookUrl()),
+      envioHabilitado: sendingEnabled(),
       destinatario: text(process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO),
     },
   };
@@ -181,6 +336,9 @@ function buildMessage({ sm, destino, raioKm, clientes }) {
       lines.push(`   Contato: ${[cliente.contato, cliente.telefone].filter(Boolean).join(" - ")}`);
     }
     if (cliente.tipoCarga) lines.push(`   Carga: ${cliente.tipoCarga}`);
+    if (cliente.quantidadeFretes) {
+      lines.push(`   Historico: ${cliente.quantidadeFretes} frete(s) - R$ ${cliente.faturamento.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`);
+    }
   });
   if (!clientes.length) lines.push("Nenhum cliente com coordenadas foi encontrado dentro do raio informado.");
   return lines.join("\n");
@@ -205,6 +363,8 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
     }))
     .filter((client) => client.distanciaKm <= radiusKm)
     .sort((a, b) => a.distanciaKm - b.distanciaKm);
+  const destinationUf = text(destination.descricao).toUpperCase().match(/\/([A-Z]{2})(?:\W|$)/)?.[1] || "";
+  const potenciais = await listBilledClientsNear(destination, destinationUf, radiusKm, 10);
   const sm = overview.sms.find((item) => String(item.id) === String(smId)) || {
     id: route.sm,
     placa: route.placa,
@@ -215,13 +375,17 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
     destino: destination,
     raioKm: radiusKm,
     clientes: nearby,
-    mensagem: buildMessage({ sm, destino: destination, raioKm: radiusKm, clientes: nearby }),
+    potenciais,
+    mensagem: buildMessage({ sm, destino: destination, raioKm: radiusKm, clientes: potenciais }),
     n8nConfigurado: overview.configuracao.n8nConfigurado,
     destinatario: overview.configuracao.destinatario,
   };
 }
 
 export async function sendOpportunitiesToN8n(payload) {
+  if (!sendingEnabled()) {
+    throw new Error("Envio bloqueado: o modulo esta em modo de validacao.");
+  }
   const webhookUrl = opportunitiesWebhookUrl();
   if (!webhookUrl) throw new Error("Webhook n8n de oportunidades ainda nao configurado.");
   if (!text(payload.destinatario || process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO)) {
@@ -236,7 +400,7 @@ export async function sendOpportunitiesToN8n(payload) {
     sm: analysis.sm,
     destino: analysis.destino,
     raioKm: analysis.raioKm,
-    clientes: analysis.clientes,
+    clientes: analysis.potenciais,
   };
   const response = await fetch(webhookUrl, {
     method: "POST",
@@ -245,5 +409,5 @@ export async function sendOpportunitiesToN8n(payload) {
   });
   const responseText = await response.text();
   if (!response.ok) throw new Error(`Webhook n8n respondeu HTTP ${response.status}: ${responseText.slice(0, 200)}`);
-  return { ok: true, status: response.status, enviados: analysis.clientes.length };
+  return { ok: true, status: response.status, enviados: analysis.potenciais.length };
 }
