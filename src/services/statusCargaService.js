@@ -198,7 +198,7 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm
     )
     .sort((a, b) => String(b.emissaoAt || "").localeCompare(String(a.emissaoAt || "")))[0];
 
-  if (isBase && !activeThirdPartyFreight && !trafegusSm) {
+  if (isBase && !active && !activeThirdPartyFreight && !trafegusSm) {
     return {
       ...vehicle,
       ...(lastDoc || {}),
