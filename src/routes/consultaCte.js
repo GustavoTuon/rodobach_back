@@ -80,6 +80,7 @@ consultaCteRouter.get("/cte/esaf", async (req, res, next) => {
 
     res.json({
       cliente: "IBRAP / ESAF - todas as unidades",
+      fontesConsultadas: ["CT-e vinculado", "XML da NF-e"],
       nota,
       serie,
       resultados: rows.map((row) => ({
