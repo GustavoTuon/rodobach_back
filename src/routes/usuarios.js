@@ -13,6 +13,7 @@ const COLS_RETORNO = `
   perm_faturamento_diario, perm_comparativo_faturamento, perm_lucro_viagens,
   perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
   perm_status_carga, perm_pneus, perm_settings, perm_manutencao, perm_automacoes_n8n,
+  perm_folgas_motoristas, perm_trafegus, perm_oportunidades_retorno, perm_consulta_nfe,
   criado_em
 `;
 
@@ -41,6 +42,8 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
       perm_clientes = true, perm_clientes_lucro = true,
       perm_status_carga = true, perm_pneus = true, perm_settings = true, perm_manutencao = true,
       perm_automacoes_n8n = true,
+      perm_folgas_motoristas = true, perm_trafegus = true,
+      perm_oportunidades_retorno = true, perm_consulta_nfe = true,
     } = req.body;
 
     if (!login || !senha) {
@@ -56,8 +59,9 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
          perm_abastecimentos, perm_precos_combustivel,
          perm_faturamento_diario, perm_comparativo_faturamento, perm_lucro_viagens,
          perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
-         perm_status_carga, perm_pneus, perm_settings, perm_manutencao, perm_automacoes_n8n)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+         perm_status_carga, perm_pneus, perm_settings, perm_manutencao, perm_automacoes_n8n,
+         perm_folgas_motoristas, perm_trafegus, perm_oportunidades_retorno, perm_consulta_nfe)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
        RETURNING ${COLS_RETORNO}`,
       [
         String(login).trim().toLowerCase(), hash, email || null, numero || null,
@@ -71,6 +75,10 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
         Boolean(perm_settings),
         Boolean(perm_manutencao),
         Boolean(perm_automacoes_n8n),
+        Boolean(perm_folgas_motoristas),
+        Boolean(perm_trafegus),
+        Boolean(perm_oportunidades_retorno),
+        Boolean(perm_consulta_nfe),
       ]
     );
 
@@ -97,6 +105,7 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, async (req, res, next) => {
       "perm_custos_veiculos", "perm_manutencoes_veiculos", "perm_clientes",
       "perm_clientes_lucro", "perm_status_carga", "perm_pneus", "perm_settings", "perm_manutencao",
       "perm_automacoes_n8n",
+      "perm_folgas_motoristas", "perm_trafegus", "perm_oportunidades_retorno", "perm_consulta_nfe",
     ];
     const BOOL_FIELDS = new Set([
       "admin", "ativo",
@@ -106,6 +115,7 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, async (req, res, next) => {
       "perm_custos_veiculos", "perm_manutencoes_veiculos", "perm_clientes",
       "perm_clientes_lucro", "perm_status_carga", "perm_pneus", "perm_settings", "perm_manutencao",
       "perm_automacoes_n8n",
+      "perm_folgas_motoristas", "perm_trafegus", "perm_oportunidades_retorno", "perm_consulta_nfe",
     ]);
 
     const sets = [];
