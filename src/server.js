@@ -21,6 +21,7 @@ import { trafegusRouter } from "./routes/trafegus.js";
 import { oportunidadesRetornoRouter } from "./routes/oportunidadesRetorno.js";
 import { folgasMotoristasRouter } from "./routes/folgasMotoristas.js";
 import { consultaCteRouter } from "./routes/consultaCte.js";
+import { canhotosRouter } from "./routes/canhotos.js";
 
 const app = express();
 
@@ -108,6 +109,7 @@ app.use("/api", trafegusRouter);
 app.use("/api", oportunidadesRetornoRouter);
 app.use("/api", folgasMotoristasRouter);
 app.use("/api", consultaCteRouter);
+app.use("/api", canhotosRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {
