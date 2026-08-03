@@ -45,6 +45,7 @@ authRouter.post("/auth/login", async (req, res, next) => {
       trafegus: user.perm_trafegus ?? user.perm_viagens,
       "oportunidades-retorno": user.perm_oportunidades_retorno ?? user.perm_viagens,
       "consulta-cte": user.perm_consulta_nfe ?? user.perm_viagens,
+      "controle-canhotos": user.perm_consulta_nfe ?? user.perm_viagens,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
       manutencao: user.perm_manutencao,

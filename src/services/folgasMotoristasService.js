@@ -6,7 +6,7 @@ import { getVeiculosPool } from "../db/pool-veiculos.js";
 const JORNADAS = () => tableName("jornada_motorista");
 const MOVIMENTOS = () => tableName("movimento_folga_motorista");
 const DIAS_POR_FOLGA = 6;
-const DATA_CORTE_RETROATIVO = "2026-01-01";
+const DATA_CORTE_RETROATIVO = "2026-03-01";
 const PLACAS_FROTA = [
   "RAA8G18", "RAA8G58", "RXO6C18", "RXW7J14", "RYI6H21",
   "RYP7D29", "RYU2G97", "SXR8D09", "SXY5D26",
@@ -15,31 +15,23 @@ const PLACAS_FROTA = [
 async function carregarRetroativo() {
   const { rows } = await clientPool.query(`
     WITH viagens AS (
-      SELECT DISTINCT ON (cv.empresacvg, cv.codigocvg)
+      SELECT
         cv.empresacvg AS empresa,
         cv.motoristacvg AS motorista,
         cv.codigocvg AS viagem,
-        regexp_replace(upper(con.veiculocon::text), '[^A-Z0-9]', '', 'g') AS placa,
+        regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
         cv.datasaidacvg + COALESCE(cv.horasaidacvg, TIME '00:00') AS saida,
-        cv.datachegadacvg + COALESCE(cv.horachegadacvg, TIME '00:00') AS chegada
-      FROM logistica.conhecimentos con
-      JOIN LATERAL (
-        SELECT x.*
-        FROM logistica.controleviagens x
-        WHERE x.codigocvg IN (con.viagemcon, con.cargacontroleviagemcon, con.numeroviagemcon)
-          AND (x.empresacvg = con.empresaviagemcon OR x.empresacvg = con.empresacon OR con.empresaviagemcon IS NULL)
-        ORDER BY (x.codigocvg = con.viagemcon) DESC, x.codigocvg DESC
-        LIMIT 1
-      ) cv ON TRUE
-      WHERE con.dataemissaocon >= $1::date
-        AND regexp_replace(upper(con.veiculocon::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[])
+        CASE WHEN cv.datachegadacvg > cv.datasaidacvg
+          THEN cv.datachegadacvg + COALESCE(cv.horachegadacvg, TIME '00:00') END AS chegada
+      FROM logistica.controleviagens cv
+      WHERE cv.datasaidacvg >= $1::date
+        AND regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[])
         AND cv.motoristacvg IS NOT NULL
-      ORDER BY cv.empresacvg, cv.codigocvg, con.dataemissaocon
     ),
     totais AS (
       SELECT empresa, motorista,
         COUNT(*) FILTER (WHERE saida IS NOT NULL AND chegada IS NOT NULL)::int AS viagens_completas,
-        COUNT(*) FILTER (WHERE saida IS NULL OR chegada IS NULL)::int AS viagens_pendentes,
+        COUNT(*) FILTER (WHERE chegada IS NULL)::int AS viagens_pendentes,
         COALESCE(SUM(
           GREATEST(0, EXTRACT(EPOCH FROM (chegada - GREATEST(saida, $1::date::timestamp))) / 86400)
         ) FILTER (WHERE saida IS NOT NULL AND chegada IS NOT NULL AND chegada >= $1::date), 0) AS dias_exatos
@@ -66,25 +58,46 @@ async function carregarRetroativo() {
   ]));
 }
 
+async function carregarUltimasViagens() {
+  const { rows } = await clientPool.query(`
+    SELECT DISTINCT ON (cv.empresacvg, cv.motoristacvg)
+      cv.empresacvg AS empresa, cv.motoristacvg AS motorista, cv.codigocvg AS viagem,
+      regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
+      cv.datasaidacvg + COALESCE(cv.horasaidacvg, TIME '00:00') AS saida,
+      CASE WHEN cv.datachegadacvg > cv.datasaidacvg
+        THEN cv.datachegadacvg + COALESCE(cv.horachegadacvg, TIME '00:00') END AS chegada
+    FROM logistica.controleviagens cv
+    WHERE cv.motoristacvg IS NOT NULL
+      AND cv.datasaidacvg >= $1::date
+      AND regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[])
+    ORDER BY cv.empresacvg, cv.motoristacvg, cv.datasaidacvg DESC, cv.codigocvg DESC
+  `, [DATA_CORTE_RETROATIVO, PLACAS_FROTA]);
+  return new Map(rows.map((row) => [`${row.empresa}:${row.motorista}`, {
+    id: `viagem-${row.empresa}-${row.viagem}`,
+    viagem: Number(row.viagem),
+    placa: row.placa || "",
+    saidaEm: row.saida,
+    retornoPrevistoEm: null,
+    retornoEm: row.chegada,
+    origemSaida: "controle_viagens",
+    origemRetorno: row.chegada ? "controle_viagens" : null,
+    observacoes: "",
+  }]));
+}
+
 async function carregarValidacaoTelemetria() {
   const inicioTelemetria = "2026-05-25";
   const { rows: viagens } = await clientPool.query(`
-    SELECT DISTINCT ON (cv.empresacvg, cv.codigocvg)
+    SELECT
       cv.empresacvg AS empresa, cv.motoristacvg AS motorista, cv.codigocvg AS viagem,
-      regexp_replace(upper(con.veiculocon::text), '[^A-Z0-9]', '', 'g') AS placa,
+      regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
       cv.datasaidacvg + COALESCE(cv.horasaidacvg, TIME '00:00') AS saida,
       cv.datachegadacvg + COALESCE(cv.horachegadacvg, TIME '00:00') AS chegada
-    FROM logistica.conhecimentos con
-    JOIN LATERAL (
-      SELECT x.* FROM logistica.controleviagens x
-      WHERE x.codigocvg IN (con.viagemcon, con.cargacontroleviagemcon, con.numeroviagemcon)
-        AND (x.empresacvg = con.empresaviagemcon OR x.empresacvg = con.empresacon OR con.empresaviagemcon IS NULL)
-      ORDER BY (x.codigocvg = con.viagemcon) DESC, x.codigocvg DESC LIMIT 1
-    ) cv ON TRUE
-    WHERE con.dataemissaocon >= $1::date
-      AND regexp_replace(upper(con.veiculocon::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[])
-      AND cv.motoristacvg IS NOT NULL AND cv.datasaidacvg IS NOT NULL AND cv.datachegadacvg IS NOT NULL
-    ORDER BY cv.empresacvg, cv.codigocvg, con.dataemissaocon
+    FROM logistica.controleviagens cv
+    WHERE cv.datasaidacvg >= $1::date
+      AND regexp_replace(upper(cv.veiculocvg::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[])
+      AND cv.motoristacvg IS NOT NULL AND cv.datachegadacvg > cv.datasaidacvg
+    ORDER BY cv.empresacvg, cv.codigocvg
   `, [inicioTelemetria, PLACAS_FROTA]);
 
   let transitions = [];
@@ -219,23 +232,13 @@ export async function listarMotoristasFolgas({ busca = "", status = "", pagina =
   `, [termo, PLACAS_FROTA]);
 
   const keys = motoristas.map((m) => `${m.empresa}:${m.codigo}`);
-  const [retroativos, validacoes, movimentos] = await Promise.all([
-    carregarRetroativo(), carregarValidacaoTelemetria(), carregarMovimentos(keys),
+  const [retroativos, validacoes, movimentos, viagensAtuais] = await Promise.all([
+    carregarRetroativo(), carregarValidacaoTelemetria(), carregarMovimentos(keys), carregarUltimasViagens(),
   ]);
-  const jornadasPorMotorista = new Map();
-  if (keys.length) {
-    const { rows } = await pool.query(`
-      SELECT DISTINCT ON (empresa_motorista, codigo_motorista) *
-      FROM ${JORNADAS()}
-      WHERE (empresa_motorista::text || ':' || codigo_motorista::text) = ANY($1::text[])
-      ORDER BY empresa_motorista, codigo_motorista, saida_em DESC
-    `, [keys]);
-    rows.forEach((row) => jornadasPorMotorista.set(`${row.empresa_motorista}:${row.codigo_motorista}`, mapJornada(row)));
-  }
 
   const agora = new Date();
   let itens = motoristas.map((motorista) => {
-    const jornada = jornadasPorMotorista.get(`${motorista.empresa}:${motorista.codigo}`) || null;
+    const jornada = viagensAtuais.get(`${motorista.empresa}:${motorista.codigo}`) || null;
     const calculo = calcular(jornada);
     if (calculo.status === "em_folga" && calculo.voltaAoTrabalho && new Date(calculo.voltaAoTrabalho) <= agora) {
       calculo.status = "disponivel";
@@ -252,7 +255,7 @@ export async function listarMotoristasFolgas({ busca = "", status = "", pagina =
       nome: motorista.nome || motorista.apelido || "Motorista",
       apelido: motorista.apelido || "",
       telefone: motorista.telefone || "",
-      placa: motorista.placa || "",
+      placa: jornada?.placa || motorista.placa || "",
       jornada,
       retroativo: { ...retroativo, folgasUtilizadas: movimento.utilizadas, ajustes: movimento.ajustes, folgasDisponiveis },
       validacao: validacoes.get(`${motorista.empresa}:${motorista.codigo}`) || {
