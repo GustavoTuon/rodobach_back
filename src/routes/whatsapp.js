@@ -34,6 +34,15 @@ async function evolutionFetch(path, options = {}) {
   return res.json();
 }
 
+export async function sendWhatsappText(number, text) {
+  const normalized = String(number || "").replace(/\D/g, "");
+  if (!normalized || !String(text || "").trim()) throw new Error("Numero e mensagem sao obrigatorios.");
+  return evolutionFetch(`/message/sendText/${INSTANCE_NAME}`, {
+    method: "POST",
+    body: JSON.stringify({ number: normalized, text: String(text).trim() }),
+  });
+}
+
 async function fetchInstanceInfo() {
   try {
     const list = await evolutionFetch(`/instance/fetchInstances?instanceName=${INSTANCE_NAME}`);

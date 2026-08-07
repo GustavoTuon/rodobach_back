@@ -115,6 +115,16 @@ function eventToMaintenance(row) {
   };
 }
 
+function maintenanceMovementType(titulo) {
+  const tags = desiredMaintenanceTags(titulo);
+  if (tags.includes("filtro_ar")) return "filtro_ar";
+  if (tags.includes("filtro_combustivel")) return "filtro_combustivel";
+  if (tags.includes("oleo_cambio")) return "oleo_cambio";
+  if (tags.includes("oleo_diferencial")) return "oleo_diferencial";
+  if (tags.includes("lubrificacao")) return "lubrificacao";
+  return "troca_oleo_motor";
+}
+
 function addDays(dateValue, days) {
   if (!dateValue || !Number.isFinite(Number(days)) || Number(days) <= 0) return null;
   const date = new Date(`${String(dateValue).slice(0, 10)}T12:00:00Z`);
@@ -159,16 +169,18 @@ async function loadHistoricoManual(placas = []) {
 function mergeHistoricos(systemHistory, manualHistory) {
   const result = new Map(systemHistory);
   for (const [plate, items] of manualHistory) {
-    result.set(plate, [...(result.get(plate) || []), ...items].sort((a, b) =>
-      String(b.data || "").localeCompare(String(a.data || "")) || Number(b.km || 0) - Number(a.km || 0)
-    ));
+    result.set(plate, [...(result.get(plate) || []), ...items].sort((a, b) => {
+      const dataA = a?.data ? new Date(a.data).getTime() : 0;
+      const dataB = b?.data ? new Date(b.data).getTime() : 0;
+      return dataB - dataA || Number(b.km || 0) - Number(a.km || 0);
+    }));
   }
   return result;
 }
 
 function pickUltimaManutencao(row, historico = []) {
   const desired = desiredMaintenanceTags(row?.titulo);
-  const withKm = historico.filter((item) => item?.km != null);
+  const withKm = historico.filter((item) => Number(item?.km) > 0);
   const candidates = withKm.filter((item) => item.tags?.some((tag) => desired.includes(tag)));
   return candidates[0] || null;
 }
@@ -226,7 +238,9 @@ async function loadDetalhesTelemetria(placas = []) {
       placa,
       vehicle_model,
       identificacao_equipamento,
-      chassi
+      chassi,
+      odometro,
+      odometro_data
     FROM (
       SELECT
         regexp_replace(upper(placa::text), '[^A-Z0-9]', '', 'g') AS placa_norm,
@@ -234,8 +248,17 @@ async function loadDetalhesTelemetria(placas = []) {
         vehicle_model,
         identificacao_equipamento,
         chassi,
+        telemetria.odometro,
+        telemetria.data_hora AS odometro_data,
         updated_at
-      FROM rodobach.veiculos
+      FROM rodobach.veiculos v
+      LEFT JOIN LATERAL (
+        SELECT mcb.odometro, mcb.data_hora
+        FROM rodobach.mensagens_cb mcb
+        WHERE mcb.veiculo_id = v.veiculo_id
+        ORDER BY mcb.data_hora DESC
+        LIMIT 1
+      ) telemetria ON TRUE
       WHERE NULLIF(TRIM(placa::text), '') IS NOT NULL
     ) v
     WHERE placa_norm = ANY($1::text[])
@@ -380,6 +403,79 @@ async function loadHistoricoManutencoes(placas = []) {
   return byPlate;
 }
 
+async function loadOdometrosErp(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+  const { rows } = await clientPool.query(`
+    WITH eventos AS (
+      SELECT regexp_replace(upper(veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
+             COALESCE(datachegadacvg, datasaidacvg)::date AS data_ref,
+             GREATEST(COALESCE(kmchegadacvg, 0), COALESCE(kmsaidacvg, 0))::numeric AS km,
+             'viagem'::text AS origem
+      FROM logistica.controleviagens
+      UNION ALL
+      SELECT regexp_replace(upper(veiculoaba::text), '[^A-Z0-9]', '', 'g'),
+             dataaba::date, kilometragematualaba::numeric, 'abastecimento'::text
+      FROM frotas.abastecimentos
+      UNION ALL
+      SELECT regexp_replace(upper(veiculoose::text), '[^A-Z0-9]', '', 'g'),
+             COALESCE(dataentradaose, dataemissaoose)::date,
+             kilometragematualveiculoose::numeric, 'ordem_servico'::text
+      FROM frotas.ordensservicosexterna
+    ), validos AS (
+      SELECT * FROM eventos
+      WHERE placa = ANY($1::text[])
+        AND km BETWEEN 10000 AND 2000000
+        AND data_ref IS NOT NULL
+    )
+    SELECT DISTINCT ON (placa) placa, data_ref, km, origem
+    FROM validos
+    ORDER BY placa, data_ref DESC, km DESC
+  `, [normalized]);
+  return new Map(rows.map(row => [row.placa, {
+    odometro: Number(row.km),
+    data: row.data_ref,
+    origem: row.origem,
+  }]));
+}
+
+async function loadUltimasAfericoesTacografo(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+  const { rows } = await clientPool.query(`
+    WITH afericoes AS (
+      SELECT
+        regexp_replace(upper(COALESCE(NULLIF(i.veiculooep, ''), o.veiculoose)::text), '[^A-Z0-9]', '', 'g') AS placa,
+        COALESCE(o.dataentradaose, o.dataemissaoose)::date AS data,
+        'OS Externa'::text AS origem,
+        o.codigoose::text AS documento
+      FROM frotas.ordensservicosexternaprodutos i
+      JOIN frotas.ordensservicosexterna o
+        ON o.empresaose=i.empresaoep AND o.serieose=i.serieoep
+       AND o.codigoose=i.codigooep AND o.fornecedorose=i.fornecedoroep
+      WHERE i.produtooep = 1046
+      UNION ALL
+      SELECT
+        regexp_replace(upper(COALESCE(NULLIF(i.veiculonep, ''), n.veiculonfe)::text), '[^A-Z0-9]', '', 'g'),
+        COALESCE(n.dataentradanfe, n.dataemissaonfe)::date,
+        'Nota Fiscal'::text,
+        n.codigonfe::text
+      FROM compras.notasfiscaisentradaprodutos i
+      JOIN compras.notasfiscaisentrada n
+        ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep
+       AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep
+      WHERE i.produtonep = 1046
+    )
+    SELECT DISTINCT ON (placa) placa, data, origem, documento
+    FROM afericoes
+    WHERE placa = ANY($1::text[]) AND data IS NOT NULL
+    ORDER BY placa, data DESC
+  `, [normalized]);
+  return new Map(rows.map((row) => [row.placa, {
+    data: row.data, origem: row.origem, documento: row.documento, produtoCodigo: 1046,
+  }]));
+}
+
 async function loadPlanosAutorizados(placas = []) {
   const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
   if (!normalized.length) return new Map();
@@ -439,7 +535,7 @@ async function loadPlanosAutorizados(placas = []) {
   }]));
 }
 
-function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria) {
+function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria, odometroErp) {
   const ultima = pickUltimaManutencao(row, historico || []);
   const modelo = detalhe?.nomevei
     || detalhe?.modelovei
@@ -447,8 +543,13 @@ function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria)
     || telemetria?.vehicle_model
     || telemetria?.identificacao_equipamento
     || null;
+  const temTelemetria = Number(telemetria?.odometro) > 0;
+  const kmAtual = temTelemetria ? Number(telemetria.odometro) : (Number(odometroErp?.odometro) > 0 ? Number(odometroErp.odometro) : null);
   return {
     ...row,
+    km_atual: kmAtual,
+    km_fonte: temTelemetria ? "telemetria" : (odometroErp?.origem || "indisponivel"),
+    km_data: temTelemetria ? (telemetria?.odometro_data || null) : (odometroErp?.data || null),
     km_proximo_envio: ultima?.km != null
       ? Number(ultima.km) + Number(row.intervalo_km || 0)
       : proximoKmProgramado(row.km_atual, row.intervalo_km),
@@ -464,25 +565,19 @@ function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria)
 }
 
 const QUERY_VEICULOS = `
-  SELECT placa, odometro, vehicle_model, identificacao_equipamento, chassi
-  FROM (
-    SELECT
-      v.placa,
-      v.vehicle_model,
-      v.identificacao_equipamento,
-      v.chassi,
-      mcb.odometro,
-      ROW_NUMBER() OVER (
-        PARTITION BY v.placa
-        ORDER BY mcb.data_hora DESC
-      ) AS rn
+  SELECT DISTINCT ON (v.placa)
+    v.placa, telemetria.odometro, telemetria.data_hora AS odometro_data,
+    v.vehicle_model, v.identificacao_equipamento, v.chassi
+  FROM rodobach.veiculos v
+  LEFT JOIN LATERAL (
+    SELECT mcb.odometro, mcb.data_hora
     FROM rodobach.mensagens_cb mcb
-    LEFT JOIN rodobach.veiculos v
-      ON v.veiculo_id = mcb.veiculo_id
-  ) t
-  WHERE rn = 1
-    AND placa IS NOT NULL
-  ORDER BY placa
+    WHERE mcb.veiculo_id = v.veiculo_id
+    ORDER BY mcb.data_hora DESC
+    LIMIT 1
+  ) telemetria ON TRUE
+  WHERE v.placa IS NOT NULL
+  ORDER BY v.placa
 `;
 
 // GET /api/manutencao/veiculos — lista placas + odômetro do banco externo
@@ -491,11 +586,13 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
     const vPool = getVeiculosPool();
     const { rows } = await vPool.query(QUERY_VEICULOS);
     const placas = rows.map((row) => row.placa);
-    const [detalhes, historicosSistema, historicosManuais, planosAutorizados] = await Promise.all([
+    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, afericoesTacografo, odometrosErp] = await Promise.all([
       loadDetalhesVeiculos(placas),
       loadHistoricoManutencoes(placas),
       loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
+      loadUltimasAfericoesTacografo(placas),
+      loadOdometrosErp(placas),
     ]);
     const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     const telemetria = new Map(rows.map((row) => [normalizePlate(row.placa), row]));
@@ -503,7 +600,10 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
     res.json({
       veiculos: rows.map((row) => {
         const placaNorm = normalizePlate(row.placa);
-        return mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm));
+        return {
+          ...mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm), odometrosErp.get(placaNorm)),
+          ultimaAfericaoTacografo: afericoesTacografo.get(placaNorm) || null,
+        };
       }),
     });
   } catch (error) {
@@ -614,18 +714,19 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
       `SELECT * FROM ${TABLE()} ORDER BY criado_em DESC`
     );
     const placas = rows.map((row) => row.placa);
-    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, telemetria] = await Promise.all([
+    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, telemetria, odometrosErp] = await Promise.all([
       loadDetalhesVeiculos(placas),
       loadHistoricoManutencoes(placas),
       loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
       loadDetalhesTelemetria(placas),
+      loadOdometrosErp(placas),
     ]);
     const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     res.json({
       automacoes: rows.map((row) => {
         const placaNorm = normalizePlate(row.placa);
-        return mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm));
+        return mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm), odometrosErp.get(placaNorm));
       }),
     });
   } catch (error) {
@@ -655,10 +756,20 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
     const entradas = placas.map(p => ({
       placa: String(p.placa).toUpperCase().trim(),
       km_atual: Number(p.km_atual || 0),
+      km_ultimo_servico: p.km_ultimo_servico == null || p.km_ultimo_servico === "" ? null : Number(p.km_ultimo_servico),
+      data_ultimo_servico_km: p.data_ultimo_servico_km ? String(p.data_ultimo_servico_km).slice(0, 10) : null,
+      data_ultimo_servico: p.data_ultimo_servico || data_ultimo_servico || null,
     }));
 
+    if (tipoControle === "data") {
+      const semData = entradas.filter(item => !item.data_ultimo_servico).map(item => item.placa);
+      if (semData.length > 0) {
+        return res.status(400).json({ error: `Informe a última aferição das placas: ${semData.join(", ")}.` });
+      }
+    }
+
     const criados = [];
-    for (const { placa, km_atual } of entradas) {
+    for (const { placa, km_atual, km_ultimo_servico: kmUltimoServico, data_ultimo_servico_km: dataUltimoServicoKm, data_ultimo_servico: dataUltimoServico } of entradas) {
       const km = Number(km_atual || 0);
       const intervalo = tipoControle === "km" ? Number(intervalo_km) : null;
       const intervaloDias = tipoControle === "data" ? Number(intervalo_dias) : null;
@@ -675,18 +786,34 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
           mensagem,
           intervalo,
           km,
-          tipoControle === "km" ? proximoKmProgramado(km, intervalo) : 0,
+          tipoControle === "km" && kmUltimoServico != null ? kmUltimoServico + intervalo : (tipoControle === "km" ? proximoKmProgramado(km, intervalo) : 0),
           contato.numeros,
           contato.contato_id,
           contato.contato_nome,
           contato.contato_numero,
           tipoControle,
           intervaloDias,
-          tipoControle === "data" ? data_ultimo_servico || null : null,
-          tipoControle === "data" ? addDays(data_ultimo_servico, intervaloDias) : null,
+          tipoControle === "data" ? dataUltimoServico : null,
+          tipoControle === "data" ? addDays(dataUltimoServico, intervaloDias) : null,
         ]
       );
       criados.push(rows[0]);
+      if (tipoControle === "km" && kmUltimoServico != null && dataUltimoServicoKm) {
+        await pool.query(`
+          INSERT INTO ${HISTORY_TABLE()} (
+            automacao_id, placa, tipo_movimento, descricao, data_servico, km_servico, observacao, criado_por
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        `, [
+          rows[0].id,
+          placa,
+          maintenanceMovementType(titulo),
+          titulo,
+          dataUltimoServicoKm,
+          kmUltimoServico,
+          "Referência informada na criação do plano",
+          req.user?.id || null,
+        ]);
+      }
     }
 
     res.status(201).json({ automacoes: criados });

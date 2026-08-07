@@ -292,13 +292,12 @@ async function fetchLatestTelemetryOdometer(placa) {
     JOIN rodobach.veiculos v
       ON v.veiculo_id = mcb.veiculo_id
     WHERE UPPER(TRIM(v.placa)) = UPPER(TRIM($1))
-      AND mcb.odometro IS NOT NULL
     ORDER BY mcb.data_hora DESC
     LIMIT 1
   `, [placa]);
 
   const row = rows[0];
-  if (!row) return null;
+  if (!row || Number(row.odometro) <= 0) return null;
 
   return {
     placa: normalizeText(row.placa),
@@ -309,21 +308,41 @@ async function fetchLatestTelemetryOdometer(placa) {
 }
 
 async function fetchClientVehicleKm(placa) {
-  const { rows } = await queryClient("km veiculo cadastro", `
-    SELECT placavei, kmatualvei, dataatualkmvei
-    FROM frotas.veiculos
-    WHERE UPPER(TRIM(placavei::text)) = UPPER(TRIM($1))
+  const placaNormalizada = normalizeText(placa).replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const { rows } = await queryClient("km mais recente do sistema", `
+    WITH eventos AS (
+      SELECT regexp_replace(upper(veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
+             COALESCE(datachegadacvg, datasaidacvg)::date AS data_ref,
+             GREATEST(COALESCE(kmchegadacvg, 0), COALESCE(kmsaidacvg, 0))::numeric AS km,
+             'viagem'::text AS origem
+      FROM logistica.controleviagens
+      UNION ALL
+      SELECT regexp_replace(upper(veiculoaba::text), '[^A-Z0-9]', '', 'g'),
+             dataaba::date, kilometragematualaba::numeric, 'abastecimento'::text
+      FROM frotas.abastecimentos
+      UNION ALL
+      SELECT regexp_replace(upper(veiculoose::text), '[^A-Z0-9]', '', 'g'),
+             COALESCE(dataentradaose, dataemissaoose)::date,
+             kilometragematualveiculoose::numeric, 'ordem_servico'::text
+      FROM frotas.ordensservicosexterna
+    )
+    SELECT placa, km, data_ref, origem
+    FROM eventos
+    WHERE placa = $1
+      AND km BETWEEN 10000 AND 2000000
+      AND data_ref IS NOT NULL
+    ORDER BY data_ref DESC, km DESC
     LIMIT 1
-  `, [placa]);
+  `, [placaNormalizada]);
 
   const row = rows[0];
-  if (!row || row.kmatualvei == null) return null;
+  if (!row || row.km == null) return null;
 
   return {
-    placa: normalizeText(row.placavei),
-    odometro: Number(row.kmatualvei),
-    dataHora: row.dataatualkmvei,
-    origem: "cadastro_frotas",
+    placa: normalizeText(row.placa),
+    odometro: Number(row.km),
+    dataHora: row.data_ref,
+    origem: `sistema_${row.origem}`,
   };
 }
 
@@ -352,19 +371,6 @@ export async function getOdometroAtualVeiculo(veiculo) {
   const placa = normalizeText(veiculo).toUpperCase();
   if (!placa) throw new Error("Placa e obrigatoria.");
 
-  const hodometro = await fetchLatestTelemetryHodometer(placa).catch((error) => {
-    logPneus("hodometro telemetria indisponivel para placa direta", { placa, error: error.message });
-    return null;
-  });
-  if (hodometro) {
-    return {
-      ...hodometro,
-      placaSolicitada: placa,
-      placaOdometro: hodometro.placa,
-      engate: null,
-    };
-  }
-
   const direto = await fetchLatestTelemetryOdometer(placa).catch((error) => {
     logPneus("telemetria indisponivel para placa direta", { placa, error: error.message });
     return null;
@@ -383,20 +389,6 @@ export async function getOdometroAtualVeiculo(veiculo) {
     return null;
   });
   if (engate?.placaPrincipal) {
-    const hodometroPrincipal = await fetchLatestTelemetryHodometer(engate.placaPrincipal).catch((error) => {
-      logPneus("hodometro telemetria indisponivel para placa principal", { placaPrincipal: engate.placaPrincipal, error: error.message });
-      return null;
-    });
-    if (hodometroPrincipal) {
-      return {
-        ...hodometroPrincipal,
-        placaSolicitada: placa,
-        placaOdometro: hodometroPrincipal.placa,
-        origem: "hodometro_telemetria_engate",
-        engate,
-      };
-    }
-
     const telemetriaPrincipal = await fetchLatestTelemetryOdometer(engate.placaPrincipal).catch((error) => {
       logPneus("telemetria indisponivel para placa principal", { placaPrincipal: engate.placaPrincipal, error: error.message });
       return null;
@@ -419,7 +411,7 @@ export async function getOdometroAtualVeiculo(veiculo) {
       ...cadastro,
       placaSolicitada: placa,
       placaOdometro: cadastro.placa,
-      origem: engate?.placaPrincipal ? "cadastro_frotas_engate" : "cadastro_frotas",
+      origem: engate?.placaPrincipal ? `${cadastro.origem}_engate` : cadastro.origem,
       engate,
     };
   }
