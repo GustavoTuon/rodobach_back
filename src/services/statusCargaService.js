@@ -136,22 +136,31 @@ async function getLatestLocations(plates = []) {
   const pool = getVeiculosPool();
   const schema = quoteIdent(process.env.VEICULOS_DB_SCHEMA || "rodobach");
   const { rows } = await pool.query(`
-    SELECT DISTINCT ON (UPPER(TRIM(v.placa)))
-      UPPER(TRIM(v.placa)) AS placa,
-      m.data_hora,
-      m.latitude,
-      m.longitude,
-      m.municipio,
-      m.uf,
-      m.rodovia,
-      m.rua,
-      m.velocidade,
-      m.odometro
-    FROM ${schema}.mensagens_cb m
-    JOIN ${schema}.veiculos v ON v.veiculo_id = m.veiculo_id
-    WHERE regexp_replace(upper(v.placa), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
-      AND (m.latitude IS NOT NULL OR m.longitude IS NOT NULL OR NULLIF(TRIM(m.municipio), '') IS NOT NULL)
-    ORDER BY UPPER(TRIM(v.placa)), m.data_hora DESC
+    WITH veiculos_alvo AS (
+      SELECT v.veiculo_id, UPPER(TRIM(v.placa)) AS placa
+      FROM ${schema}.veiculos v
+      WHERE regexp_replace(upper(v.placa), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
+    ), posicao AS (
+      SELECT DISTINCT ON (m.veiculo_id)
+        m.veiculo_id, m.data_hora, m.latitude, m.longitude, m.municipio,
+        m.uf, m.rodovia, m.rua, m.velocidade, m.odometro
+      FROM ${schema}.mensagens_cb m
+      JOIN veiculos_alvo va ON va.veiculo_id = m.veiculo_id
+      WHERE m.latitude IS NOT NULL OR m.longitude IS NOT NULL OR NULLIF(TRIM(m.municipio), '') IS NOT NULL
+      ORDER BY m.veiculo_id, m.data_hora DESC
+    ), movimento AS (
+      SELECT m.veiculo_id, MAX(m.data_hora) AS ultima_movimentacao_at
+      FROM ${schema}.mensagens_cb m
+      JOIN veiculos_alvo va ON va.veiculo_id = m.veiculo_id
+      WHERE COALESCE(m.velocidade, 0) >= 5
+      GROUP BY m.veiculo_id
+    )
+    SELECT va.placa, p.data_hora, p.latitude, p.longitude, p.municipio,
+      p.uf, p.rodovia, p.rua, p.velocidade, p.odometro, movimento.ultima_movimentacao_at
+    FROM veiculos_alvo va
+    JOIN posicao p ON p.veiculo_id = va.veiculo_id
+    LEFT JOIN movimento ON movimento.veiculo_id = va.veiculo_id
+    ORDER BY va.placa
   `, [list]);
 
   return new Map(rows.map((row) => {
@@ -159,6 +168,7 @@ async function getLatestLocations(plates = []) {
     const endereco = [row.rodovia, row.rua].map((value) => String(value || "").trim()).filter(Boolean).join(" - ");
     return [normalizePlate(row.placa), {
       dataHora: row.data_hora || null,
+      ultimaMovimentacaoAt: row.ultima_movimentacao_at || null,
       latitude: row.latitude === null || row.latitude === undefined ? null : Number(row.latitude),
       longitude: row.longitude === null || row.longitude === undefined ? null : Number(row.longitude),
       municipio: row.municipio || "",
