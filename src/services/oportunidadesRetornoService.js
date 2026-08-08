@@ -1,8 +1,9 @@
-import XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
 import { config, tableName } from "../config.js";
 import { getTrafegusDashboard, getTrafegusGoogleRoute } from "./trafegusService.js";
+import { getStatusCargaFrota } from "./statusCargaService.js";
 
 const CLIENTES_TABLE = tableName("oportunidades_retorno_clientes");
 const N8N_WEBHOOK_PATH = "rodobach-oportunidades-retorno";
@@ -157,10 +158,11 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
         con.empresacon,
         con.cidadecoletacon AS cidade_codigo,
         con.dataemissaocon::date AS data,
+        UPPER(NULLIF(TRIM(con.veiculocon::text), '')) AS placa,
         COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)::numeric AS receita
       FROM logistica.conhecimentos con
       WHERE con.statuscon = 2
-        AND con.dataemissaocon::date >= CURRENT_DATE - INTERVAL '24 months'
+        AND con.dataemissaocon::date >= DATE '2023-01-01'
         AND con.cidadecoletacon IS NOT NULL
     )
     SELECT
@@ -174,7 +176,8 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
       TRIM(est.abreviaturaest) AS uf,
       COUNT(*)::int AS quantidade_fretes,
       SUM(h.receita)::numeric AS faturamento,
-      MAX(h.data)::date AS ultimo_frete
+      MAX(h.data)::date AS ultimo_frete,
+      ARRAY_AGG(DISTINCT h.placa ORDER BY h.placa) FILTER (WHERE h.placa IS NOT NULL) AS placas
     FROM historico h
     JOIN localidades.cidades cid ON cid.codigocid = h.cidade_codigo
     JOIN localidades.estados est ON est.codigoest = cid.estadocid
@@ -212,8 +215,9 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
       quantidadeFretes: Number(row.quantidade_fretes) || 0,
       faturamento: Number(row.faturamento) || 0,
       ultimoFrete: row.ultimo_frete,
+      placas: Array.isArray(row.placas) ? row.placas : [],
       mapsUrl: `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}`,
-      fonte: "Histórico de CT-es dos últimos 24 meses",
+      fonte: "Histórico de CT-es desde 2023",
     };
   });
 
@@ -227,7 +231,7 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
     .slice(0, limit);
 }
 
-export function createClientesTemplate() {
+export async function createClientesTemplate() {
   const rows = [{
     Nome: "Cliente Exemplo",
     Cidade: "Cordeiropolis",
@@ -240,20 +244,32 @@ export function createClientesTemplate() {
     "Tipo de carga": "Ceramica / carga seca",
     Observacao: "Horario de atendimento ou detalhe comercial",
   }];
-  const workbook = XLSX.utils.book_new();
-  const sheet = XLSX.utils.json_to_sheet(rows);
-  sheet["!cols"] = [28, 18, 8, 38, 14, 14, 24, 20, 24, 42].map((wch) => ({ wch }));
-  XLSX.utils.book_append_sheet(workbook, sheet, "Clientes");
-  return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Clientes");
+  sheet.columns = Object.keys(rows[0]).map((header, index) => ({
+    header, key: header, width: [28, 18, 8, 38, 14, 14, 24, 20, 24, 42][index],
+  }));
+  sheet.addRows(rows);
+  return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
 export async function importClientesWorkbook(base64, { replace = true } = {}) {
   const buffer = Buffer.from(text(base64).replace(/^data:.*?;base64,/, ""), "base64");
   if (!buffer.length) throw new Error("Arquivo de importacao vazio.");
-  const workbook = XLSX.read(buffer, { type: "buffer" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("A planilha excede o limite de 5 MB.");
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const sheet = workbook.worksheets[0];
   if (!sheet) throw new Error("A planilha nao possui abas validas.");
-  const imported = XLSX.utils.sheet_to_json(sheet, { defval: "" }).map(normalizeImportedRow);
+  if (sheet.rowCount > 10000) throw new Error("A planilha excede o limite de 10.000 linhas.");
+  const headers = sheet.getRow(1).values.slice(1).map((value) => String(value || ""));
+  const imported = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const item = {};
+    headers.forEach((header, index) => { item[header] = row.getCell(index + 1).text; });
+    imported.push(normalizeImportedRow(item));
+  });
   const valid = imported.filter((row) => row.nome && row.cidade && row.uf);
   const invalid = imported.length - valid.length;
   const withoutCoordinates = valid.filter((row) => row.latitude === null || row.longitude === null).length;
@@ -307,13 +323,25 @@ export async function listClientesRetorno() {
 }
 
 export async function getOportunidadesOverview() {
-  const [clientes, trafegus] = await Promise.all([
+  const [clientes, trafegus, frota] = await Promise.all([
     listClientesRetorno(),
     getTrafegusDashboard(),
+    getStatusCargaFrota({ dias: 180 }),
   ]);
+  const placasComSm = new Set((trafegus.sms || []).map((item) => text(item.placa).replace(/[^a-z0-9]/gi, "").toUpperCase()));
+  const veiculosTelemetria = (frota.rows || [])
+    .filter((item) => !placasComSm.has(text(item.placa).replace(/[^a-z0-9]/gi, "").toUpperCase()))
+    .filter((item) => Number.isFinite(Number(item.localizacao?.latitude)) && Number.isFinite(Number(item.localizacao?.longitude)))
+    .map((item) => ({
+      placa: item.placa,
+      modelo: item.modelo || item.veiculo || "",
+      situacao: item.situacaoOperacional?.label || item.estadoLabel || "",
+      localizacao: item.localizacao,
+    }));
   return {
     clientes,
     sms: trafegus.sms || [],
+    veiculosTelemetria,
     configuracao: {
       raioPadraoKm: 200,
       n8nConfigurado: Boolean(opportunitiesWebhookUrl()),
@@ -321,6 +349,18 @@ export async function getOportunidadesOverview() {
       destinatario: text(process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO),
     },
   };
+}
+
+export function buildClientAvailabilityMessage({ sm, destino, cliente }) {
+  const greeting = cliente.contato ? `Olá, ${cliente.contato}! Tudo bem?` : "Olá! Tudo bem?";
+  return [
+    greeting,
+    "",
+    `Teremos o veículo ${sm.placa} disponível na região de ${destino.descricao}.`,
+    `Vocês têm alguma carga disponível para embarque em ${cliente.cidade}/${cliente.uf}?`,
+    "",
+    "Se tiverem, podem nos informar o destino, produto, peso e previsão de carregamento?",
+  ].join("\n");
 }
 
 function buildMessage({ sm, destino, raioKm, clientes }) {
@@ -346,13 +386,33 @@ function buildMessage({ sm, destino, raioKm, clientes }) {
 
 export async function analyzeSmOpportunities(smId, rawRadius = 200) {
   const radiusKm = Math.min(Math.max(number(rawRadius) || 200, 1), 1000);
-  const [route, overview] = await Promise.all([
-    getTrafegusGoogleRoute(smId),
-    getOportunidadesOverview(),
-  ]);
-  const destination = route.destino;
+  const selection = text(smId);
+  const overview = await getOportunidadesOverview();
+  const telemetryPlate = selection.startsWith("tel:") ? selection.slice(4).replace(/[^a-z0-9]/gi, "").toUpperCase() : "";
+  let route = null;
+  let sm;
+  let destination;
+  if (telemetryPlate) {
+    const vehicle = overview.veiculosTelemetria.find((item) => item.placa === telemetryPlate);
+    if (!vehicle) throw new Error("Veiculo sem SM nao encontrado na telemetria.");
+    destination = {
+      descricao: vehicle.localizacao.cidadeUf || vehicle.localizacao.endereco || `Posicao atual de ${vehicle.placa}`,
+      latitude: Number(vehicle.localizacao.latitude),
+      longitude: Number(vehicle.localizacao.longitude),
+    };
+    sm = { id: null, placa: vehicle.placa, motorista: "", origem: "telemetria" };
+  } else {
+    const numericSmId = selection.startsWith("sm:") ? selection.slice(3) : selection;
+    route = await getTrafegusGoogleRoute(numericSmId);
+    destination = route.destino;
+    sm = overview.sms.find((item) => String(item.id) === String(numericSmId)) || {
+      id: route.sm,
+      placa: route.placa,
+      motorista: route.motorista,
+    };
+  }
   if (!destination || !Number.isFinite(destination.latitude) || !Number.isFinite(destination.longitude)) {
-    throw new Error("A SM nao possui coordenadas validas no destino.");
+    throw new Error("O veiculo nao possui coordenadas validas para a analise.");
   }
   const nearby = overview.clientes
     .filter((client) => Number.isFinite(client.latitude) && Number.isFinite(client.longitude))
@@ -363,23 +423,53 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
     }))
     .filter((client) => client.distanciaKm <= radiusKm)
     .sort((a, b) => a.distanciaKm - b.distanciaKm);
-  const destinationUf = text(destination.descricao).toUpperCase().match(/\/([A-Z]{2})(?:\W|$)/)?.[1] || "";
-  const potenciais = await listBilledClientsNear(destination, destinationUf, radiusKm, 10);
-  const sm = overview.sms.find((item) => String(item.id) === String(smId)) || {
-    id: route.sm,
-    placa: route.placa,
-    motorista: route.motorista,
-  };
+  const destinationUf = telemetryPlate
+    ? text(overview.veiculosTelemetria.find((item) => item.placa === telemetryPlate)?.localizacao?.uf).toUpperCase()
+    : text(destination.descricao).toUpperCase().match(/\/([A-Z]{2})(?:\W|$)/)?.[1] || "";
+  const potenciais = await listBilledClientsNear(destination, destinationUf, radiusKm, 100);
+  const potenciaisComMensagem = potenciais.map((cliente) => ({
+    ...cliente,
+    mensagemContato: buildClientAvailabilityMessage({ sm, destino: destination, cliente }),
+  }));
   return {
     sm,
     destino: destination,
     raioKm: radiusKm,
     clientes: nearby,
-    potenciais,
-    mensagem: buildMessage({ sm, destino: destination, raioKm: radiusKm, clientes: potenciais }),
+    potenciais: potenciaisComMensagem,
+    mensagem: buildMessage({ sm, destino: destination, raioKm: radiusKm, clientes: potenciaisComMensagem }),
     n8nConfigurado: overview.configuracao.n8nConfigurado,
     destinatario: overview.configuracao.destinatario,
   };
+}
+
+export async function sendClientOpportunityToN8n(payload) {
+  if (!sendingEnabled()) throw new Error("Envio bloqueado: o modulo esta em modo de validacao.");
+  const webhookUrl = opportunitiesWebhookUrl();
+  if (!webhookUrl) throw new Error("Webhook n8n de oportunidades ainda nao configurado.");
+  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm);
+  const cliente = analysis.potenciais.find((item) => String(item.id) === String(payload.clienteId));
+  if (!cliente) throw new Error("Cliente nao encontrado nesta analise.");
+  const destinatario = text(payload.destinatario || cliente.telefone).replace(/\D/g, "");
+  if (!destinatario) throw new Error("O cliente nao possui telefone. Informe um numero para envio.");
+  const mensagem = text(payload.mensagem) || cliente.mensagemContato;
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      evento: "oportunidade_retorno_cliente",
+      geradoEm: new Date().toISOString(),
+      destinatario,
+      mensagem,
+      sm: analysis.sm,
+      destino: analysis.destino,
+      raioKm: analysis.raioKm,
+      cliente,
+    }),
+  });
+  const responseText = await response.text();
+  if (!response.ok) throw new Error(`Webhook n8n respondeu HTTP ${response.status}: ${responseText.slice(0, 200)}`);
+  return { ok: true, status: response.status, cliente: cliente.nome, destinatario };
 }
 
 export async function sendOpportunitiesToN8n(payload) {

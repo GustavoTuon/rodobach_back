@@ -8,15 +8,20 @@ for (const key of required) {
   }
 }
 
-if (!process.env.JWT_SECRET) {
-  console.warn("AVISO: JWT_SECRET não definido. Usando valor padrão (inseguro em produção).");
+const isProduction = process.env.NODE_ENV === "production";
+if (!process.env.JWT_SECRET && isProduction) throw new Error("JWT_SECRET is required in production");
+if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
+  throw new Error("JWT_SECRET must have at least 32 characters");
 }
 
 export const config = {
+  env: process.env.NODE_ENV || "development",
+  isProduction,
   port: Number(process.env.PORT || 3333),
-  jwtSecret: process.env.JWT_SECRET || "rodobach-jwt-secret-TROQUE-EM-PRODUCAO",
+  jwtSecret: process.env.JWT_SECRET || "development-only-jwt-secret-32-chars",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "24h",
   telemetriaResumoDir: process.env.TELEMETRIA_RESUMO_DIR || "",
+  runSchedulers: String(process.env.RUN_SCHEDULERS || "false").toLowerCase() === "true",
   statusCargaAlert: {
     enabled: String(process.env.STATUS_CARGA_ALERTA_ENABLED || "true").toLowerCase() === "true",
     destinatario: String(process.env.STATUS_CARGA_ALERTA_DESTINATARIO || "554899503759").replace(/\D/g, ""),

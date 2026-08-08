@@ -1,9 +1,18 @@
 import cors from "cors";
 import express from "express";
-import { config, tableName } from "./config.js";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import pinoHttp from "pino-http";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { config } from "./config.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/pool.js";
 import { requireAuth } from "./middleware/auth.js";
+import { requireRoutePermission } from "./middleware/permissions.js";
+import { requireAdmin } from "./middleware/requireAdmin.js";
+import { auditMutation } from "./services/auditService.js";
+import { logger } from "./logger.js";
 import { authRouter } from "./routes/auth.js";
 import { financeiroRouter } from "./routes/financeiro.js";
 import { freteRouter } from "./routes/frete.js";
@@ -25,7 +34,11 @@ import { canhotosRouter } from "./routes/canhotos.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
 import { startMaintenanceAlertScheduler } from "./services/manutencaoAlertaService.js";
 
-const app = express();
+export const app = express();
+
+app.disable("x-powered-by");
+app.use(pinoHttp({ logger, genReqId: (req) => req.headers["x-request-id"] || randomUUID() }));
+app.use(helmet({ contentSecurityPolicy: false }));
 
 app.use(cors({
   origin(origin, callback) {
@@ -37,7 +50,14 @@ app.use(cors({
     callback(new Error(`Origin not allowed: ${origin}`));
   },
 }));
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "2mb" }));
+app.use("/api/auth/login", rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Muitas tentativas de login. Tente novamente mais tarde." },
+}));
 
 // ── Rotas públicas ────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
@@ -53,7 +73,7 @@ app.get("/api/health", async (_req, res) => {
     const { rows } = await pool.query("SELECT NOW() AS now");
     res.json({ ok: true, database: true, now: rows[0].now });
   } catch (error) {
-    res.status(503).json({ ok: false, database: false, error: error.message });
+    res.status(503).json({ ok: false, database: false, ...(config.isProduction ? {} : { error: error.message }) });
   }
 });
 
@@ -76,7 +96,7 @@ app.get("/api/health/viagens", async (_req, res) => {
       hint: allTables ? null : "Execute POST /api/admin/migrate para criar as tabelas.",
     });
   } catch (error) {
-    res.status(503).json({ ok: false, database: false, error: error.message });
+    res.status(503).json({ ok: false, database: false, ...(config.isProduction ? {} : { error: error.message }) });
   }
 });
 
@@ -85,8 +105,10 @@ app.use("/api", authRouter);
 
 // ── Rotas protegidas (JWT obrigatório a partir daqui) ─────────────────────────
 app.use("/api", requireAuth);
+app.use("/api", requireRoutePermission);
+app.use("/api", auditMutation);
 
-app.post("/api/admin/migrate", async (_req, res, next) => {
+app.post("/api/admin/migrate", requireAdmin, async (_req, res, next) => {
   try {
     await runMigrations();
     res.json({ ok: true });
@@ -118,13 +140,22 @@ app.use((req, res) => {
   res.status(404).json({ error: `Rota nao encontrada: ${req.method} ${req.path}` });
 });
 
-app.use((error, _req, res, _next) => {
-  console.error(error);
-  res.status(500).json({ error: "Erro interno no servidor.", detail: error.message });
+app.use((error, req, res, _next) => {
+  req.log?.error({ err: error }, "Erro nao tratado");
+  res.status(500).json({
+    error: "Erro interno no servidor.",
+    ...(config.isProduction ? {} : { detail: error.message }),
+  });
 });
 
-app.listen(config.port, () => {
-  console.log(`Rodobach API on http://localhost:${config.port}`);
-  startEmptyVehicleAlertScheduler();
-  startMaintenanceAlertScheduler();
-});
+export function startServer() {
+  return app.listen(config.port, () => {
+    logger.info({ port: config.port }, "Rodobach API iniciada");
+    if (config.runSchedulers) {
+      startEmptyVehicleAlertScheduler();
+      startMaintenanceAlertScheduler();
+    }
+  });
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) startServer();
