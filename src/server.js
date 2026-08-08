@@ -22,6 +22,8 @@ import { oportunidadesRetornoRouter } from "./routes/oportunidadesRetorno.js";
 import { folgasMotoristasRouter } from "./routes/folgasMotoristas.js";
 import { consultaCteRouter } from "./routes/consultaCte.js";
 import { canhotosRouter } from "./routes/canhotos.js";
+import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
+import { startMaintenanceAlertScheduler } from "./services/manutencaoAlertaService.js";
 
 const app = express();
 
@@ -123,4 +125,6 @@ app.use((error, _req, res, _next) => {
 
 app.listen(config.port, () => {
   console.log(`Rodobach API on http://localhost:${config.port}`);
+  startEmptyVehicleAlertScheduler();
+  startMaintenanceAlertScheduler();
 });

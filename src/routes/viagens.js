@@ -194,6 +194,10 @@ function mapClientOption(row) {
     condicaoPagamento: row.payment_condition || "",
     vendedorCodigo: row.seller_code || null,
     vendedor: row.seller_name || "",
+    cidade: row.city || "",
+    uf: row.state || "",
+    endereco: [row.address, row.address_number, row.district].filter(Boolean).join(", "),
+    cep: row.zip_code || "",
   };
 }
 
@@ -218,11 +222,23 @@ async function loadClientOptions(search = "") {
       NULL::text AS contact,
       condicaopagamentocli AS payment_condition,
       clientes.vendedorcli AS seller_code,
-      pessoas.nomepes AS seller_name
+      pessoas.nomepes AS seller_name,
+      cidades.nomecid AS city,
+      estados.abreviaturaest AS state,
+      clientes.enderecocli AS address,
+      clientes.numerocli AS address_number,
+      clientes.bairrocli AS district,
+      clientes.cepcli AS zip_code
     FROM gerais.clientes clientes
     LEFT JOIN gerais.pessoas pessoas
       ON pessoas.codigorepresentantepes = clientes.vendedorcli
      AND pessoas.ativopes::text = 'S'
+    LEFT JOIN localidades.cep ceps
+      ON ceps.codigocep::text = REGEXP_REPLACE(COALESCE(clientes.cepcli, ''), '\\D', '', 'g')
+    LEFT JOIN localidades.cidades cidades
+      ON cidades.codigocid = COALESCE(clientes.cidadecoletacli, ceps.cidadecep)
+    LEFT JOIN localidades.estados estados
+      ON estados.codigoest = cidades.estadocid
     WHERE NULLIF(TRIM(clientes.nomecli::text), '') IS NOT NULL
       AND ($1::text = '%%' OR CONCAT_WS(' ', clientes.nomecli, clientes.fantasiacli, clientes.cnpjcpfcli, clientes.codigocli::text) ILIKE $1)
     ORDER BY COALESCE(NULLIF(clientes.fantasiacli, ''), clientes.nomecli)

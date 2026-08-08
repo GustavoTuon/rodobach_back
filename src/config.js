@@ -17,12 +17,23 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || "rodobach-jwt-secret-TROQUE-EM-PRODUCAO",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "24h",
   telemetriaResumoDir: process.env.TELEMETRIA_RESUMO_DIR || "",
+  statusCargaAlert: {
+    enabled: String(process.env.STATUS_CARGA_ALERTA_ENABLED || "true").toLowerCase() === "true",
+    destinatario: String(process.env.STATUS_CARGA_ALERTA_DESTINATARIO || "554899503759").replace(/\D/g, ""),
+    horasVazio: Number(process.env.STATUS_CARGA_ALERTA_HORAS || 48),
+    repetirHoras: Number(process.env.STATUS_CARGA_ALERTA_REPETIR_HORAS || 24),
+    intervaloMinutos: Number(process.env.STATUS_CARGA_ALERTA_INTERVALO_MINUTOS || 60),
+  },
   n8n: {
     apiUrl: (process.env.N8N_API_URL || "").replace(/\/+$/, ""),
     apiKey: process.env.N8N_API_KEY || "",
     vencimentoClientesWorkflowId: process.env.N8N_VENCIMENTO_CLIENTES_WORKFLOW_ID || "",
     oportunidadesRetornoWebhookUrl: process.env.N8N_OPORTUNIDADES_RETORNO_WEBHOOK_URL || "",
     oportunidadesRetornoDestinatario: process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO || "",
+    statusCargaVazioWebhookUrl: process.env.N8N_STATUS_CARGA_VAZIO_WEBHOOK_URL
+      || ((process.env.N8N_API_URL || "").replace(/\/+$/, "")
+        ? `${(process.env.N8N_API_URL || "").replace(/\/+$/, "")}/webhook/status-carga-veiculo-vazio`
+        : ""),
   },
   frontendOrigins: (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
     .split(",")
