@@ -4,11 +4,12 @@ import jwt from "jsonwebtoken";
 import { config, tableName } from "../config.js";
 import { pool } from "../db/pool.js";
 import { requireAuth } from "../middleware/auth.js";
+import { loginSchema, validateBody } from "../middleware/validate.js";
 
 export const authRouter = express.Router();
 
 // POST /api/auth/login
-authRouter.post("/auth/login", async (req, res, next) => {
+authRouter.post("/auth/login", validateBody(loginSchema), async (req, res, next) => {
   try {
     const { login, senha } = req.body;
     if (!login || !senha) {

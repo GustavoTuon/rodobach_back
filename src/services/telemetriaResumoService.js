@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import xlsx from "xlsx";
+import ExcelJS from "exceljs";
 import { config } from "../config.js";
 
 function normalizePlate(value) {
@@ -52,10 +52,12 @@ function overlapsPeriod(report, filters = {}) {
   return report.startDate <= endDate && report.endDate >= startDate;
 }
 
-function readMetricPairs(filePath) {
-  const workbook = xlsx.readFile(filePath, { cellDates: false });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+async function readMetricPairs(filePath) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(filePath);
+  const sheet = workbook.worksheets[0];
+  const rows = [];
+  sheet?.eachRow({ includeEmpty: true }, (row) => rows.push(row.values.slice(1).map((v) => v ?? "")));
   const metrics = {};
 
   for (let i = 0; i < rows.length - 1; i += 2) {
@@ -76,7 +78,7 @@ function resolveTelemetryDir() {
   return path.join(process.env.USERPROFILE, "OneDrive", "Desktop", "SXY5D26");
 }
 
-export function getTelemetriaResumoPorPlaca(filters = {}) {
+export async function getTelemetriaResumoPorPlaca(filters = {}) {
   const dir = resolveTelemetryDir();
   if (!dir || !fs.existsSync(dir)) {
     return {
@@ -97,7 +99,7 @@ export function getTelemetriaResumoPorPlaca(filters = {}) {
     if (!overlapsPeriod(reportPeriod, filters)) continue;
 
     try {
-      const metrics = readMetricPairs(path.join(dir, filename));
+      const metrics = await readMetricPairs(path.join(dir, filename));
       const placa = normalizePlate(metrics.Placa || filename.split("_")[0]);
       if (!placa || (targetPlate && placa !== targetPlate)) continue;
 

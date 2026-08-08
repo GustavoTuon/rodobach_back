@@ -5,6 +5,7 @@ import {
   getOportunidadesOverview,
   importClientesWorkbook,
   sendOpportunitiesToN8n,
+  sendClientOpportunityToN8n,
 } from "../services/oportunidadesRetornoService.js";
 
 const router = Router();
@@ -17,9 +18,9 @@ router.get("/oportunidades-retorno", async (_req, res, next) => {
   }
 });
 
-router.get("/oportunidades-retorno/modelo.xlsx", (_req, res, next) => {
+router.get("/oportunidades-retorno/modelo.xlsx", async (_req, res, next) => {
   try {
-    const buffer = createClientesTemplate();
+    const buffer = await createClientesTemplate();
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", 'attachment; filename="modelo-clientes-retorno.xlsx"');
     res.send(buffer);
@@ -47,6 +48,14 @@ router.post("/oportunidades-retorno/analisar", async (req, res, next) => {
 router.post("/oportunidades-retorno/enviar-n8n", async (req, res, next) => {
   try {
     res.json(await sendOpportunitiesToN8n(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/oportunidades-retorno/enviar-cliente", async (req, res, next) => {
+  try {
+    res.json(await sendClientOpportunityToN8n(req.body || {}));
   } catch (error) {
     next(error);
   }

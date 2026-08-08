@@ -53,8 +53,12 @@ export async function listEmptyVehicleAlerts() {
 }
 
 export async function runEmptyVehicleAlerts({ dryRun = false } = {}) {
-  const lock = await pool.query("SELECT pg_try_advisory_lock($1) AS acquired", [LOCK_ID]);
-  if (!lock.rows[0]?.acquired) return { ok: true, ignorado: true, motivo: "verificacao_em_andamento" };
+  const lockClient = await pool.connect();
+  const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [LOCK_ID]);
+  if (!lock.rows[0]?.acquired) {
+    lockClient.release();
+    return { ok: true, ignorado: true, motivo: "verificacao_em_andamento" };
+  }
   try {
     const now = new Date();
     const dashboard = await getStatusCargaFrota({ dias: 180 });
@@ -86,7 +90,8 @@ export async function runEmptyVehicleAlerts({ dryRun = false } = {}) {
     }
     return { ok: true, dryRun, destinatario: config.statusCargaAlert.destinatario, candidatos: candidates, enviados: sent };
   } finally {
-    await pool.query("SELECT pg_advisory_unlock($1)", [LOCK_ID]).catch(() => {});
+    await lockClient.query("SELECT pg_advisory_unlock($1)", [LOCK_ID]).catch(() => {});
+    lockClient.release();
   }
 }
 

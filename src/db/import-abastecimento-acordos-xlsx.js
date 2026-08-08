@@ -1,5 +1,5 @@
 import "dotenv/config";
-import XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { tableName } from "../config.js";
 import { clientPool } from "./clientPool.js";
 import { pool } from "./pool.js";
@@ -62,9 +62,9 @@ function parseDate(value) {
   if (!value || clean(value).includes("#")) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
   if (typeof value === "number") {
-    const parsed = XLSX.SSF.parse_date_code(value);
-    if (!parsed) return null;
-    return [parsed.y, String(parsed.m).padStart(2, "0"), String(parsed.d).padStart(2, "0")].join("-");
+    const parsed = new Date(Date.UTC(1899, 11, 30) + value * 86400000);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString().slice(0, 10);
   }
   const match = clean(value).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (match) return `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
@@ -151,11 +151,22 @@ export async function importAbastecimentoAcordosXlsx(filePath = DEFAULT_FILE) {
   `);
   const groupsByName = new Map(groupRows.rows.map((row) => [normalizeText(row.nome), row]));
 
-  const workbook = XLSX.readFile(filePath, { cellDates: true });
-  const worksheet = workbook.Sheets.Postos;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(filePath);
+  const worksheet = workbook.getWorksheet("Postos");
   if (!worksheet) throw new Error("A aba 'Postos' nao foi encontrada na planilha.");
 
-  const rows = XLSX.utils.sheet_to_json(worksheet, { defval: null, raw: false });
+  const headers = worksheet.getRow(1).values.slice(1).map((value) => String(value || ""));
+  const rows = [];
+  worksheet.eachRow((excelRow, rowNumber) => {
+    if (rowNumber === 1) return;
+    const row = {};
+    headers.forEach((header, index) => {
+      const cell = excelRow.getCell(index + 1);
+      row[header] = cell.value instanceof Date ? cell.value : cell.text || null;
+    });
+    rows.push(row);
+  });
   const client = await pool.connect();
   const stats = { inserted: 0, updated: 0, skipped: 0 };
 

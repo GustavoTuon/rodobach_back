@@ -399,7 +399,7 @@ export async function getDivergenciasAbastecimento(filters = {}) {
       produtoNome: row.produto_nome,
       clienteCodigo: row.cliente_codigo,
       clienteNome: row.cliente_nome,
-      grupoClienteCodigo: row.grupo_cliente_codigo,
+      clienteGrupoCodigo: row.grupo_cliente_codigo,
       grupoClienteNome: row.grupo_cliente_nome,
       litros: money(litros),
       valorLitro: money(valorLitro),

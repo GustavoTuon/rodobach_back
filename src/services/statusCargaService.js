@@ -15,7 +15,6 @@ const PLACAS_STATUS_CARGA = [
   "SXY5D26",
 ];
 
-const BASE_EMPTY_CITIES = new Set(["MORRO DA FUMACA/SC", "MORRO DA FUMAÇA/SC"]);
 const DEFAULT_UNLOAD_GRACE_HOURS = 2;
 
 function unloadGraceHours() {
@@ -195,8 +194,6 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm
   const lastDoc = [...docs].sort((a, b) => String(b.eventoReferenciaAt || "").localeCompare(String(a.eventoReferenciaAt || "")))[0];
   const active = activeDocs[0];
   const loc = vehicle.localizacao || {};
-  const locLabel = locationLabel(loc.municipio, loc.uf);
-  const isBase = BASE_EMPTY_CITIES.has(normalizeText(locLabel));
   const currentSpeed = Number(loc.velocidade || 0);
   const ignoredThirdPartyFreight = [...thirdPartyFreights]
     .filter((freight) => freight.pefResiduo)
@@ -208,19 +205,8 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm
     )
     .sort((a, b) => String(b.emissaoAt || "").localeCompare(String(a.emissaoAt || "")))[0];
 
-  if (isBase && !active && !activeThirdPartyFreight && !trafegusSm) {
-    return {
-      ...vehicle,
-      ...(lastDoc || {}),
-      estado: "vazio_confirmado",
-      estadoLabel: "Vazio",
-      confianca: "media",
-      evidencia: "Localizacao atual em cidade-base/patio operacional; sem indicio confiavel de carga ativa.",
-      statusFonte: "automatico",
-    };
-  }
-
   const deliveredActiveDocs = activeDocs.filter((doc) => doc.entregaAt && isPastOrNow(doc.entregaAt));
+  const pendingActiveDocs = activeDocs.filter((doc) => !doc.entregaAt || !isPastOrNow(doc.entregaAt));
   const activeDelivered = deliveredActiveDocs.length > 0;
   const activeDeliveredRecently = deliveredActiveDocs.some((doc) => hoursSince(doc.entregaAt) <= 24);
   const stillAtDeliveredDestination = deliveredActiveDocs.some((doc) => sameLocationCity(loc.municipio, loc.uf, doc.destino));
@@ -241,10 +227,11 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm
 
   if (active) {
     const atOrigem = sameLocationCity(loc.municipio, loc.uf, active.origem);
-    const atDestino = activeDocs.some((doc) => sameLocationCity(loc.municipio, loc.uf, doc.destino));
+    const atDestino = pendingActiveDocs.length > 0
+      && pendingActiveDocs.every((doc) => sameLocationCity(loc.municipio, loc.uf, doc.destino));
     const justEmitted = hoursSince(active.emissaoAt) <= 24;
     const descargaHoras = unloadGraceHours();
-    const chegadaDestinoAt = active.chegadaViagemAt || active.entregaViagemAt;
+    const chegadaDestinoAt = atDestino ? (active.chegadaViagemAt || active.entregaViagemAt) : null;
     // Em viagens com múltiplas entregas, chegar a um dos destinos não encerra a
     // operação enquanto a SM permanecer ativa no Trafegus.
     const descargaExpirada = !trafegusSm && atDestino && chegadaDestinoAt && hoursSince(chegadaDestinoAt) >= descargaHoras;
@@ -396,7 +383,6 @@ function buildDivergenceAlert(row) {
   const speed = Number(loc.velocidade || 0);
   const atDestination = sameLocationCity(loc.municipio, loc.uf, row.destino);
   const atOrigin = sameLocationCity(loc.municipio, loc.uf, row.origem);
-  const isBase = BASE_EMPTY_CITIES.has(normalizeText(locationLabel(loc.municipio, loc.uf)));
   const evidence = normalizeText(row.evidencia || "");
 
   if (row.trafegusDivergente) {
@@ -439,7 +425,7 @@ function buildDivergenceAlert(row) {
     };
   }
 
-  if (row.estado === "vazio_confirmado" && speed >= 25 && !isBase && !atOrigin && !atDestination) {
+  if (row.estado === "vazio_confirmado" && speed >= 25 && !atOrigin && !atDestination) {
     return {
       nivel: "baixo",
       label: "Vazio em deslocamento",
@@ -479,7 +465,7 @@ function buildOperationalSituation(row) {
     return {
       tipo: "vazio",
       label: "Vazio",
-      descricao: "CT-e entregue, localizacao em base/patio ou ausencia de operacao ativa.",
+      descricao: "CT-e entregue ou ausencia de operacao ativa.",
     };
   }
 
@@ -713,7 +699,11 @@ export async function getStatusCargaFrota(filters = {}) {
       : dateTimeISO(row.dataentregacon, null);
     const rawChegadaViagemAt = dateTimeISO(row.datachegadacvg, row.horachegadacvg);
     const rawEntregaViagemAt = dateTimeISO(row.dataentregavia, row.horaretornovia);
-    const chegadaViagemAt = rawChegadaViagemAt && emissaoAt && daysBetween(emissaoAt, rawChegadaViagemAt) > 3 ? null : rawChegadaViagemAt;
+    const chegadaViagemAt = rawChegadaViagemAt
+      && ((emissaoAt && daysBetween(emissaoAt, rawChegadaViagemAt) > 3)
+        || (saidaAt && hoursBetween(rawChegadaViagemAt, saidaAt) < 0.25))
+      ? null
+      : rawChegadaViagemAt;
     const entregaViagemAt = rawEntregaViagemAt && emissaoAt && daysBetween(emissaoAt, rawEntregaViagemAt) > 3 ? null : rawEntregaViagemAt;
     const eventoReferenciaAt = entregaAt || chegadaViagemAt || entregaViagemAt || saidaAt || emissaoAt;
 
@@ -851,13 +841,13 @@ export async function getStatusCargaFrota(filters = {}) {
     },
     regra: {
       carregado: "CT-e recente sem entrega real registrada ou PEF/e-Frete ativo sem sinal de residuo.",
-      vazioConfirmado: "Cidade-base/patio ou CT-e com datahoraentregacon/dataentregacon ja vencida.",
+      vazioConfirmado: "CT-e com datahoraentregacon/dataentregacon ja vencida.",
       vazioProvavel: `Quando viagem/controle chegou ao destino e passaram ${unloadGraceHours()}h de descarga, mas o CT-e ainda nao registrou entrega.`,
       semOperacao: "Veiculo da frota sem CT-e/carga ativa no periodo.",
       pefResiduo: "PEF aberto e ignorado quando o CT-e vinculado ja foi entregue recentemente ou o veiculo permanece na cidade de destino.",
       situacoes: {
         carregado: "Documento confiavel ativo.",
-        vazio: "CT-e entregue, base/patio ou sem operacao ativa.",
+        vazio: "CT-e entregue ou sem operacao ativa.",
         indicioOperacional: "Localizacao, PEF ou informacao operacional sugere viagem, mas sem CT-e confiavel.",
         divergente: "Documento, telemetria ou ERP trazem sinais conflitantes.",
       },

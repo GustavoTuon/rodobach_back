@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+env:
+  NODE_ENV: test
+  DB_HOST: 127.0.0.1
+  DB_PORT: 5432
+  DB_NAME: rodobach_test
+  DB_USER: rodobach_test
+  DB_PASSWORD: rodobach_test
+  JWT_SECRET: ci-only-jwt-secret-with-32-characters
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm audit --omit=dev --audit-level=high
+      - run: docker build -t rodobach-back:test .

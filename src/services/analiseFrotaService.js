@@ -95,7 +95,7 @@ export async function getAbastecimento(filters = {}) {
   const period = resolvePeriod(filters);
   const params = [period.startDate, period.endDate];
   const where = filterClause(filters, params);
-  const telemetria = getTelemetriaResumoPorPlaca(filters);
+  const telemetria = await getTelemetriaResumoPorPlaca(filters);
   const telemetriaPorPlaca = new Map(telemetria.byPlate.map((row) => [row.placa, row]));
 
   const baseJoin = `
