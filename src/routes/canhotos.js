@@ -127,10 +127,8 @@ canhotosRouter.get("/canhotos", async (req, res, next) => {
       WHERE con.dataemissaocon BETWEEN $1::date AND $2::date
         -- Status 2 corresponde ao CT-e emitido/autorizado; status 3 e cancelado.
         AND COALESCE(con.statuscon, 0) <> 3
-        AND (
-          vei.tipopropriedadevei::text <> 'P'
-          OR con.dataemissaocon >= GREATEST($1::date, COALESCE(cm.ultima_chegada, cp.ultima_chegada, $1::date))
-        )
+        -- A emissao do CT-e acontece durante a viagem, antes da chegada. Nao use a
+        -- ultima chegada da placa/motorista para excluir documentos de frota.
       ORDER BY con.dataemissaocon DESC, con.codigocon DESC, nf.sequenciacnf
       LIMIT 5000
     `, [inicio, fim]);

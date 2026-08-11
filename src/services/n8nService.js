@@ -8,6 +8,7 @@ const RODOBACH_FOLDER_WORKFLOW_IDS = new Set([
   "pQVvQgICABwzSEvF", // Abastecimento
   "hhjl1q5uyxov5kZI", // Manutencao mensagem
   "gjC2UJ9FXtTpzv8N", // Motor ligado parado
+  "6FgebeZvm6cYqlVP", // Resumo diario - distancia e horarios dos veiculos
   "cEpGFLlG4MzvpSja", // Desativado
 ]);
 
