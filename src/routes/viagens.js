@@ -446,6 +446,55 @@ viagensRouter.get("/viagens/opcoes/vendedores", async (req, res, next) => {
   }
 });
 
+viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (q.length < 2) return res.json([]);
+    const like = `%${q}%`;
+    const digits = q.replace(/\D/g, "");
+    const { rows } = await clientPool.query(`
+      SELECT
+        con.empresacon AS empresa,
+        con.seriecon AS serie,
+        con.codigocon AS numero,
+        con.dataemissaocon AS emissao,
+        NULLIF(TRIM(con.chavectecon), '') AS chave,
+        NULLIF(TRIM(con.veiculocon), '') AS placa,
+        COALESCE(NULLIF(TRIM(cli.fantasiacli), ''), NULLIF(TRIM(cli.nomecli), ''), 'Cliente nao informado') AS cliente,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT nf.notafiscalcnf::integer ORDER BY nf.notafiscalcnf::integer), NULL) AS notas,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(TRIM(nf.chavenfecnf::text), '')), NULL) AS chaves_nfe
+      FROM logistica.conhecimentos con
+      LEFT JOIN logistica.conhecimentosnotasfiscais nf
+        ON nf.empresacnf=con.empresacon AND nf.seriecnf=con.seriecon AND nf.codigocnf=con.codigocon
+      LEFT JOIN gerais.clientes cli ON cli.empresacli=con.empresacon AND cli.codigocli=con.clientecon
+      WHERE COALESCE(con.statuscon, 0) <> 3
+        AND (
+          con.codigocon::text ILIKE $1 OR con.seriecon ILIKE $1
+          OR COALESCE(con.chavectecon, '') ILIKE $1 OR COALESCE(con.veiculocon, '') ILIKE $1
+          OR nf.notafiscalcnf::text ILIKE $1 OR COALESCE(nf.chavenfecnf, '') ILIKE $1
+          OR ($2 <> '' AND regexp_replace(COALESCE(con.chavectecon, ''), '[^0-9]', '', 'g') LIKE '%' || $2 || '%')
+        )
+      GROUP BY con.empresacon,con.seriecon,con.codigocon,con.dataemissaocon,con.chavectecon,con.veiculocon,cli.fantasiacli,cli.nomecli
+      ORDER BY con.dataemissaocon DESC, con.codigocon DESC
+      LIMIT 30
+    `, [like, digits]);
+    res.json(rows.map((row) => ({
+      tipo: "CT-e",
+      numero: String(row.numero),
+      chave: row.chave || "",
+      emissao: row.emissao,
+      serie: String(row.serie || ""),
+      placa: row.placa || "",
+      cliente: row.cliente,
+      notas: row.notas || [],
+      chavesNfe: row.chaves_nfe || [],
+      observacoes: `ERP - CT-e ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
 viagensRouter.get("/viagens", async (req, res, next) => {
   try {
     const params = [];
