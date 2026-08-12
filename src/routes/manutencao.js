@@ -3,12 +3,19 @@ import { tableName } from "../config.js";
 import { clientPool } from "../db/clientPool.js";
 import { pool } from "../db/pool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
+import { selectCurrentOdometer } from "../services/odometerSelection.js";
 
 export const manutencaoRouter = express.Router();
 
 const TABLE = () => tableName("automacao_mensagem_manutencao");
 const CONTACT_TABLE = () => tableName("manutencao_contatos");
 const HISTORY_TABLE = () => tableName("historico_manutencao_veiculo");
+const COMPONENT_TABLE = () => tableName("manutencao_componentes_posicao");
+const COMPONENT_INTERVALS = {
+  "Lona de freio": 100000, "Graxa": 15000, "Tambor": 200000,
+  "Rolamento": 150000, "Cubo": 150000, "Amortecedor": 100000,
+  "Mola": 150000, "Suspensão": 100000,
+};
 const HISTORY_TYPES = new Set([
   "troca_oleo_motor", "revisao", "filtro_combustivel", "filtro_ar",
   "oleo_cambio", "oleo_diferencial", "lubrificacao", "afericao_tacografo", "outro",
@@ -113,6 +120,30 @@ function eventToMaintenance(row) {
     origem: row.origem,
     tags: maintenanceTags(`${row.componente || ""} ${row.descricao || ""}`),
   };
+}
+
+async function loadEngates(placas = []) {
+  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  if (!normalized.length) return new Map();
+  const { rows } = await clientPool.query(`
+    SELECT
+      regexp_replace(upper(placa_principal::text), '[^A-Z0-9]', '', 'g') AS placa_principal,
+      regexp_replace(upper(reboque.placa::text), '[^A-Z0-9]', '', 'g') AS placa_reboque,
+      vei.numeroeixosvei AS eixos,
+      COALESCE(vei.nomevei, vei.modelovei, vei.marcamodelorenavamvei) AS modelo
+    FROM frotas.veiculosreboquesmotoristas engate
+    CROSS JOIN LATERAL (VALUES (placa_reboque1), (placa_reboque2), (placa_reboque3)) reboque(placa)
+    LEFT JOIN frotas.veiculos vei
+      ON regexp_replace(upper(vei.placavei::text), '[^A-Z0-9]', '', 'g') = regexp_replace(upper(reboque.placa::text), '[^A-Z0-9]', '', 'g')
+    WHERE regexp_replace(upper(placa_principal::text), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
+      AND NULLIF(TRIM(reboque.placa::text), '') IS NOT NULL
+  `, [normalized]);
+  const result = new Map();
+  for (const row of rows) {
+    if (!result.has(row.placa_principal)) result.set(row.placa_principal, []);
+    result.get(row.placa_principal).push({ placa: row.placa_reboque, eixos: Number(row.eixos) || 3, modelo: row.modelo || "Implemento" });
+  }
+  return result;
 }
 
 function maintenanceMovementType(titulo) {
@@ -543,13 +574,21 @@ function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria,
     || telemetria?.vehicle_model
     || telemetria?.identificacao_equipamento
     || null;
-  const temTelemetria = Number(telemetria?.odometro) > 0;
-  const kmAtual = temTelemetria ? Number(telemetria.odometro) : (Number(odometroErp?.odometro) > 0 ? Number(odometroErp.odometro) : null);
+  const selectedOdometer = selectCurrentOdometer({
+    telemetryKm: telemetria?.odometro,
+    telemetryDate: telemetria?.odometro_data,
+    erpKm: odometroErp?.odometro,
+    erpDate: odometroErp?.data,
+  });
+  const usaTelemetria = selectedOdometer.source === "telemetria";
   return {
     ...row,
-    km_atual: kmAtual,
-    km_fonte: temTelemetria ? "telemetria" : (odometroErp?.origem || "indisponivel"),
-    km_data: temTelemetria ? (telemetria?.odometro_data || null) : (odometroErp?.data || null),
+    km_atual: selectedOdometer.km,
+    km_fonte: usaTelemetria ? "telemetria" : (odometroErp?.origem || "indisponivel"),
+    km_data: usaTelemetria ? (telemetria?.odometro_data || null) : (odometroErp?.data || null),
+    telemetria_descartada: selectedOdometer.telemetryRejected,
+    telemetria_km: selectedOdometer.telemetryRejected ? selectedOdometer.telemetryKm : null,
+    telemetria_motivo: selectedOdometer.rejectionReason || null,
     km_proximo_envio: ultima?.km != null
       ? Number(ultima.km) + Number(row.intervalo_km || 0)
       : proximoKmProgramado(row.km_atual, row.intervalo_km),
@@ -586,13 +625,14 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
     const vPool = getVeiculosPool();
     const { rows } = await vPool.query(QUERY_VEICULOS);
     const placas = rows.map((row) => row.placa);
-    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, afericoesTacografo, odometrosErp] = await Promise.all([
+    const [detalhes, historicosSistema, historicosManuais, planosAutorizados, afericoesTacografo, odometrosErp, engates] = await Promise.all([
       loadDetalhesVeiculos(placas),
       loadHistoricoManutencoes(placas),
       loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
       loadUltimasAfericoesTacografo(placas),
       loadOdometrosErp(placas),
+      loadEngates(placas),
     ]);
     const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     const telemetria = new Map(rows.map((row) => [normalizePlate(row.placa), row]));
@@ -603,6 +643,7 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
         return {
           ...mapDetalheVeiculo(row, detalhes.get(placaNorm), historicos.get(placaNorm), planosAutorizados.get(placaNorm), telemetria.get(placaNorm), odometrosErp.get(placaNorm)),
           ultimaAfericaoTacografo: afericoesTacografo.get(placaNorm) || null,
+          implementos: engates.get(placaNorm) || [],
         };
       }),
     });
@@ -623,6 +664,104 @@ manutencaoRouter.get("/manutencao/contatos", async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+manutencaoRouter.get("/manutencao/componentes-posicao", async (req, res, next) => {
+  try {
+    const placa = normalizePlate(req.query.placa);
+    if (!placa) return res.status(400).json({ error: "Placa obrigatória." });
+    const { rows } = await pool.query(`
+      SELECT * FROM ${COMPONENT_TABLE()}
+      WHERE regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $1
+         OR regexp_replace(upper(COALESCE(conjunto_placa, '')), '[^A-Z0-9]', '', 'g') = $1
+      ORDER BY data_servico DESC, id DESC
+    `, [placa]);
+    res.json({ registros: rows });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.get("/manutencao/componentes-posicao/opcoes", async (_req, res, next) => {
+  try {
+    const patterns = ["%LONA DE FREIO%", "%GRAXA%", "%TAMBOR%", "%ROLAMENTO%", "%CUBO%", "%AMORTECEDOR%", "%MOLA%", "%SUSPENS%"];
+    const [brandsResult, suppliersResult] = await Promise.all([
+      clientPool.query(`SELECT DISTINCT trim(m.nomempr) AS nome FROM estoque.produtos p JOIN estoque.marcasprodutos m ON m.codigompr=p.marcapro WHERE p.nomepro ILIKE ANY($1::text[]) AND NULLIF(trim(m.nomempr),'') IS NOT NULL ORDER BY nome`, [patterns]),
+      clientPool.query(`WITH produtos_uniq AS (SELECT DISTINCT ON(codigopro) codigopro,nomepro FROM estoque.produtos ORDER BY codigopro,empresapro), fornecedores_uniq AS (SELECT DISTINCT ON(codigofor) codigofor,COALESCE(NULLIF(fantasiafor,''),nomefor) nome FROM gerais.fornecedores ORDER BY codigofor,empresafor) SELECT f.nome,count(*)::int usos FROM frotas.ordensservicosexternaprodutos i JOIN produtos_uniq p ON p.codigopro=i.produtooep JOIN fornecedores_uniq f ON f.codigofor=i.fornecedoroep WHERE p.nomepro ILIKE ANY($1::text[]) AND NULLIF(trim(f.nome),'') IS NOT NULL AND upper(trim(f.nome)) <> 'NULO' GROUP BY f.nome ORDER BY usos DESC,f.nome LIMIT 100`, [patterns]),
+    ]);
+    res.json({ marcas: brandsResult.rows.map(row => row.nome), fornecedores: suppliersResult.rows.map(row => row.nome), intervalos: Object.entries(COMPONENT_INTERVALS).map(([componente, km]) => ({ componente, km, origem: "planejado" })) });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.post("/manutencao/componentes-posicao", async (req, res, next) => {
+  try {
+    const placa = normalizePlate(req.body.placa);
+    const eixo = String(req.body.eixo_codigo || "").trim().toUpperCase();
+    const lado = String(req.body.lado || "GERAL").trim().toUpperCase();
+    const componente = String(req.body.componente || "").trim();
+    const tipoServico = String(req.body.tipo_servico || "").trim();
+    const dataServico = String(req.body.data_servico || "").slice(0, 10);
+    if (!placa || !eixo || !componente || !tipoServico || !/^\d{4}-\d{2}-\d{2}$/.test(dataServico)) {
+      return res.status(400).json({ error: "Informe veículo, posição, componente, serviço e data." });
+    }
+    if (!["E", "D", "CENTRO", "GERAL"].includes(lado)) return res.status(400).json({ error: "Lado inválido." });
+    const numberOrNull = (value) => value === "" || value == null ? null : Number(value);
+    const values = [
+      placa, normalizePlate(req.body.conjunto_placa) || null, String(req.body.layout_tipo || "TRUCK").toUpperCase(),
+      eixo, lado, componente, tipoServico, dataServico, numberOrNull(req.body.km_servico),
+      numberOrNull(req.body.proximo_km), req.body.proxima_data || null, req.body.marca || null,
+      req.body.fornecedor || null, numberOrNull(req.body.valor), req.body.observacao || null, req.user?.id || null,
+    ];
+    if ([values[8], values[9], values[13]].some((value) => value != null && (!Number.isFinite(value) || value < 0))) {
+      return res.status(400).json({ error: "KM e valor devem ser números positivos." });
+    }
+    const { rows } = await pool.query(`
+      INSERT INTO ${COMPONENT_TABLE()} (
+        placa, conjunto_placa, layout_tipo, eixo_codigo, lado, componente, tipo_servico,
+        data_servico, km_servico, proximo_km, proxima_data, marca, fornecedor, valor, observacao, criado_por
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *
+    `, values);
+    res.status(201).json({ registro: rows[0] });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.post("/manutencao/componentes-posicao/lote", async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const items = Array.isArray(req.body.itens) ? req.body.itens : [];
+    if (!items.length || items.length > 100) return res.status(400).json({ error: "Informe entre 1 e 100 serviços." });
+    const grupoId = String(req.body.grupo_id || `MAN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`).slice(0, 80);
+    const inserted = [];
+    await client.query("BEGIN");
+    for (const item of items) {
+      const placa = normalizePlate(item.placa);
+      const eixo = String(item.eixo_codigo || "").trim().toUpperCase();
+      const lado = String(item.lado || "GERAL").trim().toUpperCase();
+      const componente = String(item.componente || "").trim();
+      const tipoServico = String(item.tipo_servico || "").trim();
+      const dataServico = String(item.data_servico || "").slice(0, 10);
+      const condicao = item.condicao ? String(item.condicao).trim().toUpperCase() : null;
+      if (!placa || !eixo || !componente || !tipoServico || !/^\d{4}-\d{2}-\d{2}$/.test(dataServico)) throw Object.assign(new Error("Informe veículo, posição, componente, serviço e data."), { status: 400 });
+      if (!["E", "D", "CENTRO", "GERAL"].includes(lado)) throw Object.assign(new Error("Lado inválido."), { status: 400 });
+      if (condicao && !["BOM", "ATENCAO", "CRITICO"].includes(condicao)) throw Object.assign(new Error("Condição de inspeção inválida."), { status: 400 });
+      const numberOrNull = value => value === "" || value == null ? null : Number(value);
+      const values = [placa, normalizePlate(item.conjunto_placa) || null, String(item.layout_tipo || "TRUCK").toUpperCase(), eixo, lado, componente, tipoServico, dataServico, numberOrNull(item.km_servico), numberOrNull(item.proximo_km), item.proxima_data || null, item.marca || null, item.fornecedor || null, numberOrNull(item.valor), item.observacao || null, req.user?.id || null, grupoId, condicao, item.motivo || null];
+      if ([values[8], values[9], values[13]].some(value => value != null && (!Number.isFinite(value) || value < 0))) throw Object.assign(new Error("KM e valor devem ser números positivos."), { status: 400 });
+      const { rows } = await client.query(`
+        INSERT INTO ${COMPONENT_TABLE()} (
+          placa, conjunto_placa, layout_tipo, eixo_codigo, lado, componente, tipo_servico,
+          data_servico, km_servico, proximo_km, proxima_data, marca, fornecedor, valor,
+          observacao, criado_por, grupo_id, condicao, motivo
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        RETURNING *
+      `, values);
+      inserted.push(rows[0]);
+    }
+    await client.query("COMMIT");
+    res.status(201).json({ grupo_id: grupoId, registros: inserted });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error.status === 400) return res.status(400).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
 });
 
 manutencaoRouter.get("/manutencao/registros", async (req, res, next) => {

@@ -3,6 +3,7 @@ import { clientPool } from "../db/clientPool.js";
 import { pool } from "../db/pool.js";
 import { sendWhatsappText } from "../routes/whatsapp.js";
 import { getStatusCargaFrota } from "./statusCargaService.js";
+import { selectCurrentOdometer } from "./odometerSelection.js";
 
 const AUTOMACOES = () => tableName("automacao_mensagem_manutencao");
 const ENVIOS = () => tableName("manutencao_alertas_enviados");
@@ -127,11 +128,13 @@ export async function runMaintenanceAlerts({ dryRun = false } = {}) {
     for (const item of automations) {
       const status = statusByPlate.get(normalizePlate(item.placa));
       const fuelOdometer = fuelOdometers.get(normalizePlate(item.placa));
-      const currentKm = Number(fuelOdometer?.km) > 0
-        ? Number(fuelOdometer.km)
-        : Number(status?.localizacao?.odometro) > 0
-          ? Number(status.localizacao.odometro)
-        : (Number(item.km_atual) > 0 ? Number(item.km_atual) : null);
+      const selectedOdometer = selectCurrentOdometer({
+        telemetryKm: status?.localizacao?.odometro,
+        telemetryDate: status?.localizacao?.dataHora,
+        erpKm: fuelOdometer?.km,
+        erpDate: fuelOdometer?.data_ref,
+      });
+      const currentKm = selectedOdometer.km || (Number(item.km_atual) > 0 ? Number(item.km_atual) : null);
       const event = alertType(item, currentKm);
       if (!event) continue;
       const message = buildMaintenanceAlertMessage(item, status, event, currentKm);
