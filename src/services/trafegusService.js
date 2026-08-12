@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { clientPool } from "../db/clientPool.js";
+import { parseOfficialPolyline } from "./trafegusRoute.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const legacyEnvPath = path.resolve(moduleDir, "../../../Api-trafegos/.env");
@@ -297,6 +298,12 @@ export async function getTrafegusGoogleRoute(smId) {
   });
   if (deliveries.length) params.set("waypoints", deliveries.map(coordinate).join("|"));
   const googleMapsUrl = `https://www.google.com/maps/dir/?${params.toString()}`;
+  const officialUrl = rawSm.link_rota || "";
+  const officialPolyline = parseOfficialPolyline(guide?.informacoes_rota?.polyline);
+  const instructions = String(guide?.informacoes_rota?.instrucao || "")
+    .split("|")
+    .map((instruction) => instruction.replace(/<[^>]*>/g, "").trim())
+    .filter(Boolean);
   const contact = await resolveDriverPhone(rawSm);
   const deliveryLines = deliveries.map((local, index) => `${index + 1}. ${local.descricao}`).join("\n");
   const message = [
@@ -307,10 +314,10 @@ export async function getTrafegusGoogleRoute(smId) {
     deliveryLines ? `Entregas:\n${deliveryLines}` : "",
     `Destino: ${destination.descricao}`,
     "",
-    "Abrir no Google Maps:",
-    googleMapsUrl,
+    "Abra e siga somente a rota oficial do Elite:",
+    officialUrl,
     "",
-    "Siga a ordem das entregas e confirme com a operação antes de alterar a rota.",
+    "Não utilize uma rota recalculada pelo Google Maps ou Waze. Qualquer desvio pode bloquear o veículo.",
   ].filter(Boolean).join("\n");
 
   return {
@@ -323,6 +330,13 @@ export async function getTrafegusGoogleRoute(smId) {
     entregas: deliveries,
     destino: destination,
     locais: locations,
+    rotaOficial: {
+      url: officialUrl,
+      descricao: guide?.informacoes_rota?.descricao || "",
+      distanciaKm: Number(guide?.informacoes_rota?.distancia) || null,
+      polyline: officialPolyline,
+      instrucoes: instructions,
+    },
     googleMapsUrl,
     whatsappUrl: `https://wa.me/${contact.telefone || ""}?text=${encodeURIComponent(message)}`,
     mensagem: message,

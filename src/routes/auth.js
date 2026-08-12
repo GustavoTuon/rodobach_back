@@ -46,10 +46,11 @@ authRouter.post("/auth/login", validateBody(loginSchema), async (req, res, next)
       trafegus: user.perm_trafegus ?? user.perm_viagens,
       "oportunidades-retorno": user.perm_oportunidades_retorno ?? user.perm_viagens,
       "consulta-cte": user.perm_consulta_nfe ?? user.perm_viagens,
-      "controle-canhotos": user.perm_consulta_nfe ?? user.perm_viagens,
+      "controle-canhotos": user.perm_controle_canhotos ?? user.perm_consulta_nfe ?? user.perm_viagens,
       pneus: user.perm_pneus,
       settings: user.perm_settings,
       manutencao: user.perm_manutencao,
+      "manutencao-posicoes": user.perm_manutencao_posicoes ?? user.perm_manutencao,
       "automacoes-n8n": user.perm_automacoes_n8n ?? user.perm_manutencao,
     };
 
