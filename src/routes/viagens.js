@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
 import { tableName } from "../config.js";
-import { mapViagem, viagemParams } from "../mappers.js";
+import { calcularSituacaoViagem, mapViagem, viagemParams } from "../mappers.js";
 
 export const viagensRouter = Router();
 
@@ -57,6 +57,19 @@ async function getViagemById(client, id) {
   `, [id]);
 
   return mapViagem(rows[0], rotas, documentos);
+}
+
+async function syncSituacaoAfterDocuments(client, viagemId, input = {}) {
+  const viagem = await getViagemById(client, viagemId);
+  if (!viagem) return null;
+  const situacao = calcularSituacaoViagem({
+    ...viagem,
+    vehicleOwnershipType: input.vehicleOwnershipType || input.ownershipType || input.tipoPropriedade,
+  });
+  if (situacao !== viagem.situacao) {
+    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET situacao=$2, atualizado_em=CURRENT_TIMESTAMP WHERE id=$1`, [viagemId, situacao]);
+  }
+  return situacao;
 }
 
 async function replaceParadas(client, viagemId, paradas = []) {
@@ -654,10 +667,11 @@ viagensRouter.post("/viagens", async (req, res, next) => {
     `, viagemParams(req.body));
 
     const audit = userAudit(req.user);
-    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao='rascunho',criado_por_id=$2,criado_por_login=$3 WHERE id=$1`, [rows[0].id, audit.id, audit.login]);
+    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao='rascunho',criado_por_id=$2,criado_por_login=$3,atualizado_por_id=$2,atualizado_por_login=$3 WHERE id=$1`, [rows[0].id, audit.id, audit.login]);
 
     await replaceParadas(client, rows[0].id, req.body.paradas);
     await replaceDocumentosFinanceiros(client, rows[0].id, req.body.documentosFinanceiros, req.user);
+    await syncSituacaoAfterDocuments(client, rows[0].id, req.body);
     const viagem = await getViagemById(client, rows[0].id);
     const raw = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [rows[0].id]);
     await auditViagem(client, rows[0].id, "criacao", null, raw.rows[0], req.user);
@@ -687,11 +701,12 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
         : String(previous[field] ?? "").trim() !== String(incoming[field] ?? "").trim());
       if (changed.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A viagem está aprovada. Solicite ao Comercial a reabertura antes de alterar dados comerciais." }); }
     }
+    const editAudit = userAudit(req.user);
     const { rowCount } = await client.query(`
       UPDATE ${tableName("cadastro_cotacao_frete")}
-      SET ${updateAssignments}, atualizado_em = CURRENT_TIMESTAMP
+      SET ${updateAssignments}, atualizado_por_id = $${viagemParamCount + 2}, atualizado_por_login = $${viagemParamCount + 3}, atualizado_em = CURRENT_TIMESTAMP
       WHERE id = $${viagemParamCount + 1}
-    `, [...viagemParams(req.body), id]);
+    `, [...viagemParams(req.body), id, editAudit.id, editAudit.login]);
 
     if (!rowCount) {
       await client.query("ROLLBACK");
@@ -701,6 +716,7 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
 
     await replaceParadas(client, id, req.body.paradas);
     await replaceDocumentosFinanceiros(client, id, req.body.documentosFinanceiros, req.user);
+    await syncSituacaoAfterDocuments(client, id, req.body);
     const viagem = await getViagemById(client, id);
     const current = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [id]);
     await auditViagem(client, id, "edicao", previous, current.rows[0], req.user);
@@ -735,7 +751,7 @@ viagensRouter.post("/viagens/:id/aprovacao", async (req, res, next) => {
       if (missing.length) { await client.query("ROLLBACK"); return res.status(400).json({ error: `Não é possível aprovar. Faltam: ${missing.join(", ")}.` }); }
     }
     const audit = userAudit(req.user);
-    const { rows } = await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao=$2,motivo_aprovacao=$3,aprovado_por_id=CASE WHEN $2='aprovada' THEN $4 ELSE aprovado_por_id END,aprovado_por_login=CASE WHEN $2='aprovada' THEN $5 ELSE aprovado_por_login END,aprovado_em=CASE WHEN $2='aprovada' THEN NOW() ELSE aprovado_em END,atualizado_em=NOW() WHERE id=$1 RETURNING *`, [id, nextStatus, reason || null, audit.id, audit.login]);
+    const { rows } = await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao=$2,motivo_aprovacao=$3,aprovado_por_id=CASE WHEN $2='aprovada' THEN $4 ELSE aprovado_por_id END,aprovado_por_login=CASE WHEN $2='aprovada' THEN $5 ELSE aprovado_por_login END,aprovado_em=CASE WHEN $2='aprovada' THEN NOW() ELSE aprovado_em END,atualizado_por_id=$4,atualizado_por_login=$5,atualizado_em=NOW() WHERE id=$1 RETURNING *`, [id, nextStatus, reason || null, audit.id, audit.login]);
     await auditViagem(client, id, action, previous, rows[0], req.user, reason || null);
     const viagem = await getViagemById(client, id);
     await client.query("COMMIT");

@@ -108,6 +108,7 @@ function baseCostCte() {
           ELSE 'terceiro'
         END AS proprietario,
         CASE
+          WHEN COALESCE(cfi.nomecfi, '') ILIKE '%lavacao%' OR COALESCE(cfi.nomecfi, '') ILIKE '%lavação%' OR COALESCE(cfi.nomecfi, '') ILIKE '%lavagem%' THEN 'Lavacao'::text
           WHEN COALESCE(cfi.nomecfi, '') ILIKE '%combust%' OR COALESCE(cfi.nomecfi, '') ILIKE '%abastec%' THEN 'Abastecimento'::text
           WHEN COALESCE(cfi.nomecfi, '') ILIKE '%manuten%' OR COALESCE(cfi.nomecfi, '') ILIKE '%oficina%' OR COALESCE(cfi.nomecfi, '') ILIKE '%reparo%' THEN 'Manutencao'::text
           WHEN COALESCE(cfi.nomecfi, '') ILIKE '%pneu%' THEN 'Pneus'::text
@@ -890,7 +891,7 @@ export async function getCustosVeiculos(filters = {}) {
   const params = [...baseParams, ...where.values];
   const revenueWhere = buildRevenueWhere(filters, 2);
   const revenueParams = [...baseParams, ...revenueWhere.values];
-  const limit = Math.min(Math.max(Number(filters.limit) || 250, 20), 800);
+  const limit = Math.min(Math.max(Number(filters.limit) || 500, 20), 5000);
 
   const cte = baseCostCte();
 
@@ -964,7 +965,6 @@ export async function getCustosVeiculos(filters = {}) {
       ${where.clause}
       GROUP BY placa_resolvida
       ORDER BY custo DESC
-      LIMIT 30
     `, params),
     queryCostRows(`
       ${cte}
@@ -999,7 +999,6 @@ export async function getCustosVeiculos(filters = {}) {
       ${where.clause}
       GROUP BY fornecedor, fornecedor_codigo
       ORDER BY custo DESC
-      LIMIT 30
     `, params),
     queryCostRows(`
       ${cte}
@@ -1316,7 +1315,15 @@ export async function getCustosVeiculosFiltros() {
   const cte = baseCostCte();
   const params = [period.startDate, period.endDate];
   const [plates, centers, types, statuses, suppliers, companies] = await Promise.all([
-    queryCostRows(`${cte} SELECT DISTINCT placa_resolvida AS value FROM custos_status WHERE placa_resolvida IS NOT NULL ORDER BY value LIMIT 300`, params),
+    queryCostRows(`
+      SELECT DISTINCT UPPER(TRIM(v.placavei::text)) AS value
+      FROM frotas.veiculos v
+      WHERE NULLIF(TRIM(v.placavei::text), '') IS NOT NULL
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+        AND v.tipopropriedadevei::text = 'P'
+      ORDER BY value
+      LIMIT 300
+    `, []),
     queryCostRows(`${cte} SELECT DISTINCT centro_codigo AS codigo, centro_custo AS nome FROM custos_status WHERE centro_codigo IS NOT NULL ORDER BY centro_custo LIMIT 300`, params),
     queryCostRows(`${cte} SELECT DISTINCT tipo_custo AS value FROM custos_status ORDER BY value`, params),
     queryCostRows(`${cte} SELECT DISTINCT situacao AS value FROM custos_status ORDER BY value`, params),
@@ -1603,7 +1610,7 @@ export async function getAuditoriaCustosVeiculos(filters = {}) {
 
 export async function getCustosVeiculoDetalhe(placa, filters = {}) {
   const target = normalizeUpper(placa);
-  const data = await getCustosVeiculos({ ...filters, placa: target, limit: 120 });
+  const data = await getCustosVeiculos({ ...filters, placa: target, limit: 2000 });
   const vehicleRows = await queryCostRows(
     `
       SELECT
