@@ -4,6 +4,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/automacoes(?:\/|$)/, "automacoes-n8n"],
   [/^\/whatsapp(?:\/|$)/, "manutencao"],
   [/^\/pneus(?:\/|$)/, "pneus"],
+  [/^\/frota\/multas(?:\/|$)/, "multas-frota"],
   [/^\/manutencao(?:\/|$)/, "manutencao"],
   [/^\/viagens(?:\/|$)/, "viagens"],
   [/^\/motoristas\/folgas(?:\/|$)/, "folgas-motoristas"],

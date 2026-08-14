@@ -22,6 +22,16 @@ const updateAssignments = viagemColumns
   .map((column, index) => `${column.trim()} = $${index + 1}`)
   .join(", ");
 const viagemParamCount = viagemColumns.split(",").length;
+const AUDIT_TABLE = () => tableName("cadastro_cotacao_frete_auditoria");
+const APPROVAL_STATUSES = new Set(["rascunho", "aguardando_aprovacao", "aprovada", "correcao_solicitada", "reprovada", "cancelada"]);
+const COMMERCIAL_FIELDS = ["cliente", "cliente_final", "cidade_origem", "uf_origem", "cidade_destino", "uf_destino", "valor_cliente", "valor_motorista", "material", "peso_kg", "vendedor", "tomador_servico", "condicao_pagamento", "km_viagem"];
+const COMMERCIAL_NUMERIC_FIELDS = new Set(["valor_cliente", "valor_motorista", "peso_kg", "km_viagem"]);
+const canApprove = user => Boolean(user?.admin || user?.permissions?.["aprovar-viagens"]);
+
+async function auditViagem(client, viagemId, action, before, after, user, reason = null) {
+  const audit = userAudit(user);
+  await client.query(`INSERT INTO ${AUDIT_TABLE()} (cotacao_id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [viagemId, action, before?.status_aprovacao || null, after?.status_aprovacao || null, before || null, after || null, reason, audit.id, audit.login]);
+}
 
 async function getViagemById(client, id) {
   const { rows } = await client.query(`
@@ -462,7 +472,9 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
         NULLIF(TRIM(con.veiculocon), '') AS placa,
         COALESCE(NULLIF(TRIM(cli.fantasiacli), ''), NULLIF(TRIM(cli.nomecli), ''), 'Cliente nao informado') AS cliente,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT nf.notafiscalcnf::integer ORDER BY nf.notafiscalcnf::integer), NULL) AS notas,
-        ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(TRIM(nf.chavenfecnf::text), '')), NULL) AS chaves_nfe
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(TRIM(nf.chavenfecnf::text), '')), NULL) AS chaves_nfe,
+        jsonb_agg(DISTINCT jsonb_build_object('numero', nf.notafiscalcnf, 'chave', NULLIF(TRIM(nf.chavenfecnf::text), '')))
+          FILTER (WHERE nf.notafiscalcnf IS NOT NULL) AS notas_documentos
       FROM logistica.conhecimentos con
       LEFT JOIN logistica.conhecimentosnotasfiscais nf
         ON nf.empresacnf=con.empresacon AND nf.seriecnf=con.seriecon AND nf.codigocnf=con.codigocon
@@ -488,6 +500,7 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
       cliente: row.cliente,
       notas: row.notas || [],
       chavesNfe: row.chaves_nfe || [],
+      notasDocumentos: row.notas_documentos || [],
       observacoes: `ERP - CT-e ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
     })));
   } catch (error) {
@@ -622,6 +635,13 @@ viagensRouter.get("/viagens/:id", async (req, res, next) => {
   }
 });
 
+viagensRouter.get("/viagens/:id/auditoria", async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login,criado_em FROM ${AUDIT_TABLE()} WHERE cotacao_id=$1 ORDER BY criado_em DESC,id DESC`, [Number(req.params.id)]);
+    res.json({ auditoria: rows });
+  } catch (error) { next(error); }
+});
+
 viagensRouter.post("/viagens", async (req, res, next) => {
   const client = await pool.connect();
 
@@ -633,9 +653,14 @@ viagensRouter.post("/viagens", async (req, res, next) => {
       RETURNING id
     `, viagemParams(req.body));
 
+    const audit = userAudit(req.user);
+    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao='rascunho',criado_por_id=$2,criado_por_login=$3 WHERE id=$1`, [rows[0].id, audit.id, audit.login]);
+
     await replaceParadas(client, rows[0].id, req.body.paradas);
     await replaceDocumentosFinanceiros(client, rows[0].id, req.body.documentosFinanceiros, req.user);
     const viagem = await getViagemById(client, rows[0].id);
+    const raw = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [rows[0].id]);
+    await auditViagem(client, rows[0].id, "criacao", null, raw.rows[0], req.user);
     await client.query("COMMIT");
     res.status(201).json(viagem);
   } catch (error) {
@@ -652,6 +677,16 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
 
   try {
     await client.query("BEGIN");
+    const previousResult = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`, [id]);
+    const previous = previousResult.rows[0];
+    if (!previous) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Viagem nao encontrada." }); }
+    if (previous.status_aprovacao === "aprovada" && !canApprove(req.user)) {
+      const incoming = Object.fromEntries(viagemColumns.split(",").map((column, index) => [column.trim(), viagemParams(req.body)[index]]));
+      const changed = COMMERCIAL_FIELDS.filter(field => COMMERCIAL_NUMERIC_FIELDS.has(field)
+        ? Number(previous[field] || 0) !== Number(incoming[field] || 0)
+        : String(previous[field] ?? "").trim() !== String(incoming[field] ?? "").trim());
+      if (changed.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A viagem está aprovada. Solicite ao Comercial a reabertura antes de alterar dados comerciais." }); }
+    }
     const { rowCount } = await client.query(`
       UPDATE ${tableName("cadastro_cotacao_frete")}
       SET ${updateAssignments}, atualizado_em = CURRENT_TIMESTAMP
@@ -667,6 +702,8 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
     await replaceParadas(client, id, req.body.paradas);
     await replaceDocumentosFinanceiros(client, id, req.body.documentosFinanceiros, req.user);
     const viagem = await getViagemById(client, id);
+    const current = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [id]);
+    await auditViagem(client, id, "edicao", previous, current.rows[0], req.user);
     await client.query("COMMIT");
     res.json(viagem);
   } catch (error) {
@@ -677,8 +714,38 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
   }
 });
 
+viagensRouter.post("/viagens/:id/aprovacao", async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    const action = String(req.body.acao || "").trim().toLowerCase();
+    const reason = String(req.body.motivo || "").trim();
+    const transitions = { enviar: "aguardando_aprovacao", aprovar: "aprovada", corrigir: "correcao_solicitada", reprovar: "reprovada", reabrir: "correcao_solicitada", cancelar: "cancelada" };
+    const nextStatus = transitions[action];
+    if (!APPROVAL_STATUSES.has(nextStatus)) return res.status(400).json({ error: "Ação de aprovação inválida." });
+    if (["aprovar", "corrigir", "reprovar", "reabrir"].includes(action) && !canApprove(req.user)) return res.status(403).json({ error: "Apenas Comercial ou administrador pode realizar esta ação." });
+    if (["corrigir", "reprovar", "reabrir", "cancelar"].includes(action) && !reason) return res.status(400).json({ error: "Informe uma justificativa." });
+    await client.query("BEGIN");
+    const previousResult = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`, [id]);
+    const previous = previousResult.rows[0];
+    if (!previous) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Viagem não encontrada." }); }
+    if (action === "enviar" && !["rascunho", "correcao_solicitada", "reprovada"].includes(previous.status_aprovacao)) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Esta viagem não pode ser enviada neste estado." }); }
+    if (action === "aprovar") {
+      const missing = [["cliente",previous.cliente],["origem",previous.cidade_origem],["destino",previous.cidade_destino],["material",previous.material],["valor do cliente",Number(previous.valor_cliente)>0]].filter(([,value])=>!value).map(([label])=>label);
+      if (missing.length) { await client.query("ROLLBACK"); return res.status(400).json({ error: `Não é possível aprovar. Faltam: ${missing.join(", ")}.` }); }
+    }
+    const audit = userAudit(req.user);
+    const { rows } = await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao=$2,motivo_aprovacao=$3,aprovado_por_id=CASE WHEN $2='aprovada' THEN $4 ELSE aprovado_por_id END,aprovado_por_login=CASE WHEN $2='aprovada' THEN $5 ELSE aprovado_por_login END,aprovado_em=CASE WHEN $2='aprovada' THEN NOW() ELSE aprovado_em END,atualizado_em=NOW() WHERE id=$1 RETURNING *`, [id, nextStatus, reason || null, audit.id, audit.login]);
+    await auditViagem(client, id, action, previous, rows[0], req.user, reason || null);
+    const viagem = await getViagemById(client, id);
+    await client.query("COMMIT");
+    res.json(viagem);
+  } catch (error) { await client.query("ROLLBACK").catch(()=>{}); next(error); } finally { client.release(); }
+});
+
 viagensRouter.delete("/viagens/:id", async (req, res, next) => {
   try {
+    if (!req.user?.admin) return res.status(403).json({ error: "Exclusão definitiva é restrita ao administrador. Use o cancelamento auditado." });
     const { rowCount } = await pool.query(`
       DELETE FROM ${tableName("cadastro_cotacao_frete")}
       WHERE id = $1

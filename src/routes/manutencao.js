@@ -672,11 +672,80 @@ manutencaoRouter.get("/manutencao/componentes-posicao", async (req, res, next) =
     if (!placa) return res.status(400).json({ error: "Placa obrigatória." });
     const { rows } = await pool.query(`
       SELECT * FROM ${COMPONENT_TABLE()}
-      WHERE regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $1
-         OR regexp_replace(upper(COALESCE(conjunto_placa, '')), '[^A-Z0-9]', '', 'g') = $1
+      WHERE cancelado = FALSE AND (
+        regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $1
+        OR regexp_replace(upper(COALESCE(conjunto_placa, '')), '[^A-Z0-9]', '', 'g') = $1
+      )
       ORDER BY data_servico DESC, id DESC
     `, [placa]);
     res.json({ registros: rows });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.get("/manutencao/componentes-posicao/consulta", async (req, res, next) => {
+  try {
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 25, 5), 100);
+    const params = [];
+    const where = [];
+    const add = value => { params.push(value); return `$${params.length}`; };
+    if (req.query.placa) { const p = add(normalizePlate(req.query.placa)); where.push(`(regexp_replace(upper(placa),'[^A-Z0-9]','','g')=${p} OR regexp_replace(upper(COALESCE(conjunto_placa,'')),'[^A-Z0-9]','','g')=${p})`); }
+    if (req.query.componente) where.push(`componente=${add(String(req.query.componente))}`);
+    if (req.query.servico) where.push(`tipo_servico=${add(String(req.query.servico))}`);
+    if (req.query.fornecedor) where.push(`fornecedor=${add(String(req.query.fornecedor))}`);
+    if (req.query.inicio) where.push(`data_servico>=${add(String(req.query.inicio).slice(0, 10))}::date`);
+    if (req.query.fim) where.push(`data_servico<=${add(String(req.query.fim).slice(0, 10))}::date`);
+    if (req.query.busca) { const q = add(`%${String(req.query.busca).trim()}%`); where.push(`concat_ws(' ',placa,conjunto_placa,componente,tipo_servico,fornecedor,marca,observacao) ILIKE ${q}`); }
+    if (req.query.cancelados !== "true") where.push("cancelado=FALSE");
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(pageSize, (page - 1) * pageSize);
+    const { rows } = await pool.query(`
+      WITH filtrados AS (
+        SELECT *, COALESCE(grupo_id, 'registro-' || id::text) AS chave_grupo
+        FROM ${COMPONENT_TABLE()} ${clause}
+      ), grupos AS (
+        SELECT chave_grupo, max(data_servico) AS data_ordem, max(criado_em) AS criado_ordem
+        FROM filtrados GROUP BY chave_grupo
+        ORDER BY data_ordem DESC, criado_ordem DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+      )
+      SELECT f.*, (SELECT count(DISTINCT chave_grupo)::int FROM filtrados) AS total_grupos
+      FROM filtrados f JOIN grupos g USING (chave_grupo)
+      ORDER BY g.data_ordem DESC, g.criado_ordem DESC, f.id
+    `, params);
+    res.json({ registros: rows, total: rows[0]?.total_grupos || 0, pagina: page, tamanhoPagina: pageSize, paginas: Math.ceil((rows[0]?.total_grupos || 0) / pageSize) });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.put("/manutencao/componentes-posicao/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const allowed = ["componente", "tipo_servico", "data_servico", "km_servico", "proximo_km", "proxima_data", "marca", "fornecedor", "valor", "observacao", "condicao", "motivo"];
+    const numeric = new Set(["km_servico", "proximo_km", "valor"]);
+    const sets = []; const values = [];
+    for (const field of allowed) if (req.body[field] !== undefined) {
+      const value = numeric.has(field) ? (req.body[field] === "" || req.body[field] == null ? null : Number(req.body[field])) : (req.body[field] || null);
+      if (numeric.has(field) && value != null && (!Number.isFinite(value) || value < 0)) return res.status(400).json({ error: "KM e valor devem ser números positivos." });
+      values.push(value); sets.push(`${field}=$${values.length}`);
+    }
+    if (!sets.length) return res.status(400).json({ error: "Nenhuma alteração informada." });
+    values.push(req.user?.id || null, id);
+    const previous = await pool.query(`SELECT * FROM ${COMPONENT_TABLE()} WHERE id=$1 AND cancelado=FALSE`, [id]);
+    const { rows } = await pool.query(`UPDATE ${COMPONENT_TABLE()} SET ${sets.join(",")}, atualizado_por=$${values.length - 1}, atualizado_em=NOW() WHERE id=$${values.length} AND cancelado=FALSE RETURNING *`, values);
+    if (!rows.length) return res.status(404).json({ error: "Manutenção não encontrada ou cancelada." });
+    await pool.query(`INSERT INTO ${tableName("manutencao_componentes_posicao_auditoria")} (registro_id,acao,dados_anteriores,dados_novos,usuario_id) VALUES($1,'edicao',$2,$3,$4)`, [id, previous.rows[0] || null, rows[0], req.user?.id || null]);
+    res.json({ registro: rows[0] });
+  } catch (error) { next(error); }
+});
+
+manutencaoRouter.post("/manutencao/componentes-posicao/cancelar", async (req, res, next) => {
+  try {
+    const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isFinite))];
+    const motivo = String(req.body.motivo || "").trim();
+    if (!ids.length || !motivo) return res.status(400).json({ error: "Informe os registros e o motivo do cancelamento." });
+    const { rows } = await pool.query(`UPDATE ${COMPONENT_TABLE()} SET cancelado=TRUE,cancelado_por=$2,cancelado_em=NOW(),motivo_cancelamento=$3,atualizado_por=$2,atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND cancelado=FALSE RETURNING *`, [ids, req.user?.id || null, motivo]);
+    for (const row of rows) await pool.query(`INSERT INTO ${tableName("manutencao_componentes_posicao_auditoria")} (registro_id,acao,dados_novos,motivo,usuario_id) VALUES($1,'cancelamento',$2,$3,$4)`, [row.id, row, motivo, req.user?.id || null]);
+    res.json({ cancelados: rows });
   } catch (error) { next(error); }
 });
 
@@ -876,7 +945,7 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
 // POST /api/manutencao — cria um registro por placa selecionada
 manutencaoRouter.post("/manutencao", async (req, res, next) => {
   try {
-    const { placas, titulo, mensagem, intervalo_km, intervalo_dias, data_ultimo_servico } = req.body;
+    const { placas, titulo, mensagem, intervalo_km, intervalo_dias, data_ultimo_servico, alertas_componentes } = req.body;
     const tipoControle = req.body.tipo_controle === "data" ? "data" : "km";
     const contato = await resolveContato(req.body);
 
@@ -916,9 +985,9 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
         `INSERT INTO ${TABLE()} (
            placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio,
            numeros, contato_id, contato_nome, contato_numero,
-           tipo_controle, intervalo_dias, data_ultimo_servico, data_proximo_envio
+           tipo_controle, intervalo_dias, data_ultimo_servico, data_proximo_envio, alertas_componentes
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
         [
           placa,
           titulo,
@@ -934,6 +1003,7 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
           intervaloDias,
           tipoControle === "data" ? dataUltimoServico : null,
           tipoControle === "data" ? addDays(dataUltimoServico, intervaloDias) : null,
+          Boolean(alertas_componentes),
         ]
       );
       criados.push(rows[0]);
@@ -979,6 +1049,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       contato_id,
       contato_nome,
       contato_numero,
+      alertas_componentes,
     } = req.body;
 
     const sets = [];
@@ -999,6 +1070,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
+    if (alertas_componentes !== undefined) { sets.push(`alertas_componentes = $${i++}`); vals.push(Boolean(alertas_componentes)); }
     if (
       numeros !== undefined ||
       contato_id !== undefined ||
