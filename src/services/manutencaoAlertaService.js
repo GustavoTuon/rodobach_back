@@ -7,6 +7,8 @@ import { selectCurrentOdometer } from "./odometerSelection.js";
 
 const AUTOMACOES = () => tableName("automacao_mensagem_manutencao");
 const ENVIOS = () => tableName("manutencao_alertas_enviados");
+const COMPONENTES = () => tableName("manutencao_componentes_posicao");
+const COMPONENT_ENVIOS = () => tableName("manutencao_componentes_alertas_enviados");
 const LOCK_ID = 78482932;
 
 const normalizePlate = value => String(value || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -77,6 +79,44 @@ function alertType(item, currentKm, now = new Date()) {
   return null;
 }
 
+export function componentAlertType(item, currentKm, now = new Date()) {
+  if (item.condicao === "CRITICO") return { type: "vencido", reference: `condicao-${item.id}-CRITICO`, detail: "Condição crítica" };
+  if (item.condicao === "ATENCAO") return { type: "antecipado", reference: `condicao-${item.id}-ATENCAO`, detail: "Requer atenção" };
+  const targetKm = Number(item.proximo_km);
+  if (Number.isFinite(targetKm) && targetKm > 0 && Number.isFinite(currentKm)) {
+    const remaining = targetKm - currentKm;
+    const interval = Math.max(0, targetKm - Number(item.km_servico || 0));
+    const threshold = Math.max(1000, interval * .1);
+    if (remaining <= 0) return { type: "vencido", reference: `km-${targetKm}`, detail: `Limite excedido em ${formatKm(Math.abs(remaining))}` };
+    if (remaining <= threshold) return { type: "antecipado", reference: `km-${targetKm}`, detail: `Faltam ${formatKm(remaining)}` };
+  }
+  if (item.proxima_data) {
+    const due = new Date(`${String(item.proxima_data).slice(0, 10)}T23:59:59`);
+    const days = Math.ceil((due - now) / 86400000);
+    if (days <= 0) return { type: "vencido", reference: `data-${String(item.proxima_data).slice(0, 10)}`, detail: `Data vencida há ${Math.abs(days)} dia(s)` };
+    if (days <= 30) return { type: "antecipado", reference: `data-${String(item.proxima_data).slice(0, 10)}`, detail: `Vence em ${days} dia(s)` };
+  }
+  return null;
+}
+
+function buildComponentAlertMessage(item, event, currentKm) {
+  const side = item.lado === "E" ? "esquerdo" : item.lado === "D" ? "direito" : item.lado;
+  return [
+    event.type === "vencido" ? "🔴 *MANUTENÇÃO POR POSIÇÃO VENCIDA*" : "🟡 *MANUTENÇÃO POR POSIÇÃO PRÓXIMA*",
+    "",
+    `🚚 *Veículo:* ${item.conjunto_placa || item.placa}`,
+    item.placa !== item.conjunto_placa ? `📦 *Implemento:* ${item.placa}` : null,
+    `🔧 *Componente:* ${item.componente}`,
+    `📍 *Posição:* ${item.eixo_codigo} · lado ${side}`,
+    `⚠️ *Status:* ${event.detail}`,
+    Number.isFinite(currentKm) ? `📏 *KM atual:* ${formatKm(currentKm)}` : null,
+    item.proximo_km ? `🎯 *Próximo marco:* ${formatKm(item.proximo_km)}` : null,
+    item.proxima_data ? `📅 *Próxima data:* ${formatDate(item.proxima_data)}` : null,
+    "",
+    "✅ *Ação recomendada:* revisar o item antes de liberar o veículo.",
+  ].filter(Boolean).join("\n");
+}
+
 export function buildMaintenanceAlertMessage(item, status, event, currentKm) {
   const location = status?.localizacao?.cidadeUf || status?.localizacao?.endereco || "Não informada";
   const operation = status?.situacaoOperacional?.label || status?.estadoLabel || "Não identificada";
@@ -125,6 +165,7 @@ export async function runMaintenanceAlerts({ dryRun = false } = {}) {
     const statusByPlate = new Map((dashboard.rows || []).map(row => [normalizePlate(row.placa), row]));
     const candidates = [];
     const sent = [];
+    const currentKmByPlate = new Map();
     for (const item of automations) {
       const status = statusByPlate.get(normalizePlate(item.placa));
       const fuelOdometer = fuelOdometers.get(normalizePlate(item.placa));
@@ -135,6 +176,7 @@ export async function runMaintenanceAlerts({ dryRun = false } = {}) {
         erpDate: fuelOdometer?.data_ref,
       });
       const currentKm = selectedOdometer.km || (Number(item.km_atual) > 0 ? Number(item.km_atual) : null);
+      currentKmByPlate.set(normalizePlate(item.placa), currentKm);
       const event = alertType(item, currentKm);
       if (!event) continue;
       const message = buildMaintenanceAlertMessage(item, status, event, currentKm);
@@ -147,6 +189,37 @@ export async function runMaintenanceAlerts({ dryRun = false } = {}) {
           await sendWhatsappText(number, message);
           await pool.query(`INSERT INTO ${ENVIOS()} (automacao_id,referencia,tipo_alerta,numero,mensagem) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [item.id, event.reference, event.type, number, message]);
           sent.push(candidate);
+        }
+      }
+    }
+    const componentAutomations = automations.filter(item => item.alertas_componentes);
+    if (componentAutomations.length) {
+      const parentPlates = [...new Set(componentAutomations.map(item => normalizePlate(item.placa)))];
+      const { rows: components } = await pool.query(`
+        SELECT DISTINCT ON (placa, eixo_codigo, lado, componente) *
+          FROM ${COMPONENTES()}
+         WHERE cancelado = FALSE
+           AND regexp_replace(upper(COALESCE(conjunto_placa, placa)), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
+         ORDER BY placa, eixo_codigo, lado, componente, data_servico DESC, id DESC
+      `, [parentPlates]);
+      for (const item of components) {
+        const parent = normalizePlate(item.conjunto_placa || item.placa);
+        const currentKm = currentKmByPlate.get(parent);
+        const event = componentAlertType(item, currentKm);
+        if (!event) continue;
+        const related = componentAutomations.filter(automation => normalizePlate(automation.placa) === parent);
+        const numbers = [...new Set(related.flatMap(automation => phones(automation.numeros)))];
+        const message = buildComponentAlertMessage(item, event, currentKm);
+        for (const number of numbers) {
+          const exists = await pool.query(`SELECT 1 FROM ${COMPONENT_ENVIOS()} WHERE registro_id=$1 AND referencia=$2 AND tipo_alerta=$3 AND numero=$4`, [item.id, event.reference, event.type, number]);
+          if (exists.rowCount) continue;
+          const candidate = { origem: "componente_posicao", registroId: item.id, placa: parent, numero: number, tipo: event.type, referencia: event.reference, mensagem: message };
+          candidates.push(candidate);
+          if (!dryRun) {
+            await sendWhatsappText(number, message);
+            await pool.query(`INSERT INTO ${COMPONENT_ENVIOS()} (registro_id,referencia,tipo_alerta,numero,mensagem) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [item.id, event.reference, event.type, number, message]);
+            sent.push(candidate);
+          }
         }
       }
     }

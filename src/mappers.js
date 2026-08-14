@@ -83,6 +83,11 @@ export function mapViagem(row, rotas = [], documentosFinanceiros = []) {
     valorTon: Number(row.valor_ton || 0),
     criadoEm: row.criado_em,
     atualizadoEm: row.atualizado_em,
+    statusAprovacao: row.status_aprovacao || "rascunho",
+    criadoPor: row.criado_por_login || "",
+    aprovadoPor: row.aprovado_por_login || "",
+    aprovadoEm: row.aprovado_em || null,
+    motivoAprovacao: row.motivo_aprovacao || "",
   };
 }
 
@@ -101,6 +106,10 @@ function normalizeVehicleOwnershipType(value) {
 
 export function calcularSituacaoViagem(input = {}) {
   if (PROCESS_SITUACOES.has(input.situacao)) return input.situacao;
+  const hasCte = (Array.isArray(input.documentosFinanceiros) ? input.documentosFinanceiros : []).some((doc) => {
+    const tipo = String(doc?.tipo || doc?.tipoDocumento || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+    return tipo === "CTE" && (hasValue(doc?.numero || doc?.numeroDocumento) || hasValue(doc?.chave || doc?.chaveDocumento));
+  });
   const ownershipType = normalizeVehicleOwnershipType(input.vehicleOwnershipType || input.ownershipType || input.tipoPropriedade);
 
   const hasCarga = [
@@ -132,7 +141,8 @@ export function calcularSituacaoViagem(input = {}) {
     ? baseOk
     : baseOk && [input.motorista, input.valorMotorista].every(hasValue);
 
-  return hasDadosOperacionais ? "aguardando_cte" : "faltando_dados";
+  if (!hasDadosOperacionais) return "faltando_dados";
+  return hasCte ? "em_transito" : "aguardando_cte";
 }
 
 function mapParada(row) {

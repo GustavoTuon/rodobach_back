@@ -31,6 +31,7 @@ import { oportunidadesRetornoRouter } from "./routes/oportunidadesRetorno.js";
 import { folgasMotoristasRouter } from "./routes/folgasMotoristas.js";
 import { consultaCteRouter } from "./routes/consultaCte.js";
 import { canhotosRouter } from "./routes/canhotos.js";
+import { multasFrotaRouter } from "./routes/multasFrota.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
 import { startMaintenanceAlertScheduler } from "./services/manutencaoAlertaService.js";
 
@@ -134,6 +135,7 @@ app.use("/api", oportunidadesRetornoRouter);
 app.use("/api", folgasMotoristasRouter);
 app.use("/api", consultaCteRouter);
 app.use("/api", canhotosRouter);
+app.use("/api", multasFrotaRouter);
 
 // ── Handlers de erro ─────────────────────────────────────────────────────────
 app.use((req, res) => {
