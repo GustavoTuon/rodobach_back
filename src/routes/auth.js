@@ -32,6 +32,7 @@ authRouter.post("/auth/login", validateBody(loginSchema), async (req, res, next)
       viagens: user.perm_viagens,
       "aprovar-viagens": Boolean(user.admin || user.perm_aprovar_viagens),
       "dre-empresarial": user.perm_dre_empresarial,
+      "fluxo-caixa": user.perm_dre_empresarial,
       "faturamento-diario": user.perm_faturamento_diario ?? user.perm_dre_empresarial,
       "comparativo-faturamento": user.perm_comparativo_faturamento ?? user.perm_dre_empresarial,
       "analise-frota": user.perm_analise_frota,

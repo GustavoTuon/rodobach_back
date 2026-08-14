@@ -25,6 +25,7 @@ import {
 } from "../services/manutencoesVeiculosService.js";
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial, getDreLancamentoDetalhe } from "../services/dreEmpresarialService.js";
+import { getFluxoCaixa } from "../services/fluxoCaixaService.js";
 import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getResultadoFretes } from "../services/resultadoFretesService.js";
@@ -34,6 +35,21 @@ import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalCo
 import { getAlertasOperacionaisMensagem } from "../services/alertasOperacionaisMensagemService.js";
 
 export const financeiroRouter = Router();
+
+financeiroRouter.get("/financeiro/fluxo-caixa", async (req, res, next) => {
+  try {
+    res.json(await getFluxoCaixa({
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      mode: req.query.mode,
+      empresa: req.query.empresa,
+      search: req.query.search,
+      limit: req.query.limit,
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
 
 function parseMonthsQuery(rawMonths) {
   if (!rawMonths) return [];
