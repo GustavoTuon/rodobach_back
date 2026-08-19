@@ -367,9 +367,11 @@ export async function getDreEmpresarial({
             NULLIF(CONCAT_WS('/', NULLIF(origem.nomecid, ''), NULLIF(TRIM(uf_origem.abreviaturaest), '')), ''),
             NULLIF(CONCAT_WS('/', NULLIF(destino.nomecid, ''), NULLIF(TRIM(uf_destino.abreviaturaest), '')), '')
           ), ''), ', ') AS rota,
-          STRING_AGG(DISTINCT COALESCE(con.numeroctecon::text, con.codigocon::text), ', ') AS ctes
+          STRING_AGG(DISTINCT (con.seriecon || '/' || COALESCE(con.numeroctecon::text, con.codigocon::text)), ', ') AS ctes
         FROM (
-          SELECT rcv.serieconhecimento AS serie_cte, rcv.codigoconhecimento AS cte_codigo
+          SELECT
+            COALESCE(NULLIF(TRIM(rcv.serieorcamento), ''), rcv.serieconhecimento) AS serie_cte,
+            COALESCE(rcv.codigoorcamento, rcv.codigoconhecimento) AS cte_codigo
           FROM financeiro.receberconhecimentosvinculados rcv
           WHERE rcv.empresa = rec.empresarec
             AND rcv.serie = rec.serierec
@@ -381,12 +383,19 @@ export async function getDreEmpresarial({
             AND rcc.seriercc = rec.serierec
             AND rcc.duplicatarcc = rec.duplicatarec
             AND rcc.parcelarcc = rec.parcelarec
+          UNION
+          SELECT match[1]::varchar AS serie_cte, match[2]::int AS cte_codigo
+          FROM regexp_matches(
+            COALESCE(rec.observacaorec, ''),
+            '([A-Za-z0-9]+)/([0-9]+)-[A-Za-z0-9]+',
+            'g'
+          ) AS match
         ) vinc
         INNER JOIN logistica.conhecimentos con
           ON con.empresacon = rec.empresarec
          AND con.codigocon = vinc.cte_codigo
          AND (vinc.serie_cte IS NULL OR con.seriecon = vinc.serie_cte)
-         AND con.statuscon = 2
+         AND (con.statuscon = 2 OR UPPER(TRIM(con.seriecon)) IN ('O', 'OC') OR NULLIF(TRIM(con.chaveorcamentocon), '') IS NOT NULL)
         LEFT JOIN localidades.cidades origem ON origem.codigocid = con.cidadecoletacon
         LEFT JOIN localidades.cidades destino ON destino.codigocid = con.cidadeentregacon
         LEFT JOIN localidades.estados uf_origem ON uf_origem.codigoest = origem.estadocid
@@ -681,9 +690,19 @@ export async function getDreEmpresarial({
       UNION ALL SELECT * FROM pagar
       UNION ALL SELECT * FROM movimentacao
     )
-    SELECT *
+    SELECT
+      b.*,
+      COALESCE(NULLIF(vei_meta.modelovei, ''), NULLIF(vei_meta.marcamodelorenavamvei, ''), NULLIF(vei_meta.nomevei, '')) AS veiculo_modelo
     FROM base b
     CROSS JOIN params p
+    LEFT JOIN LATERAL (
+      SELECT v.modelovei, v.marcamodelorenavamvei, v.nomevei
+      FROM frotas.veiculos v
+      WHERE UPPER(TRIM(v.placavei::text)) = UPPER(TRIM(b.placa::text))
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+      ORDER BY (v.empresavei = b.source_empresa) DESC, v.empresavei
+      LIMIT 1
+    ) vei_meta ON true
     WHERE (p.conta IS NULL OR b.conta_codigo = p.conta)
       AND (p.placa IS NULL OR UPPER(TRIM(b.placa::text)) = p.placa)
       AND (p.cliente IS NULL OR b.cliente_codigo = p.cliente)
@@ -727,6 +746,7 @@ export async function getDreEmpresarial({
       tipo: row.tipo,
       placa,
       veiculoNome: row.veiculo_nome,
+      veiculoModelo: row.veiculo_modelo,
       tipoPropriedade: row.tipo_propriedade,
       operacao: row.tipo_propriedade === "P" ? "frota" : (placa ? "terceiro" : "sem_placa"),
       clienteCodigo: row.cliente_codigo,

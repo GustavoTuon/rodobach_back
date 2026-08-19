@@ -18,6 +18,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/abastecimentos(?:\/|$)/, "precos-combustivel"],
   [/^\/frota\/analise(?:\/|$)/, "analise-frota"],
   [/^\/financeiro\/dre-empresarial(?:\/|$)/, "dre-empresarial"],
+  [/^\/financeiro\/despesas-futuras(?:\/|$)/, "fluxo-caixa"],
   [/^\/financeiro\/faturamento-diario(?:\/|$)/, "faturamento-diario"],
   [/^\/financeiro\/faturamento-mensal-comparativo(?:\/|$)/, "comparativo-faturamento"],
   [/^\/financeiro\/lucro-viagens(?:\/|$)/, "lucro-viagens"],

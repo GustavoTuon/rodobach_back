@@ -17,6 +17,7 @@ import {
   getCustosVeiculoDetalhe,
   getCustosVeiculos,
   getCustosVeiculosFiltros,
+  getConjuntoVeiculo,
 } from "../services/custosVeiculosService.js";
 import {
   getManutencaoVeiculoDetalhe,
@@ -26,6 +27,7 @@ import {
 import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroService.js";
 import { getDreEmpresarial, getDreLancamentoDetalhe } from "../services/dreEmpresarialService.js";
 import { getFluxoCaixa } from "../services/fluxoCaixaService.js";
+import { getDespesasFuturas } from "../services/despesasFuturasService.js";
 import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getResultadoFretes } from "../services/resultadoFretesService.js";
@@ -45,6 +47,18 @@ financeiroRouter.get("/financeiro/fluxo-caixa", async (req, res, next) => {
       empresa: req.query.empresa,
       search: req.query.search,
       limit: req.query.limit,
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/despesas-futuras", async (req, res, next) => {
+  try {
+    res.json(await getDespesasFuturas({
+      months: req.query.months || req.query.meses,
+      empresa: req.query.empresa,
+      search: req.query.search,
     }));
   } catch (error) {
     next(error);
@@ -229,6 +243,7 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
       inativoMin: req.query.inativoMin,
       inativoMax: req.query.inativoMax,
       incluirVencidosAntigos: req.query.incluirVencidosAntigos,
+      incluirSemFaturamento: req.query.incluirSemFaturamento,
     });
     res.json(data);
   } catch (error) {
@@ -286,6 +301,7 @@ financeiroRouter.get("/financeiro/resultado-fretes", async (req, res, next) => {
       direcao: req.query.direcao,
       ufBase: req.query.ufBase,
       valorMaximoPequeno: req.query.valorMaximoPequeno,
+      tipoOperacao: req.query.tipoOperacao,
     });
     res.json(data);
   } catch (error) {
@@ -425,6 +441,33 @@ financeiroRouter.get("/financeiro/custos-veiculos", async (req, res, next) => {
 financeiroRouter.get("/financeiro/custos-veiculos/filtros", async (_req, res, next) => {
   try {
     res.json(await getCustosVeiculosFiltros());
+  } catch (error) {
+    next(error);
+  }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/resultado", async (req, res, next) => {
+  try {
+    const filters = {
+      startDate: req.query.startDate || req.query.dataInicio,
+      endDate: req.query.endDate || req.query.dataFim,
+      placa: req.query.placa,
+      empresa: req.query.empresa,
+      proprietario: "frota",
+      limit: req.query.limit || 5000,
+    };
+    const conjunto = filters.placa ? await getConjuntoVeiculo(filters.placa) : null;
+    const costFilters = conjunto?.placas?.length
+      ? { ...filters, placa: undefined, receitaPlaca: conjunto.placaPrincipal, placasVinculadas: conjunto.placas }
+      : filters;
+    const revenueFilters = conjunto?.placaPrincipal
+      ? { ...filters, placa: conjunto.placaPrincipal }
+      : filters;
+    const [custos, receitas] = await Promise.all([
+      getCustosVeiculos(costFilters),
+      filters.placa ? getRentabilidadeClientes(revenueFilters) : Promise.resolve(null),
+    ]);
+    res.json({ custos, receitas, conjunto });
   } catch (error) {
     next(error);
   }

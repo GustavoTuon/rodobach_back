@@ -236,7 +236,13 @@ export const BASE_SQL = `
     LEFT JOIN localidades.cidades destino ON destino.codigocid = COALESCE(cvf.cidade_destino, con.cidadeentregacon)
     LEFT JOIN localidades.estados origem_uf ON origem_uf.codigoest = origem.estadocid
     LEFT JOIN localidades.estados destino_uf ON destino_uf.codigoest = destino.estadocid
-    LEFT JOIN frotas.motoristas mot ON mot.codigomot = con.motoristacon AND mot.empresamot = con.empresacon
+    LEFT JOIN LATERAL (
+      SELECT NULLIF(TRIM(m.nomemot), '') AS nomemot
+      FROM frotas.motoristas m
+      WHERE m.codigomot = con.motoristacon
+      ORDER BY (m.empresamot = con.empresacon) DESC, m.empresamot
+      LIMIT 1
+    ) mot ON true
     LEFT JOIN LATERAL (
       SELECT COALESCE(NULLIF(TRIM(p.nomepes), ''), NULLIF(TRIM(p.fantasiapes), ''), r.codigorep::text) AS nome
       FROM logistica.representantes r
@@ -270,7 +276,7 @@ export const BASE_SQL = `
     LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli = con.expedidorcon LIMIT 1) exp_cli ON true
     LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli = con.recebedorcon LIMIT 1) rec_cli ON true
     CROSS JOIN params p
-    WHERE con.statuscon = 2
+    WHERE (con.statuscon = 2 OR UPPER(TRIM(con.seriecon)) IN ('O', 'OC') OR NULLIF(TRIM(con.chaveorcamentocon), '') IS NOT NULL)
       AND con.dataemissaocon::date >= p.data_inicio
       AND con.dataemissaocon::date <= p.data_fim
       AND (p.cliente IS NULL OR CONCAT_WS(' ', con.clientecon::text, con.destinatariocon::text, cli.nomecli, cli.fantasiacli, cli.cnpjcpfcli) ILIKE '%' || p.cliente || '%')
