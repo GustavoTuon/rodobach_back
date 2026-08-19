@@ -11,6 +11,48 @@ const iso = (value) => {
 const num = (value) => Number(value) || 0;
 const money = (value) => Math.round((num(value) + Number.EPSILON) * 100) / 100;
 
+const FINANCING_PATTERN = /(financi|empr[eé]stim|cons[oó]rc)/i;
+
+export function summarizeFutureExpenses(rows = []) {
+  const normalized = rows.map((row) => ({
+    ...row,
+    data: iso(row.data),
+    vencimento: iso(row.vencimento || row.data),
+    valor: money(row.valor),
+    financiamento: Boolean(row.financiamento) || FINANCING_PATTERN.test(`${row.categoria || ""} ${row.historico || ""}`),
+  }));
+  const total = money(normalized.reduce((sum, row) => sum + row.valor, 0));
+  const financingRows = normalized.filter((row) => row.financiamento);
+  const aggregate = (items, keyName, valueOf) => {
+    const grouped = new Map();
+    for (const item of items) {
+      const key = valueOf(item) || "Não informado";
+      const current = grouped.get(key) || { [keyName]: key, valor: 0, lancamentos: 0 };
+      current.valor += item.valor;
+      current.lancamentos += 1;
+      grouped.set(key, current);
+    }
+    return [...grouped.values()].map((item) => ({ ...item, valor: money(item.valor) })).sort((a, b) => b.valor - a.valor);
+  };
+  return {
+    horizonteMeses: 12,
+    total,
+    quantidade: normalized.length,
+    financiamentos: {
+      total: money(financingRows.reduce((sum, row) => sum + row.valor, 0)),
+      quantidade: financingRows.length,
+      mensal: aggregate(financingRows, "mes", (row) => row.data?.slice(0, 7)).sort((a, b) => a.mes.localeCompare(b.mes)),
+      credores: aggregate(financingRows, "pessoa", (row) => row.pessoa).slice(0, 6),
+      maiorParcela: financingRows.slice().sort((a, b) => b.valor - a.valor)[0] || null,
+      proximos: financingRows.slice().sort((a, b) => a.data.localeCompare(b.data)).slice(0, 12),
+    },
+    mensal: aggregate(normalized, "mes", (row) => row.data?.slice(0, 7)).sort((a, b) => a.mes.localeCompare(b.mes)),
+    categorias: aggregate(normalized, "categoria", (row) => row.categoria).slice(0, 8),
+    fornecedores: aggregate(normalized, "pessoa", (row) => row.pessoa).slice(0, 8),
+    proximos: normalized.slice().sort((a, b) => a.data.localeCompare(b.data)).slice(0, 20),
+  };
+}
+
 function period(filters) {
   const now = new Date();
   const end = iso(filters.endDate || filters.dataFim) || iso(now.toISOString());
@@ -112,12 +154,55 @@ export async function getFluxoCaixa(filters = {}) {
     ORDER BY data, tipo
   `, [range.start, range.end, mode, company, search]);
 
+  const commonOpenPayable = `
+    FROM financeiro.pagar pag
+    LEFT JOIN LATERAL (SELECT f.nomefor, f.fantasiafor FROM gerais.fornecedores f WHERE f.codigofor = pag.fornecedorpag ORDER BY (f.empresafor = pag.empresapag) DESC LIMIT 1) forn ON true
+    LEFT JOIN LATERAL (SELECT cf.nomecfi FROM unnest(pag.contasfinanceiraspag) conta(codigo) LEFT JOIN financeiro.contasfinanceiras cf ON cf.codigocfi = conta.codigo ORDER BY (cf.empresacfi = pag.empresapag) DESC LIMIT 1) cfi ON true
+  `;
+  const { rows: overdueRowsRaw } = await clientPool.query(`
+    WITH vencidos AS (
+      SELECT ('rec-prev:' || rec.empresarec || ':' || rec.serierec || ':' || rec.duplicatarec || ':' || rec.parcelarec)::text AS id,
+        rec.datavencimentorec::date AS data, rec.datavencimentorec::date AS vencimento, 'entrada'::text AS tipo, 'previsto'::text AS natureza,
+        'Contas a receber'::text AS categoria, COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, ''), 'Cliente não informado')::text AS pessoa,
+        COALESCE(rec.documentorec::text, rec.duplicatarec::text)::text AS documento, COALESCE(rec.observacaorec, 'Conta a receber')::text AS historico,
+        COALESCE(rec.valorabertorec, 0)::numeric AS valor, rec.empresarec::int AS empresa, true AS vencido
+      FROM financeiro.receber rec
+      LEFT JOIN LATERAL (SELECT c.nomecli, c.fantasiacli FROM gerais.clientes c WHERE c.codigocli = rec.clienterec ORDER BY (c.empresacli = rec.empresarec) DESC LIMIT 1) cli ON true
+      WHERE rec.datavencimentorec::date < CURRENT_DATE AND COALESCE(rec.valorabertorec, 0) > 0 AND rec.statusrec IN (1,2)
+      UNION ALL
+      SELECT ('pag-prev:' || pag.empresapag || ':' || pag.seriepag || ':' || pag.duplicatapag || ':' || pag.parcelapag || ':' || pag.fornecedorpag)::text,
+        pag.datavencimentopag::date, pag.datavencimentopag::date, 'saida'::text, 'previsto'::text, COALESCE(cfi.nomecfi, 'Outros')::text,
+        COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Fornecedor não informado')::text,
+        COALESCE(pag.documentopag::text, pag.duplicatapag::text)::text, COALESCE(pag.observacaopag, 'Conta a pagar')::text,
+        COALESCE(pag.valorabertopag, 0)::numeric, pag.empresapag::int, true
+      ${commonOpenPayable}
+      WHERE pag.datavencimentopag::date < CURRENT_DATE AND COALESCE(pag.valorabertopag, 0) > 0 AND pag.statuspag IN (1,2)
+    ) SELECT * FROM vencidos
+    WHERE ($1::int IS NULL OR empresa = $1::int)
+      AND ($2::text IS NULL OR pessoa ILIKE '%' || $2 || '%' OR categoria ILIKE '%' || $2 || '%' OR documento ILIKE '%' || $2 || '%' OR historico ILIKE '%' || $2 || '%')
+  `, [company, search]);
+  const { rows: futureRowsRaw } = await clientPool.query(`
+    SELECT ('pag-prev:' || pag.empresapag || ':' || pag.seriepag || ':' || pag.duplicatapag || ':' || pag.parcelapag || ':' || pag.fornecedorpag)::text AS id,
+      pag.datavencimentopag::date AS data, pag.datavencimentopag::date AS vencimento, 'saida'::text AS tipo, 'previsto'::text AS natureza,
+      COALESCE(cfi.nomecfi, 'Outros')::text AS categoria,
+      COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, ''), 'Fornecedor não informado')::text AS pessoa,
+      COALESCE(pag.documentopag::text, pag.duplicatapag::text)::text AS documento, COALESCE(pag.observacaopag, 'Conta a pagar')::text AS historico,
+      COALESCE(pag.valorabertopag, 0)::numeric AS valor, pag.empresapag::int AS empresa, false AS vencido,
+      (COALESCE(cfi.nomecfi, '') ~* '(financi|empr[eé]stim|cons[oó]rc)' OR COALESCE(pag.observacaopag, '') ~* '(financi|empr[eé]stim|cons[oó]rc)') AS financiamento
+    ${commonOpenPayable}
+    WHERE pag.datavencimentopag::date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '12 months')::date
+      AND COALESCE(pag.valorabertopag, 0) > 0 AND pag.statuspag IN (1,2)
+      AND ($1::int IS NULL OR pag.empresapag = $1::int)
+      AND ($2::text IS NULL OR COALESCE(NULLIF(forn.fantasiafor, ''), NULLIF(forn.nomefor, '')) ILIKE '%' || $2 || '%' OR COALESCE(cfi.nomecfi, 'Outros') ILIKE '%' || $2 || '%' OR COALESCE(pag.documentopag::text, pag.duplicatapag::text) ILIKE '%' || $2 || '%' OR COALESCE(pag.observacaopag, '') ILIKE '%' || $2 || '%')
+    ORDER BY pag.datavencimentopag
+  `, [company, search]);
+
   const movements = rows.map((row) => ({ ...row, data: iso(row.data), vencimento: iso(row.vencimento), valor: money(row.valor), diasAtraso: row.vencido && row.vencimento ? Math.max(0, Math.floor((Date.now() - new Date(row.vencimento).getTime()) / 86400000)) : 0 }));
   const entradas = money(movements.filter((x) => x.tipo === "entrada").reduce((s, x) => s + x.valor, 0));
   const saidas = money(movements.filter((x) => x.tipo === "saida").reduce((s, x) => s + x.valor, 0));
-  const vencido = money(movements.filter((x) => x.vencido).reduce((s, x) => s + x.valor, 0));
-  const vencidoReceber = money(movements.filter((x) => x.vencido && x.tipo === "entrada").reduce((s, x) => s + x.valor, 0));
-  const vencidoPagar = money(movements.filter((x) => x.vencido && x.tipo === "saida").reduce((s, x) => s + x.valor, 0));
+  const overdueRows = overdueRowsRaw.map((row) => ({ ...row, data: iso(row.data), vencimento: iso(row.vencimento), valor: money(row.valor), diasAtraso: Math.max(0, Math.floor((Date.now() - new Date(row.vencimento).getTime()) / 86400000)) }));
+  const vencidoReceber = money(overdueRows.filter((x) => x.tipo === "entrada").reduce((s, x) => s + x.valor, 0));
+  const vencidoPagar = money(overdueRows.filter((x) => x.tipo === "saida").reduce((s, x) => s + x.valor, 0));
   const today = iso(new Date());
   const inSeven = new Date(); inSeven.setDate(inSeven.getDate() + 7); const sevenDate = iso(inSeven);
   const proximosSeteDias = money(movements.filter((x) => x.natureza === "previsto" && x.data >= today && x.data <= sevenDate).reduce((s, x) => s + (x.tipo === "entrada" ? x.valor : -x.valor), 0));
@@ -131,6 +216,13 @@ export async function getFluxoCaixa(filters = {}) {
     const cat = categoryMap.get(key) || { tipo: item.tipo, categoria: item.categoria, valor: 0, lancamentos: 0 };
     cat.valor += item.valor; cat.lancamentos += 1; categoryMap.set(key, cat);
   }
+  const cursor = new Date(`${range.start}T12:00:00`);
+  const rangeEnd = new Date(`${range.end}T12:00:00`);
+  while (cursor <= rangeEnd) {
+    const key = iso(cursor);
+    if (!dayMap.has(key)) dayMap.set(key, { data: key, entradas: 0, saidas: 0 });
+    cursor.setDate(cursor.getDate() + 1);
+  }
   let accumulated = 0;
   const evolution = [...dayMap.values()].sort((a, b) => a.data.localeCompare(b.data)).map((day) => {
     day.entradas = money(day.entradas); day.saidas = money(day.saidas); day.saldo = money(day.entradas - day.saidas); accumulated += day.saldo; day.acumulado = money(accumulated); return day;
@@ -143,16 +235,18 @@ export async function getFluxoCaixa(filters = {}) {
     const ranking = [...grouped].map(([pessoa, valor]) => ({ pessoa, valor: money(valor), percentual: total ? money(valor / total * 100) : 0 })).sort((a,b) => b.valor - a.valor);
     return { maior: ranking[0] || null, top5Percentual: total ? money(ranking.slice(0,5).reduce((sum,x) => sum + x.valor, 0) / total * 100) : 0, ranking: ranking.slice(0,5) };
   };
-  const overdueRows = movements.filter((x) => x.vencido).sort((a,b) => (b.diasAtraso - a.diasAtraso) || (b.valor - a.valor));
+  overdueRows.sort((a,b) => (b.diasAtraso - a.diasAtraso) || (b.valor - a.valor));
+  const futureExpenses = summarizeFutureExpenses(futureRowsRaw);
   const result = {
     period: range,
     mode,
-    summary: { entradas, saidas, saldo: money(entradas - saidas), vencido, vencidoReceber, vencidoPagar, proximosSeteDias, menorSaldo: evolution.length ? Math.min(...evolution.map((x) => x.acumulado)) : 0, lancamentos: movements.length },
+    summary: { entradas, saidas, saldo: money(entradas - saidas), vencidoReceber, vencidoPagar, vencidoLiquido: money(vencidoReceber - vencidoPagar), proximosSeteDias, menorSaldo: evolution.length ? Math.min(...evolution.map((x) => x.acumulado)) : 0, lancamentos: movements.length },
     evolution,
     categories: [...categoryMap.values()].map((x) => ({ ...x, valor: money(x.valor) })).sort((a, b) => b.valor - a.valor),
     movements: movements.sort((a, b) => b.data.localeCompare(a.data)),
     concentration: { clientes: personSummary("entrada"), fornecedores: personSummary("saida") },
-    overdue: { quantidade: overdueRows.length, maior: overdueRows.slice().sort((a,b) => b.valor - a.valor)[0] || null, maisAntigo: overdueRows[0] || null },
+    overdue: { quantidade: overdueRows.length, receberQuantidade: overdueRows.filter((x) => x.tipo === "entrada").length, pagarQuantidade: overdueRows.filter((x) => x.tipo === "saida").length, maior: overdueRows.slice().sort((a,b) => b.valor - a.valor)[0] || null, maisAntigo: overdueRows[0] || null, movements: overdueRows },
+    futureExpenses,
     note: "Saldo acumulado representa apenas a movimentação do período; não inclui saldo bancário inicial.",
   };
   if (!filters._skipComparison) {
@@ -160,9 +254,11 @@ export async function getFluxoCaixa(filters = {}) {
     const days = Math.max(1, Math.round((end - start) / 86400000) + 1);
     const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1);
     const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - days + 1);
-    const previous = await getFluxoCaixa({ ...filters, dataInicio: iso(prevStart), dataFim: iso(prevEnd), _skipComparison: true });
+    const comparisonMode = mode === "previsto" ? null : "realizado";
+    const previous = comparisonMode ? await getFluxoCaixa({ ...filters, mode: comparisonMode, dataInicio: iso(prevStart), dataFim: iso(prevEnd), _skipComparison: true }) : null;
+    const currentComparison = comparisonMode === "realizado" && mode !== "realizado" ? await getFluxoCaixa({ ...filters, mode: "realizado", _skipComparison: true }) : result;
     const variation = (current, old) => old ? money((current - old) / Math.abs(old) * 100) : null;
-    result.comparison = { period: previous.period, entradas: variation(entradas, previous.summary.entradas), saidas: variation(saidas, previous.summary.saidas), saldo: variation(result.summary.saldo, previous.summary.saldo) };
+    result.comparison = previous ? { basis: "realizado", period: previous.period, entradas: variation(currentComparison.summary.entradas, previous.summary.entradas), saidas: variation(currentComparison.summary.saidas, previous.summary.saidas), saldo: variation(currentComparison.summary.saldo, previous.summary.saldo) } : { basis: null, entradas: null, saidas: null, saldo: null };
   }
   return result;
 }

@@ -52,6 +52,34 @@ function overlapsPeriod(report, filters = {}) {
   return report.startDate <= endDate && report.endDate >= startDate;
 }
 
+function addDays(date, days) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+function telemetryCoverage(periods, filters = {}) {
+  const startDate = dateOnly(filters.startDate || filters.dataInicio);
+  const endDate = dateOnly(filters.endDate || filters.dataFim);
+  const valid = periods
+    .filter((period) => period.startDate && period.endDate)
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  if (!startDate || !endDate || !valid.length) return "indisponivel";
+  if (valid.some((period) => period.startDate < startDate || period.endDate > endDate)) return "parcial";
+
+  let coveredUntil = null;
+  for (const period of valid) {
+    if (!coveredUntil) {
+      if (period.startDate > startDate) return "parcial";
+      coveredUntil = period.endDate;
+    } else {
+      if (period.startDate > addDays(coveredUntil, 1)) return "parcial";
+      if (period.endDate > coveredUntil) coveredUntil = period.endDate;
+    }
+  }
+  return coveredUntil >= endDate ? "confirmada" : "parcial";
+}
+
 async function readMetricPairs(filePath) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
@@ -140,20 +168,26 @@ export async function getTelemetriaResumoPorPlaca(filters = {}) {
         mediaConsumoKmL: money(mediaConsumoKmL),
         arquivos: row.arquivos,
         periodos: row.periodos,
+        cobertura: telemetryCoverage(row.periodos, filters),
       };
     })
     .sort((a, b) => a.placa.localeCompare(b.placa));
 
   const distanciaKm = rows.reduce((sum, row) => sum + row.distanciaKm, 0);
   const consumoTotalLitros = rows.reduce((sum, row) => sum + row.consumoTotalLitros, 0);
-  const mediaConsumoKmL = consumoTotalLitros > 0 ? distanciaKm / consumoTotalLitros : 0;
+  const rowsComConsumo = rows.filter((row) => row.consumoTotalLitros > 0);
+  const distanciaComConsumoKm = rowsComConsumo.reduce((sum, row) => sum + row.distanciaKm, 0);
+  const mediaConsumoKmL = consumoTotalLitros > 0 ? distanciaComConsumoKm / consumoTotalLitros : 0;
 
   return {
     summary: {
       placas: rows.length,
       distanciaKm: money(distanciaKm),
+      distanciaComConsumoKm: money(distanciaComConsumoKm),
       consumoTotalLitros: money(consumoTotalLitros),
       mediaConsumoKmL: money(mediaConsumoKmL),
+      placasComConsumo: rowsComConsumo.length,
+      placasSemConsumo: rows.filter((row) => row.distanciaKm > 0 && row.consumoTotalLitros <= 0).map((row) => row.placa),
     },
     byPlate: rows,
     source: { dir, files: files.length, available: true, errors },

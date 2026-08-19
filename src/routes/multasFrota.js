@@ -19,6 +19,33 @@ const dateText = value => {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
 };
 const money = value => Number(value || 0);
+const today = () => new Date().toISOString().slice(0, 10);
+const daysFromToday = value => value ? Math.round((new Date(`${value}T00:00:00.000Z`) - new Date(`${today()}T00:00:00.000Z`)) / 86400000) : null;
+const incompleteReasons = fine => [
+  !fine.auto && "sem_auto",
+  !fine.placa && "sem_placa",
+  !fine.vencimento && "sem_vencimento",
+  fine.valor <= 0 && "sem_valor",
+  !fine.controle.responsavel && "sem_responsavel",
+  fine.controle.statusMotorista !== "empresa" && !fine.motorista && "sem_motorista",
+].filter(Boolean);
+const operationalPriority = fine => {
+  const days = daysFromToday(fine.vencimento);
+  if (!fine.paga && (fine.vencida || days === 0)) return "critica";
+  if (!fine.paga && days !== null && days > 0 && days <= 3) return "alta";
+  if ((!fine.paga && days !== null && days <= 7) || fine.controle.statusIndicacao === "pendente" || fine.incompleta) return "atencao";
+  return "normal";
+};
+const nextAction = fine => {
+  if (fine.paga && fine.controle.statusMotorista === "alerta") return "Conferir desconto do motorista";
+  if (fine.paga) return "Nenhuma ação pendente";
+  if (fine.controle.statusIndicacao === "pendente") return "Conferir indicação do condutor";
+  if (fine.vencida) return "Conferir pagamento vencido";
+  if (fine.diasParaVencimento !== null && fine.diasParaVencimento <= 7) return "Programar pagamento";
+  if (!fine.controle.responsavel) return "Atribuir responsável pelo acompanhamento";
+  if (fine.controle.statusInterno === "em_defesa") return "Acompanhar defesa";
+  return "Acompanhar ocorrência";
+};
 const fineCategory = description => {
   const text = String(description || "").toLowerCase();
   if (/velocidade|máxima permitida|radar/.test(text)) return "Velocidade";
@@ -44,7 +71,7 @@ function mapFine(row, control = {}) {
   const overdue = !paid && due && due < new Date().toISOString().slice(0, 10);
   const driverStatus = driverStatusFromErp(row, paid);
   const fineDescription = row.infracao_descricao || "Descrição não cadastrada no ERP";
-  return {
+  const fine = {
     id: `${row.empresamtr}:${row.codigomtr}`,
     empresa: Number(row.empresamtr), codigo: Number(row.codigomtr), auto: row.numeroautomtr || "",
     infracao: row.infracaomtr || "Multa de trânsito", placa: row.veiculomtr || "",
@@ -70,6 +97,87 @@ function mapFine(row, control = {}) {
       atualizadoPor: control.atualizado_por_login || "", atualizadoEm: control.atualizado_em || null,
     },
   };
+  fine.incompletudes = incompleteReasons(fine);
+  fine.incompleta = fine.incompletudes.length > 0;
+  fine.diasParaVencimento = daysFromToday(fine.vencimento);
+  fine.prioridade = operationalPriority(fine);
+  fine.proximaAcao = nextAction(fine);
+  return fine;
+}
+
+function ranking(rows, keyFn, labelKey) {
+  const grouped = new Map();
+  for (const fine of rows) {
+    const key = keyFn(fine) || "Nao informado";
+    const item = grouped.get(key) || { [labelKey]: key, quantidade: 0, valor: 0, abertas: 0 };
+    item.quantidade += 1;
+    item.valor += fine.valorFinal;
+    if (!fine.paga) item.abertas += 1;
+    grouped.set(key, item);
+  }
+  return [...grouped.values()].sort((a, b) => b.quantidade - a.quantidade || b.valor - a.valor).slice(0, 10);
+}
+
+function buildOperationalData(all) {
+  const open = all.filter(fine => !fine.paga);
+  const due7 = open.filter(fine => fine.diasParaVencimento !== null && fine.diasParaVencimento >= 0 && fine.diasParaVencimento <= 7);
+  const company = all.filter(fine => fine.controle.statusMotorista === "empresa");
+  const driver = all.filter(fine => fine.controle.statusMotorista !== "empresa");
+  const incomplete = all.filter(fine => fine.incompleta);
+  const pending = all.filter(fine => fine.controle.statusIndicacao === "pendente");
+  const alerts = [
+    all.filter(fine => fine.vencida && !fine.paga).length && { prioridade: "critica", titulo: `${all.filter(fine => fine.vencida && !fine.paga).length} multa(s) vencida(s)`, detalhe: "Pagamento requer conferencia imediata.", filtro: "vencidas" },
+    open.filter(fine => fine.diasParaVencimento !== null && fine.diasParaVencimento >= 0 && fine.diasParaVencimento <= 3).length && { prioridade: "alta", titulo: `${open.filter(fine => fine.diasParaVencimento !== null && fine.diasParaVencimento >= 0 && fine.diasParaVencimento <= 3).length} multa(s) vencem em ate 3 dias`, detalhe: "Priorize a verificacao do pagamento.", filtro: "vencendo" },
+    pending.length && { prioridade: "alta", titulo: `${pending.length} indicacao(oes) pendente(s)`, detalhe: "Nao ha prazo oficial de indicacao informado pelo ERP.", filtro: "sem_indicacao" },
+    incomplete.length && { prioridade: "atencao", titulo: `${incomplete.length} registro(s) incompleto(s)`, detalhe: "Confira vencimento, placa, motorista, auto e responsavel.", filtro: "incompletas" },
+  ].filter(Boolean).slice(0, 5);
+  const evolutionMap = new Map();
+  for (const fine of all) {
+    const month = String(fine.dataInfracao || "").slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;
+    const item = evolutionMap.get(month) || { mes: month, quantidade: 0, valor: 0, aberto: 0 };
+    item.quantidade += 1;
+    item.valor += fine.valorFinal;
+    if (!fine.paga) item.aberto += fine.valorFinal;
+    evolutionMap.set(month, item);
+  }
+  const qualidade = {
+    semVencimento: all.filter(fine => fine.incompletudes.includes("sem_vencimento")).length,
+    semMotorista: all.filter(fine => fine.incompletudes.includes("sem_motorista")).length,
+    semPlaca: all.filter(fine => fine.incompletudes.includes("sem_placa")).length,
+    semResponsavel: all.filter(fine => fine.incompletudes.includes("sem_responsavel")).length,
+    semAuto: all.filter(fine => fine.incompletudes.includes("sem_auto")).length,
+    semValor: all.filter(fine => fine.incompletudes.includes("sem_valor")).length,
+  };
+
+  return {
+    resumo: {
+      total: all.length,
+      valorOriginal: all.reduce((sum, fine) => sum + fine.valor, 0),
+      abertas: open.length,
+      valorAberto: open.reduce((sum, fine) => sum + fine.valorFinal, 0),
+      pagas: all.filter(fine => fine.paga).length,
+      valorPago: all.reduce((sum, fine) => sum + fine.valorPago, 0),
+      vencidas: all.filter(fine => fine.vencida && !fine.paga).length,
+      valorVencido: all.filter(fine => fine.vencida && !fine.paga).reduce((sum, fine) => sum + fine.valorFinal, 0),
+      vencendo7: due7.length,
+      valorVencendo7: due7.reduce((sum, fine) => sum + fine.valorFinal, 0),
+      indicacaoPendente: pending.length,
+      responsabilidadeEmpresa: company.length,
+      valorResponsabilidadeEmpresa: company.reduce((sum, fine) => sum + fine.valorFinal, 0),
+      responsabilidadeMotorista: driver.length,
+      valorResponsabilidadeMotorista: driver.reduce((sum, fine) => sum + fine.valorFinal, 0),
+      incompletos: incomplete.length,
+    },
+    alertas: alerts,
+    evolucao: [...evolutionMap.values()].sort((a, b) => a.mes.localeCompare(b.mes)).slice(-12),
+    qualidade,
+    rankings: {
+      motoristas: ranking(all.filter(fine => fine.motorista), fine => fine.motorista, "motorista"),
+      veiculos: ranking(all.filter(fine => fine.placa), fine => fine.placa, "placa"),
+      infracoes: ranking(all, fine => fine.infracaoCategoria, "infracao"),
+    },
+  };
 }
 
 multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
@@ -93,6 +201,7 @@ multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
     const controls = await pool.query(`SELECT * FROM ${CONTROL()}`);
     const byKey = new Map(controls.rows.map(c => [`${c.empresa}:${c.codigo_multa}`, c]));
     const all = rows.map(row => mapFine(row, byKey.get(`${row.empresamtr}:${row.codigomtr}`)));
+    const operational = buildOperationalData(all);
     let items = [...all];
     const q = String(req.query.q || "").trim().toLowerCase();
     const status = String(req.query.status || "todos");
@@ -103,6 +212,7 @@ multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
     const driver = String(req.query.motorista || "").trim().toLowerCase();
     const dueFrom = dateText(req.query.vencimentoDe);
     const dueTo = dateText(req.query.vencimentoAte);
+    const quick = String(req.query.rapido || "todas");
     if (q) items = items.filter(i => [i.auto,i.infracao,i.infracaoDescricao,i.infracaoCategoria,i.placa,i.motorista,i.cidade].join(" ").toLowerCase().includes(q));
     if (status === "aberta") items = items.filter(i => !i.paga);
     if (status === "paga") items = items.filter(i => i.paga);
@@ -114,6 +224,14 @@ multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
     if (driver) items = items.filter(i => i.motorista.toLowerCase().includes(driver));
     if (dueFrom) items = items.filter(i => i.vencimento && i.vencimento >= dueFrom);
     if (dueTo) items = items.filter(i => i.vencimento && i.vencimento <= dueTo);
+    if (quick === "abertas") items = items.filter(i => !i.paga);
+    if (quick === "vencendo") items = items.filter(i => !i.paga && i.diasParaVencimento !== null && i.diasParaVencimento >= 0 && i.diasParaVencimento <= 7);
+    if (quick === "vencidas") items = items.filter(i => i.vencida && !i.paga);
+    if (quick === "sem_indicacao") items = items.filter(i => i.controle.statusIndicacao === "pendente");
+    if (quick === "empresa") items = items.filter(i => i.controle.statusMotorista === "empresa");
+    if (quick === "motorista") items = items.filter(i => i.controle.statusMotorista !== "empresa");
+    if (quick === "sem_responsavel") items = items.filter(i => !i.controle.responsavel);
+    if (quick === "incompletas") items = items.filter(i => i.incompleta);
     const order = String(req.query.ordenar || "placa");
     const direction = String(req.query.direcao || "asc") === "desc" ? -1 : 1;
     const compare = (a, b) => String(a || "").localeCompare(String(b || ""), "pt-BR", { numeric: true });
@@ -127,6 +245,7 @@ multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
       else if (order === "statusMotorista") result = compare(a.controle.statusMotorista, b.controle.statusMotorista);
       else if (order === "statusMulta") result = compare(a.controle.statusMulta, b.controle.statusMulta);
       else if (order === "responsavel") result = compare(a.controle.responsavel, b.controle.responsavel);
+      else if (order === "prioridade") result = ["critica","alta","atencao","normal"].indexOf(a.prioridade) - ["critica","alta","atencao","normal"].indexOf(b.prioridade) || compare(a.vencimento, b.vencimento);
       else result = compare(a.placa, b.placa) || -compare(a.dataInfracao, b.dataInfracao);
       return result * direction;
     });
@@ -143,9 +262,7 @@ multasFrotaRouter.get("/frota/multas", async (req, res, next) => {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(Math.max(Number(req.query.page) || 1, 1), totalPages);
     res.json({
-      resumo: { total: all.length, abertas: all.filter(i=>!i.paga).length, pagas: all.filter(i=>i.paga).length,
-        vencidas: all.filter(i=>i.vencida).length, indicacaoPendente: all.filter(i=>i.controle.statusIndicacao==="pendente").length,
-        valorAberto: all.filter(i=>!i.paga).reduce((sum,i)=>sum+i.valorFinal,0) },
+      ...operational,
       multas: items.slice((page - 1) * pageSize, page * pageSize),
       gruposPlaca, paginacao: { page, pageSize, total, totalPages }, fonte: "frotas.multastransito (somente leitura)"
     });

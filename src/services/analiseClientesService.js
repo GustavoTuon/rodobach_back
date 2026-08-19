@@ -15,6 +15,71 @@ function r2(value) {
   return Math.round((num(value) + Number.EPSILON) * 100) / 100;
 }
 
+function documentIdentity(documento, codigo) {
+  const digits = String(documento || "").replace(/\D/g, "");
+  if (digits.length === 14) return { key: `cnpj:${digits.slice(0, 8)}`, type: "cnpj", root: digits.slice(0, 8) };
+  if (digits.length === 11) return { key: `cpf:${digits}`, type: "cpf", root: digits };
+  return { key: `codigo:${codigo}`, type: "codigo", root: null };
+}
+
+function dateTime(value) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+export function consolidateClientBranches(rows = []) {
+  const groups = new Map();
+  const sumFields = [
+    "total_periodo", "total_recebido", "total_aberto", "total_vencido",
+    "total_inadimplente", "lancamentos_periodo", "total_anterior",
+    "total_ano_anterior", "documentos_ano_anterior",
+  ];
+
+  for (const row of rows) {
+    const identity = documentIdentity(row.documento, row.codigo);
+    let group = groups.get(identity.key);
+    if (!group) {
+      group = {
+        ...row,
+        ...Object.fromEntries(sumFields.map(field => [field, 0])),
+        identidade_cliente: identity.key,
+        documento_raiz: identity.root,
+        tipo_documento: identity.type,
+        filiais: [],
+      };
+      groups.set(identity.key, group);
+    }
+
+    for (const field of sumFields) group[field] += num(row[field]);
+    group.filiais.push({
+      codigo: row.codigo,
+      nome: row.nome || "Sem identificação",
+      documento: row.documento || null,
+      totalPeriodo: r2(row.total_periodo),
+    });
+
+    // O cadastro com maior faturamento representa o grupo na listagem.
+    if (num(row.total_periodo) > num(group._representativeTotal)) {
+      group.codigo = row.codigo;
+      group.nome = row.nome;
+      group.documento = row.documento;
+      group._representativeTotal = num(row.total_periodo);
+    }
+    if (dateTime(row.ultimo_global) > (dateTime(group.ultimo_global) ?? -Infinity)) group.ultimo_global = row.ultimo_global;
+    if (dateTime(row.primeiro) < (dateTime(group.primeiro) ?? Infinity)) group.primeiro = row.primeiro;
+  }
+
+  return [...groups.values()].map(group => {
+    delete group._representativeTotal;
+    group.dias_sem_faturar = group.ultimo_global
+      ? Math.max(0, Math.floor((Date.now() - dateTime(group.ultimo_global)) / 86400000))
+      : null;
+    group.quantidade_filiais = group.filiais.length;
+    return group;
+  }).sort((a, b) => num(b.total_periodo) - num(a.total_periodo));
+}
+
 function logAnaliseClientes(label, { sql, params, rows, totals } = {}) {
   if (process.env.DEBUG_SQL !== "1") return;
   console.log("[analise-clientes]", label, {
@@ -37,6 +102,25 @@ function addYearsIso(base, years) {
 
 function pctChange(current, previous) {
   return previous > 0 ? r2(((num(current) - num(previous)) / num(previous)) * 100) : null;
+}
+
+export function filterClientsForView(mapped, { status, inativoMin, inativoMax, incluirSemFaturamento } = {}) {
+  const inactiveMin = Number(inativoMin);
+  const inactiveMax = Number(inativoMax);
+  const hasInactiveMin = Number.isFinite(inactiveMin);
+  const hasInactiveMax = Number.isFinite(inactiveMax);
+  const includeWithoutBilling = ["1", "true", "sim", "yes"].includes(String(incluirSemFaturamento || "").toLowerCase());
+
+  if (status === "ativo") return mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
+  if (status === "sem-faturamento") {
+    return mapped.filter(c => {
+      const dias = num(c.diasSemFaturar);
+      return c.totalPeriodo === 0
+        && (!hasInactiveMin || dias > inactiveMin)
+        && (!hasInactiveMax || dias <= inactiveMax);
+    });
+  }
+  return includeWithoutBilling ? mapped : mapped.filter(c => c.totalPeriodo > 0);
 }
 
 function monthLabel(v) {
@@ -96,7 +180,7 @@ function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos
   return { status: "ativo", acao: "manter-relacionamento" };
 }
 
-export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, inativoMin, inativoMax, incluirVencidosAntigos } = {}) {
+export async function getAnaliseClientes({ period, startDate, endDate, empresa, cliente, status, inativoMin, inativoMax, incluirVencidosAntigos, incluirSemFaturamento } = {}) {
   const resolved = resolvePeriod(period, startDate, endDate);
   const { startDate: sd, endDate: ed } = resolved;
   const includeOldOverdue = ["1", "true", "sim", "yes"].includes(String(incluirVencidosAntigos || "").toLowerCase());
@@ -121,7 +205,6 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
     WITH rec_period AS (
       SELECT
         rec.clienterec   AS codigo,
-        rec.empresarec   AS empresa,
         SUM(rec.valorduplicatarec)  AS total_periodo,
         SUM(COALESCE(rec.valorabertorec, 0)) AS total_aberto,
         SUM(CASE
@@ -146,7 +229,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
         AND rec.statusrec IN (1,2)
         AND ($5::int IS NULL OR rec.clienterec = $5::int)
         AND ($7::int IS NULL OR rec.empresarec = $7::int)
-      GROUP BY rec.clienterec, rec.empresarec
+      GROUP BY rec.clienterec
     ),
     rec_recebido AS (
       SELECT
@@ -206,7 +289,6 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
     combined AS (
       SELECT
         COALESCE(rp.codigo, rh.codigo)           AS codigo,
-        rp.empresa                                AS empresa,
         COALESCE(rp.total_periodo, 0)             AS total_periodo,
         COALESCE(rr.total_recebido, 0)             AS total_recebido,
         COALESCE(rp.total_aberto, 0)               AS total_aberto,
@@ -244,57 +326,81 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
 
   // ── Query 2: Overall monthly evolution ────────────────────────────────────
   const monthlyQuery = `
+    WITH base AS (
+      SELECT rec.*,
+        CASE
+          WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 14
+            THEN 'cnpj:' || left(regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g'), 8)
+          WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 11
+            THEN 'cpf:' || regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g')
+          ELSE 'codigo:' || rec.clienterec::text
+        END AS identidade_cliente
+      FROM financeiro.receber rec
+      LEFT JOIN LATERAL (
+        SELECT cnpjcpfcli FROM gerais.clientes WHERE codigocli = rec.clienterec LIMIT 1
+      ) cli ON true
+      WHERE rec.dataemissaorec::date >= $1
+        AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
+        AND ($3::int IS NULL OR rec.empresarec = $3::int)
+    )
     SELECT
-      date_trunc('month', rec.dataemissaorec::date)::date AS mes,
-      SUM(rec.valorduplicatarec)        AS valor_total,
-      COUNT(DISTINCT rec.clienterec)    AS clientes_count,
-      COUNT(*)                          AS lancamentos
-    FROM financeiro.receber rec
-    WHERE rec.dataemissaorec::date >= $1
-      AND rec.dataemissaorec::date <= $2
-      AND rec.statusrec IN (1,2)
-      AND ($3::int IS NULL OR rec.empresarec = $3::int)
+      date_trunc('month', dataemissaorec::date)::date AS mes,
+      SUM(valorduplicatarec)                AS valor_total,
+      COUNT(DISTINCT identidade_cliente)    AS clientes_count,
+      COUNT(*)                              AS lancamentos
+    FROM base
     GROUP BY mes
     ORDER BY mes
   `;
 
   // ── Query 3: Monthly evolution for top 10 clients ─────────────────────────
   const topMonthlyQuery = `
-    WITH top10 AS (
-      SELECT clienterec AS codigo, SUM(valorduplicatarec) AS total
-      FROM financeiro.receber
-      WHERE dataemissaorec::date >= $1 AND dataemissaorec::date <= $2
-        AND dataemissaorec IS NOT NULL
-        AND statusrec IN (1,2)
-        AND ($3::int IS NULL OR empresarec = $3::int)
-      GROUP BY clienterec
+    WITH base AS (
+      SELECT
+        rec.clienterec AS codigo,
+        rec.dataemissaorec,
+        rec.valorduplicatarec,
+        COALESCE(NULLIF(cli.fantasiacli,''), NULLIF(cli.nomecli,''), 'Sem nome') AS nome,
+        CASE
+          WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 14
+            THEN 'cnpj:' || left(regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g'), 8)
+          WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 11
+            THEN 'cpf:' || regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g')
+          ELSE 'codigo:' || rec.clienterec::text
+        END AS identidade_cliente
+      FROM financeiro.receber rec
+      LEFT JOIN LATERAL (
+        SELECT nomecli, fantasiacli, cnpjcpfcli
+        FROM gerais.clientes WHERE codigocli = rec.clienterec LIMIT 1
+      ) cli ON true
+      WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
+        AND rec.statusrec IN (1,2)
+        AND ($3::int IS NULL OR rec.empresarec = $3::int)
+    ),
+    top10 AS (
+      SELECT identidade_cliente, SUM(valorduplicatarec) AS total
+      FROM base
+      GROUP BY identidade_cliente
       ORDER BY total DESC
       LIMIT 10
     ),
     monthly AS (
       SELECT
-        rec.clienterec AS codigo,
-        date_trunc('month', rec.dataemissaorec::date)::date AS mes,
-        SUM(rec.valorduplicatarec) AS valor
-      FROM financeiro.receber rec
-      INNER JOIN top10 t ON t.codigo = rec.clienterec
-      WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
-        AND rec.statusrec IN (1,2)
-        AND ($3::int IS NULL OR rec.empresarec = $3::int)
-      GROUP BY rec.clienterec, mes
+        b.identidade_cliente AS codigo,
+        (array_agg(b.nome ORDER BY b.valorduplicatarec DESC))[1] AS nome,
+        date_trunc('month', b.dataemissaorec::date)::date AS mes,
+        SUM(b.valorduplicatarec) AS valor
+      FROM base b
+      INNER JOIN top10 t ON t.identidade_cliente = b.identidade_cliente
+      GROUP BY b.identidade_cliente, mes
     )
     SELECT
       m.codigo,
-      COALESCE(NULLIF(cli.fantasiacli,''), NULLIF(cli.nomecli,''), 'Sem nome') AS nome,
+      m.nome,
       m.mes,
       m.valor
     FROM monthly m
-    LEFT JOIN LATERAL (
-      SELECT nomecli, fantasiacli
-      FROM gerais.clientes
-      WHERE codigocli = m.codigo
-      LIMIT 1
-    ) cli ON true
     ORDER BY m.mes, m.valor DESC
   `;
 
@@ -313,7 +419,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
     dbClient.release();
   }
 
-  const allClients = clientsRes.rows;
+  const allClients = consolidateClientBranches(clientsRes.rows);
 
   // ── Summary calculations ──────────────────────────────────────────────────
   const withBilling = allClients.filter(c => num(c.total_periodo) > 0);
@@ -347,6 +453,10 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
       codigo: c.codigo,
       nome: c.nome || "Sem identificação",
       documento: c.documento,
+      documentoRaiz: c.documento_raiz,
+      identidadeCliente: c.identidade_cliente,
+      quantidadeFiliais: c.quantidade_filiais,
+      filiais: c.filiais,
       ultimoFaturamento: dateOnly(c.ultimo_global),
       primeiroFaturamento: dateOnly(c.primeiro),
       totalPeriodo: total,
@@ -377,17 +487,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const hasInactiveMin = Number.isFinite(inactiveMin);
   const hasInactiveMax = Number.isFinite(inactiveMax);
 
-  let filteredClients = mapped.filter(c => c.totalPeriodo > 0);
-  if (status === "ativo") {
-    filteredClients = mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
-  } else if (status === "sem-faturamento") {
-    filteredClients = mapped.filter(c => {
-      const dias = num(c.diasSemFaturar);
-      return c.totalPeriodo === 0
-        && (!hasInactiveMin || dias > inactiveMin)
-        && (!hasInactiveMax || dias <= inactiveMax);
-    });
-  }
+  const filteredClients = filterClientsForView(mapped, { status, inativoMin, inativoMax, incluirSemFaturamento });
 
   // ── Inactive distribution ─────────────────────────────────────────────────
   const inativo30 = allClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 30 && d <= 60; }).length;
