@@ -16,45 +16,110 @@ const viagemColumns = `
   doc_numero_motorista, rota_maps_url, observacoes
 `;
 
-const insertPlaceholders = Array.from({ length: 34 }, (_, index) => `$${index + 1}`).join(", ");
+const insertPlaceholders = Array.from(
+  { length: 34 },
+  (_, index) => `$${index + 1}`,
+).join(", ");
 const updateAssignments = viagemColumns
   .split(",")
   .map((column, index) => `${column.trim()} = $${index + 1}`)
   .join(", ");
 const viagemParamCount = viagemColumns.split(",").length;
 const AUDIT_TABLE = () => tableName("cadastro_cotacao_frete_auditoria");
-const APPROVAL_STATUSES = new Set(["rascunho", "aguardando_aprovacao", "aprovada", "correcao_solicitada", "reprovada", "cancelada"]);
-const COMMERCIAL_FIELDS = ["cliente", "cliente_final", "cidade_origem", "uf_origem", "cidade_destino", "uf_destino", "valor_cliente", "valor_motorista", "material", "peso_kg", "vendedor", "tomador_servico", "condicao_pagamento", "km_viagem"];
-const COMMERCIAL_NUMERIC_FIELDS = new Set(["valor_cliente", "valor_motorista", "peso_kg", "km_viagem"]);
-const canApprove = user => Boolean(user?.admin || user?.permissions?.["aprovar-viagens"]);
+const APPROVAL_STATUSES = new Set([
+  "rascunho",
+  "aguardando_aprovacao",
+  "aprovada",
+  "correcao_solicitada",
+  "reprovada",
+  "cancelada",
+]);
+const COMMERCIAL_FIELDS = [
+  "cliente",
+  "cliente_final",
+  "cidade_origem",
+  "uf_origem",
+  "cidade_destino",
+  "uf_destino",
+  "valor_cliente",
+  "valor_motorista",
+  "material",
+  "peso_kg",
+  "vendedor",
+  "tomador_servico",
+  "condicao_pagamento",
+  "km_viagem",
+];
+const SELLER_BY_LOGIN = {
+  maicon: "MAICON STEINBACH",
+  mauricio: "MAURICIO STEINBACK",
+};
+const COMMERCIAL_NUMERIC_FIELDS = new Set([
+  "valor_cliente",
+  "valor_motorista",
+  "peso_kg",
+  "km_viagem",
+]);
+const canApprove = (user) =>
+  Boolean(user?.admin || user?.permissions?.["aprovar-viagens"]);
 
-async function auditViagem(client, viagemId, action, before, after, user, reason = null) {
+async function auditViagem(
+  client,
+  viagemId,
+  action,
+  before,
+  after,
+  user,
+  reason = null,
+) {
   const audit = userAudit(user);
-  await client.query(`INSERT INTO ${AUDIT_TABLE()} (cotacao_id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [viagemId, action, before?.status_aprovacao || null, after?.status_aprovacao || null, before || null, after || null, reason, audit.id, audit.login]);
+  await client.query(
+    `INSERT INTO ${AUDIT_TABLE()} (cotacao_id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [
+      viagemId,
+      action,
+      before?.status_aprovacao || null,
+      after?.status_aprovacao || null,
+      before || null,
+      after || null,
+      reason,
+      audit.id,
+      audit.login,
+    ],
+  );
 }
 
 async function getViagemById(client, id) {
-  const { rows } = await client.query(`
+  const { rows } = await client.query(
+    `
     SELECT *
     FROM ${tableName("cadastro_cotacao_frete")}
     WHERE id = $1
-  `, [id]);
+  `,
+    [id],
+  );
 
   if (!rows.length) return null;
 
-  const { rows: rotas } = await client.query(`
+  const { rows: rotas } = await client.query(
+    `
     SELECT *
     FROM ${tableName("cadastro_cotacao_frete_rotas")}
     WHERE cotacao_id = $1
     ORDER BY ordem, id
-  `, [id]);
+  `,
+    [id],
+  );
 
-  const { rows: documentos } = await client.query(`
+  const { rows: documentos } = await client.query(
+    `
     SELECT *
     FROM ${tableName("cadastro_cotacao_frete_documentos")}
     WHERE cotacao_id = $1
     ORDER BY id
-  `, [id]);
+  `,
+    [id],
+  );
 
   return mapViagem(rows[0], rotas, documentos);
 }
@@ -64,33 +129,45 @@ async function syncSituacaoAfterDocuments(client, viagemId, input = {}) {
   if (!viagem) return null;
   const situacao = calcularSituacaoViagem({
     ...viagem,
-    vehicleOwnershipType: input.vehicleOwnershipType || input.ownershipType || input.tipoPropriedade,
+    vehicleOwnershipType:
+      input.vehicleOwnershipType ||
+      input.ownershipType ||
+      input.tipoPropriedade,
   });
   if (situacao !== viagem.situacao) {
-    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET situacao=$2, atualizado_em=CURRENT_TIMESTAMP WHERE id=$1`, [viagemId, situacao]);
+    await client.query(
+      `UPDATE ${tableName("cadastro_cotacao_frete")} SET situacao=$2, atualizado_em=CURRENT_TIMESTAMP WHERE id=$1`,
+      [viagemId, situacao],
+    );
   }
   return situacao;
 }
 
 async function replaceParadas(client, viagemId, paradas = []) {
-  await client.query(`DELETE FROM ${tableName("cadastro_cotacao_frete_rotas")} WHERE cotacao_id = $1`, [viagemId]);
+  await client.query(
+    `DELETE FROM ${tableName("cadastro_cotacao_frete_rotas")} WHERE cotacao_id = $1`,
+    [viagemId],
+  );
 
   for (const [index, parada] of paradas.entries()) {
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO ${tableName("cadastro_cotacao_frete_rotas")} (
         cotacao_id, ordem, tipo_parada, cidade, uf, cliente, endereco, numero_nota_fiscal, observacoes
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    `, [
-      viagemId,
-      Number(parada.ordem || index + 1),
-      parada.tipo || "entrega",
-      parada.cidade || null,
-      (parada.uf || "").slice(0, 2).toUpperCase() || null,
-      parada.cliente || null,
-      parada.endereco || null,
-      parada.nf || null,
-      parada.obs || null,
-    ]);
+    `,
+      [
+        viagemId,
+        Number(parada.ordem || index + 1),
+        parada.tipo || "entrega",
+        parada.cidade || null,
+        (parada.uf || "").slice(0, 2).toUpperCase() || null,
+        parada.cliente || null,
+        parada.endereco || null,
+        parada.nf || null,
+        parada.obs || null,
+      ],
+    );
   }
 }
 
@@ -104,7 +181,9 @@ function userAudit(user = {}) {
 function normalizeDocumentoFinanceiro(documento = {}) {
   return {
     id: Number(documento.id) || null,
-    tipo: String(documento.tipo || documento.tipoDocumento || "CT-e").trim() || "CT-e",
+    tipo:
+      String(documento.tipo || documento.tipoDocumento || "CT-e").trim() ||
+      "CT-e",
     numero: String(documento.numero || documento.numeroDocumento || "").trim(),
     chave: String(documento.chave || documento.chaveDocumento || "").trim(),
     link: String(documento.link || documento.linkDocumento || "").trim(),
@@ -112,25 +191,40 @@ function normalizeDocumentoFinanceiro(documento = {}) {
   };
 }
 
-async function replaceDocumentosFinanceiros(client, viagemId, documentos = [], user = {}) {
+async function replaceDocumentosFinanceiros(
+  client,
+  viagemId,
+  documentos = [],
+  user = {},
+) {
   const normalized = (Array.isArray(documentos) ? documentos : [])
     .map(normalizeDocumentoFinanceiro)
-    .filter((doc) => doc.tipo || doc.numero || doc.chave || doc.link || doc.observacoes);
+    .filter(
+      (doc) =>
+        doc.tipo || doc.numero || doc.chave || doc.link || doc.observacoes,
+    );
   const ids = normalized.map((doc) => doc.id).filter(Boolean);
   const audit = userAudit(user);
 
   if (ids.length) {
-    await client.query(`
+    await client.query(
+      `
       DELETE FROM ${tableName("cadastro_cotacao_frete_documentos")}
       WHERE cotacao_id = $1 AND id <> ALL($2::int[])
-    `, [viagemId, ids]);
+    `,
+      [viagemId, ids],
+    );
   } else {
-    await client.query(`DELETE FROM ${tableName("cadastro_cotacao_frete_documentos")} WHERE cotacao_id = $1`, [viagemId]);
+    await client.query(
+      `DELETE FROM ${tableName("cadastro_cotacao_frete_documentos")} WHERE cotacao_id = $1`,
+      [viagemId],
+    );
   }
 
   for (const doc of normalized) {
     if (doc.id) {
-      const { rowCount } = await client.query(`
+      const { rowCount } = await client.query(
+        `
         UPDATE ${tableName("cadastro_cotacao_frete_documentos")}
         SET tipo_documento = $3,
             numero_documento = $4,
@@ -141,37 +235,72 @@ async function replaceDocumentosFinanceiros(client, viagemId, documentos = [], u
             atualizado_por_login = $9,
             atualizado_em = CURRENT_TIMESTAMP
         WHERE cotacao_id = $1 AND id = $2
-      `, [viagemId, doc.id, doc.tipo, doc.numero || null, doc.chave || null, doc.link || null, doc.observacoes || null, audit.id, audit.login]);
+      `,
+        [
+          viagemId,
+          doc.id,
+          doc.tipo,
+          doc.numero || null,
+          doc.chave || null,
+          doc.link || null,
+          doc.observacoes || null,
+          audit.id,
+          audit.login,
+        ],
+      );
       if (rowCount) continue;
     }
 
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO ${tableName("cadastro_cotacao_frete_documentos")} (
         cotacao_id, tipo_documento, numero_documento, chave_documento, link_documento, observacoes,
         criado_por_id, criado_por_login, atualizado_por_id, atualizado_por_login
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $7, $8)
-    `, [viagemId, doc.tipo, doc.numero || null, doc.chave || null, doc.link || null, doc.observacoes || null, audit.id, audit.login]);
+    `,
+      [
+        viagemId,
+        doc.tipo,
+        doc.numero || null,
+        doc.chave || null,
+        doc.link || null,
+        doc.observacoes || null,
+        audit.id,
+        audit.login,
+      ],
+    );
   }
 }
 
 function uniq(values = []) {
-  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return [
+    ...new Set(
+      values.map((value) => String(value || "").trim()).filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 }
 
 function accountText(row = {}) {
   const parts = [
     row.driver_bank ? `Banco ${row.driver_bank}` : "",
     row.driver_account_type,
-    row.driver_agency ? `Ag ${row.driver_agency}${row.driver_agency_digit ? `-${row.driver_agency_digit}` : ""}` : "",
-    row.driver_account ? `Conta ${row.driver_account}${row.driver_account_digit ? `-${row.driver_account_digit}` : ""}` : "",
+    row.driver_agency
+      ? `Ag ${row.driver_agency}${row.driver_agency_digit ? `-${row.driver_agency_digit}` : ""}`
+      : "",
+    row.driver_account
+      ? `Conta ${row.driver_account}${row.driver_account_digit ? `-${row.driver_account_digit}` : ""}`
+      : "",
     row.driver_account_operation ? `Op ${row.driver_account_operation}` : "",
   ].filter(Boolean);
   return parts.join(" · ");
 }
 
 function mapVehicleOption(row) {
-  const propriedade = String(row.ownership_type || "").trim().toUpperCase();
-  const ownershipType = propriedade === "T" || propriedade === "TERCEIRO" ? "TERCEIRO" : "FROTA";
+  const propriedade = String(row.ownership_type || "")
+    .trim()
+    .toUpperCase();
+  const ownershipType =
+    propriedade === "T" || propriedade === "TERCEIRO" ? "TERCEIRO" : "FROTA";
   return {
     placa: row.plate || "",
     label: [row.plate, row.name].filter(Boolean).join(" · "),
@@ -205,7 +334,7 @@ function mapDriverOption(row) {
 }
 
 function mapClientOption(row) {
-  const nome = row.name || row.fantasy || "";
+  const nome = row.fantasy || row.name || "";
   return {
     codigo: row.code || null,
     nome,
@@ -219,7 +348,9 @@ function mapClientOption(row) {
     vendedor: row.seller_name || "",
     cidade: row.city || "",
     uf: row.state || "",
-    endereco: [row.address, row.address_number, row.district].filter(Boolean).join(", "),
+    endereco: [row.address, row.address_number, row.district]
+      .filter(Boolean)
+      .join(", "),
     cep: row.zip_code || "",
   };
 }
@@ -236,7 +367,9 @@ function mapSellerOption(row) {
 
 async function loadClientOptions(search = "") {
   const like = `%${String(search || "").trim()}%`;
-  const { rows } = await clientPool.query(`
+  const digits = String(search || "").replace(/\D/g, "");
+  const { rows } = await clientPool.query(
+    `
     SELECT
       codigocli AS code,
       nomecli AS name,
@@ -263,16 +396,25 @@ async function loadClientOptions(search = "") {
     LEFT JOIN localidades.estados estados
       ON estados.codigoest = cidades.estadocid
     WHERE NULLIF(TRIM(clientes.nomecli::text), '') IS NOT NULL
-      AND ($1::text = '%%' OR CONCAT_WS(' ', clientes.nomecli, clientes.fantasiacli, clientes.cnpjcpfcli, clientes.codigocli::text) ILIKE $1)
-    ORDER BY COALESCE(NULLIF(clientes.fantasiacli, ''), clientes.nomecli)
+      AND (
+        $1::text = '%%'
+        OR CONCAT_WS(' ', clientes.nomecli, clientes.fantasiacli, clientes.cnpjcpfcli, clientes.codigocli::text) ILIKE $1
+        OR ($2::text <> '' AND regexp_replace(COALESCE(clientes.cnpjcpfcli::text, ''), '[^0-9]', '', 'g') LIKE '%' || $2 || '%')
+      )
+    ORDER BY
+      CASE WHEN $2::text <> '' AND regexp_replace(COALESCE(clientes.cnpjcpfcli::text, ''), '[^0-9]', '', 'g') = $2 THEN 0 ELSE 1 END,
+      COALESCE(NULLIF(clientes.fantasiacli, ''), clientes.nomecli)
     LIMIT 80
-  `, [like]);
+  `,
+    [like, digits],
+  );
   return rows.map(mapClientOption);
 }
 
 async function loadSellerOptions(search = "") {
   const like = `%${String(search || "").trim()}%`;
-  const { rows } = await clientPool.query(`
+  const { rows } = await clientPool.query(
+    `
     SELECT DISTINCT
       representantes.codigorep AS code,
       pessoas.nomepes AS name,
@@ -285,13 +427,16 @@ async function loadSellerOptions(search = "") {
       AND ($1::text = '%%' OR CONCAT_WS(' ', pessoas.nomepes, pessoas.fantasiapes, representantes.codigorep::text) ILIKE $1)
     ORDER BY pessoas.nomepes
     LIMIT 80
-  `, [like]);
+  `,
+    [like],
+  );
   return rows.map(mapSellerOption);
 }
 
 async function loadVehicleOptions(search = "") {
   const like = `%${String(search || "").trim()}%`;
-  const { rows } = await clientPool.query(`
+  const { rows } = await clientPool.query(
+    `
     SELECT
       veiculos.placavei AS plate,
       veiculos.nomevei AS name,
@@ -303,7 +448,7 @@ async function loadVehicleOptions(search = "") {
       CONCAT_WS('', NULLIF(motoristas.dddcelularmot::text, ''), NULLIF(motoristas.celularmot::text, '')) AS driver_cellphone,
       CONCAT_WS('', NULLIF(motoristas.dddmot::text, ''), NULLIF(motoristas.telefone1mot::text, '')) AS driver_phone,
       motoristas.cnhmot AS driver_license,
-      NULL::text AS rntrc,
+      COALESCE(NULLIF(TRIM(proprietario_veiculo.rntrcprp), ''), NULLIF(TRIM(proprietario_frota.rntrcprp), ''), NULLIF(TRIM(proprietario_motorista.rntrcprp), '')) AS rntrc,
       motoristas.bancomot AS driver_bank,
       motoristas.tipocontabancariamot AS driver_account_type,
       motoristas.agenciamot AS driver_agency,
@@ -316,25 +461,37 @@ async function loadVehicleOptions(search = "") {
     LEFT JOIN frotas.motoristas motoristas
       ON motoristas.empresamot = veiculos.empresavei
      AND motoristas.codigomot = veiculos.motoristavei
+    LEFT JOIN frotas.proprietarios proprietario_veiculo
+      ON proprietario_veiculo.empresaprp = veiculos.empresavei
+     AND proprietario_veiculo.codigoprp = veiculos.proprietarioveiculovei
+    LEFT JOIN frotas.proprietarios proprietario_frota
+      ON proprietario_frota.empresaprp = veiculos.empresavei
+     AND proprietario_frota.codigoprp = veiculos.proprietariovei
+    LEFT JOIN frotas.proprietarios proprietario_motorista
+      ON proprietario_motorista.empresaprp = motoristas.empresamot
+     AND proprietario_motorista.codigoprp = motoristas.proprietariomot
     WHERE veiculos.placavei IS NOT NULL
       AND COALESCE(veiculos.situacaovei::text, '') <> 'I'
       AND ($1::text = '%%' OR CONCAT_WS(' ', veiculos.placavei, veiculos.nomevei, motoristas.nomemot) ILIKE $1)
     ORDER BY veiculos.placavei
     LIMIT 80
-  `, [like]);
+  `,
+    [like],
+  );
   return rows.map(mapVehicleOption);
 }
 
 async function loadDriverOptions(search = "") {
   const like = `%${String(search || "").trim()}%`;
-  const { rows } = await clientPool.query(`
+  const { rows } = await clientPool.query(
+    `
     SELECT
       codigomot AS code,
       nomemot AS name,
       CONCAT_WS('', NULLIF(dddcelularmot::text, ''), NULLIF(celularmot::text, '')) AS cellphone,
       CONCAT_WS('', NULLIF(dddmot::text, ''), NULLIF(telefone1mot::text, '')) AS phone,
       cnhmot AS driver_license,
-      NULL::text AS rntrc,
+      COALESCE(NULLIF(TRIM(proprietario_motorista.rntrcprp), ''), veiculo_motorista.rntrc) AS rntrc,
       bancomot AS driver_bank,
       tipocontabancariamot AS driver_account_type,
       agenciamot AS driver_agency,
@@ -343,18 +500,36 @@ async function loadDriverOptions(search = "") {
       dvcontabancariamot AS driver_account_digit,
       operacaocontabancariamot AS driver_account_operation,
       chavepixmot AS driver_pix_key
-    FROM frotas.motoristas
-    WHERE nomemot IS NOT NULL
-      AND ($1::text = '%%' OR CONCAT_WS(' ', nomemot, cpfmot, cnhmot) ILIKE $1)
-    ORDER BY nomemot
+    FROM frotas.motoristas motoristas
+    LEFT JOIN frotas.proprietarios proprietario_motorista
+      ON proprietario_motorista.empresaprp = motoristas.empresamot
+     AND proprietario_motorista.codigoprp = motoristas.proprietariomot
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(NULLIF(TRIM(pv.rntrcprp), ''), NULLIF(TRIM(pf.rntrcprp), '')) AS rntrc
+      FROM frotas.veiculos v
+      LEFT JOIN frotas.proprietarios pv
+        ON pv.empresaprp = v.empresavei AND pv.codigoprp = v.proprietarioveiculovei
+      LEFT JOIN frotas.proprietarios pf
+        ON pf.empresaprp = v.empresavei AND pf.codigoprp = v.proprietariovei
+      WHERE v.empresavei = motoristas.empresamot AND v.motoristavei = motoristas.codigomot
+        AND COALESCE(v.situacaovei::text, '') <> 'I'
+      ORDER BY v.placavei
+      LIMIT 1
+    ) veiculo_motorista ON TRUE
+    WHERE motoristas.nomemot IS NOT NULL
+      AND ($1::text = '%%' OR CONCAT_WS(' ', motoristas.nomemot, motoristas.cpfmot, motoristas.cnhmot) ILIKE $1)
+    ORDER BY motoristas.nomemot
     LIMIT 80
-  `, [like]);
+  `,
+    [like],
+  );
   return rows.map(mapDriverOption);
 }
 
 async function loadLocationOptions(search = "") {
   const like = `%${String(search || "").trim()}%`;
-  const { rows } = await clientPool.query(`
+  const { rows } = await clientPool.query(
+    `
     SELECT DISTINCT
       NULLIF(TRIM(municipioplacavei::text), '') AS cidade,
       NULLIF(TRIM(ufplacavei::text), '') AS uf
@@ -364,8 +539,15 @@ async function loadLocationOptions(search = "") {
       AND ($1::text = '%%' OR CONCAT_WS(' ', municipioplacavei, ufplacavei) ILIKE $1)
     ORDER BY cidade, uf
     LIMIT 80
-  `, [like]);
-  return rows.map((row) => `${row.cidade}/${String(row.uf || "").toUpperCase().slice(0, 2)}`);
+  `,
+    [like],
+  );
+  return rows.map(
+    (row) =>
+      `${row.cidade}/${String(row.uf || "")
+        .toUpperCase()
+        .slice(0, 2)}`,
+  );
 }
 
 async function loadLocalOptions() {
@@ -411,24 +593,41 @@ viagensRouter.get("/viagens/opcoes", async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
     const local = await loadLocalOptions();
-    const [clientes, placas, motoristas, locais, vendedores] = await Promise.all([
-      loadClientOptions(q).catch(() => []),
-      loadVehicleOptions(q).catch(() => []),
-      loadDriverOptions(q).catch(() => []),
-      loadLocationOptions(q).catch(() => []),
-      loadSellerOptions(q).catch(() => []),
-    ]);
+    const [clientes, placas, motoristas, locais, vendedores] =
+      await Promise.all([
+        loadClientOptions(q).catch(() => []),
+        loadVehicleOptions(q).catch(() => []),
+        loadDriverOptions(q).catch(() => []),
+        loadLocationOptions(q).catch(() => []),
+        loadSellerOptions(q).catch(() => []),
+      ]);
 
     res.json({
-      clientes: uniq([...clientes.map((c) => c.nome), ...(local.clientes ?? [])]),
-      clientesFinais: uniq([...clientes.map((c) => c.nome), ...(local.clientes_finais ?? [])]),
-      tomadores: uniq([...clientes.map((c) => c.nome), ...(local.tomadores ?? [])]),
+      clientes: uniq([
+        ...clientes.map((c) => c.nome),
+        ...(local.clientes ?? []),
+      ]),
+      clientesFinais: uniq([
+        ...clientes.map((c) => c.nome),
+        ...(local.clientes_finais ?? []),
+      ]),
+      tomadores: uniq([
+        ...clientes.map((c) => c.nome),
+        ...(local.tomadores ?? []),
+      ]),
       placas: uniq([...placas.map((p) => p.placa), ...(local.placas ?? [])]),
-      motoristas: uniq([...motoristas.map((m) => m.nome), ...(local.motoristas ?? [])]),
+      motoristas: uniq([
+        ...motoristas.map((m) => m.nome),
+        ...(local.motoristas ?? []),
+      ]),
       vendedores: uniq(vendedores.map((v) => v.nome)),
       origens: uniq([...(local.origens ?? []), ...locais]),
       destinos: uniq([...(local.destinos ?? []), ...locais]),
-      paradas: uniq([...(local.paradas ?? []), ...(local.destinos ?? []), ...locais]),
+      paradas: uniq([
+        ...(local.paradas ?? []),
+        ...(local.destinos ?? []),
+        ...locais,
+      ]),
       materiais: local.materiais ?? [],
       detalhes: { clientes, placas, motoristas, vendedores },
     });
@@ -472,10 +671,10 @@ viagensRouter.get("/viagens/opcoes/vendedores", async (req, res, next) => {
 viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
-    if (q.length < 2) return res.json([]);
-    const like = `%${q}%`;
     const digits = q.replace(/\D/g, "");
-    const { rows } = await clientPool.query(`
+    if (!digits) return res.json([]);
+    const { rows } = await clientPool.query(
+      `
       SELECT
         con.empresacon AS empresa,
         con.seriecon AS serie,
@@ -493,29 +692,28 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
         ON nf.empresacnf=con.empresacon AND nf.seriecnf=con.seriecon AND nf.codigocnf=con.codigocon
       LEFT JOIN gerais.clientes cli ON cli.empresacli=con.empresacon AND cli.codigocli=con.clientecon
       WHERE COALESCE(con.statuscon, 0) <> 3
-        AND (
-          con.codigocon::text ILIKE $1 OR con.seriecon ILIKE $1
-          OR COALESCE(con.chavectecon, '') ILIKE $1 OR COALESCE(con.veiculocon, '') ILIKE $1
-          OR nf.notafiscalcnf::text ILIKE $1 OR COALESCE(nf.chavenfecnf, '') ILIKE $1
-          OR ($2 <> '' AND regexp_replace(COALESCE(con.chavectecon, ''), '[^0-9]', '', 'g') LIKE '%' || $2 || '%')
-        )
+        AND con.codigocon::text = LTRIM($1, '0')
       GROUP BY con.empresacon,con.seriecon,con.codigocon,con.dataemissaocon,con.chavectecon,con.veiculocon,cli.fantasiacli,cli.nomecli
       ORDER BY con.dataemissaocon DESC, con.codigocon DESC
       LIMIT 30
-    `, [like, digits]);
-    res.json(rows.map((row) => ({
-      tipo: "CT-e",
-      numero: String(row.numero),
-      chave: row.chave || "",
-      emissao: row.emissao,
-      serie: String(row.serie || ""),
-      placa: row.placa || "",
-      cliente: row.cliente,
-      notas: row.notas || [],
-      chavesNfe: row.chaves_nfe || [],
-      notasDocumentos: row.notas_documentos || [],
-      observacoes: `ERP - CT-e ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
-    })));
+    `,
+      [digits],
+    );
+    res.json(
+      rows.map((row) => ({
+        tipo: "CT-e",
+        numero: String(row.numero),
+        chave: row.chave || "",
+        emissao: row.emissao,
+        serie: String(row.serie || ""),
+        placa: row.placa || "",
+        cliente: row.cliente,
+        notas: row.notas || [],
+        chavesNfe: row.chaves_nfe || [],
+        notasDocumentos: row.notas_documentos || [],
+        observacoes: `ERP - CT-e ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
+      })),
+    );
   } catch (error) {
     next(error);
   }
@@ -537,18 +735,37 @@ viagensRouter.get("/viagens", async (req, res, next) => {
     }
 
     if (req.query.origem) {
-      params.push(`%${String(req.query.origem).trim().toLowerCase().split("/")[0]}%`);
+      params.push(
+        `%${String(req.query.origem).trim().toLowerCase().split("/")[0]}%`,
+      );
       where.push(`lower(coalesce(cidade_origem, '')) LIKE $${params.length}`);
     }
 
+    if (req.query.ufOrigem) {
+      params.push(String(req.query.ufOrigem).trim().toUpperCase().slice(0, 2));
+      where.push(`upper(trim(coalesce(uf_origem, ''))) = $${params.length}`);
+    }
+
     if (req.query.destino) {
-      params.push(`%${String(req.query.destino).trim().toLowerCase().split("/")[0]}%`);
+      params.push(
+        `%${String(req.query.destino).trim().toLowerCase().split("/")[0]}%`,
+      );
       where.push(`lower(coalesce(cidade_destino, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.ufDestino) {
+      params.push(String(req.query.ufDestino).trim().toUpperCase().slice(0, 2));
+      where.push(`upper(trim(coalesce(uf_destino, ''))) = $${params.length}`);
     }
 
     if (req.query.material) {
       params.push(`%${String(req.query.material).trim().toLowerCase()}%`);
       where.push(`lower(coalesce(material, '')) LIKE $${params.length}`);
+    }
+
+    if (req.query.vendedor) {
+      params.push(`%${String(req.query.vendedor).trim().toLowerCase()}%`);
+      where.push(`lower(coalesce(vendedor, '')) LIKE $${params.length}`);
     }
 
     if (req.query.dataInicio) {
@@ -589,43 +806,60 @@ viagensRouter.get("/viagens", async (req, res, next) => {
 
     params.push(Math.min(Number(req.query.limit || 300), 1000));
 
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
+      `
       SELECT *
       FROM ${tableName("cadastro_cotacao_frete")} cf
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY data DESC, id DESC
       LIMIT $${params.length}
-    `, params);
+    `,
+      params,
+    );
 
     const ids = rows.map((row) => row.id);
     const rotasByViagem = new Map(ids.map((id) => [id, []]));
     const documentosByViagem = new Map(ids.map((id) => [id, []]));
 
     if (ids.length) {
-      const { rows: rotas } = await pool.query(`
+      const { rows: rotas } = await pool.query(
+        `
         SELECT *
         FROM ${tableName("cadastro_cotacao_frete_rotas")}
         WHERE cotacao_id = ANY($1::int[])
         ORDER BY cotacao_id, ordem, id
-      `, [ids]);
+      `,
+        [ids],
+      );
 
       for (const rota of rotas) {
         rotasByViagem.get(rota.cotacao_id)?.push(rota);
       }
 
-      const { rows: documentos } = await pool.query(`
+      const { rows: documentos } = await pool.query(
+        `
         SELECT *
         FROM ${tableName("cadastro_cotacao_frete_documentos")}
         WHERE cotacao_id = ANY($1::int[])
         ORDER BY cotacao_id, id
-      `, [ids]);
+      `,
+        [ids],
+      );
 
       for (const documento of documentos) {
         documentosByViagem.get(documento.cotacao_id)?.push(documento);
       }
     }
 
-    res.json(rows.map((row) => mapViagem(row, rotasByViagem.get(row.id) || [], documentosByViagem.get(row.id) || [])));
+    res.json(
+      rows.map((row) =>
+        mapViagem(
+          row,
+          rotasByViagem.get(row.id) || [],
+          documentosByViagem.get(row.id) || [],
+        ),
+      ),
+    );
   } catch (error) {
     next(error);
   }
@@ -650,31 +884,66 @@ viagensRouter.get("/viagens/:id", async (req, res, next) => {
 
 viagensRouter.get("/viagens/:id/auditoria", async (req, res, next) => {
   try {
-    const { rows } = await pool.query(`SELECT id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login,criado_em FROM ${AUDIT_TABLE()} WHERE cotacao_id=$1 ORDER BY criado_em DESC,id DESC`, [Number(req.params.id)]);
+    const { rows } = await pool.query(
+      `SELECT id,acao,status_anterior,status_novo,dados_anteriores,dados_novos,motivo,usuario_id,usuario_login,criado_em FROM ${AUDIT_TABLE()} WHERE cotacao_id=$1 ORDER BY criado_em DESC,id DESC`,
+      [Number(req.params.id)],
+    );
     res.json({ auditoria: rows });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 viagensRouter.post("/viagens", async (req, res, next) => {
   const client = await pool.connect();
+  const authenticatedSeller =
+    SELLER_BY_LOGIN[
+      String(req.user?.login || "")
+        .trim()
+        .toLowerCase()
+    ];
+  const payload = authenticatedSeller
+    ? { ...req.body, vendedor: authenticatedSeller }
+    : req.body;
 
   try {
     await client.query("BEGIN");
-    const { rows } = await client.query(`
+    const { rows } = await client.query(
+      `
       INSERT INTO ${tableName("cadastro_cotacao_frete")} (${viagemColumns})
       VALUES (${insertPlaceholders})
       RETURNING id
-    `, viagemParams(req.body));
+    `,
+      viagemParams(payload),
+    );
 
     const audit = userAudit(req.user);
-    await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao='rascunho',criado_por_id=$2,criado_por_login=$3,atualizado_por_id=$2,atualizado_por_login=$3 WHERE id=$1`, [rows[0].id, audit.id, audit.login]);
+    await client.query(
+      `UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao='rascunho',criado_por_id=$2,criado_por_login=$3,atualizado_por_id=$2,atualizado_por_login=$3 WHERE id=$1`,
+      [rows[0].id, audit.id, audit.login],
+    );
 
-    await replaceParadas(client, rows[0].id, req.body.paradas);
-    await replaceDocumentosFinanceiros(client, rows[0].id, req.body.documentosFinanceiros, req.user);
-    await syncSituacaoAfterDocuments(client, rows[0].id, req.body);
+    await replaceParadas(client, rows[0].id, payload.paradas);
+    await replaceDocumentosFinanceiros(
+      client,
+      rows[0].id,
+      payload.documentosFinanceiros,
+      req.user,
+    );
+    await syncSituacaoAfterDocuments(client, rows[0].id, payload);
     const viagem = await getViagemById(client, rows[0].id);
-    const raw = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [rows[0].id]);
-    await auditViagem(client, rows[0].id, "criacao", null, raw.rows[0], req.user);
+    const raw = await client.query(
+      `SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`,
+      [rows[0].id],
+    );
+    await auditViagem(
+      client,
+      rows[0].id,
+      "criacao",
+      null,
+      raw.rows[0],
+      req.user,
+    );
     await client.query("COMMIT");
     res.status(201).json(viagem);
   } catch (error) {
@@ -691,22 +960,47 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
 
   try {
     await client.query("BEGIN");
-    const previousResult = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`, [id]);
+    const previousResult = await client.query(
+      `SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`,
+      [id],
+    );
     const previous = previousResult.rows[0];
-    if (!previous) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Viagem nao encontrada." }); }
+    if (!previous) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Viagem nao encontrada." });
+    }
     if (previous.status_aprovacao === "aprovada" && !canApprove(req.user)) {
-      const incoming = Object.fromEntries(viagemColumns.split(",").map((column, index) => [column.trim(), viagemParams(req.body)[index]]));
-      const changed = COMMERCIAL_FIELDS.filter(field => COMMERCIAL_NUMERIC_FIELDS.has(field)
-        ? Number(previous[field] || 0) !== Number(incoming[field] || 0)
-        : String(previous[field] ?? "").trim() !== String(incoming[field] ?? "").trim());
-      if (changed.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A viagem está aprovada. Solicite ao Comercial a reabertura antes de alterar dados comerciais." }); }
+      const incoming = Object.fromEntries(
+        viagemColumns
+          .split(",")
+          .map((column, index) => [
+            column.trim(),
+            viagemParams(req.body)[index],
+          ]),
+      );
+      const changed = COMMERCIAL_FIELDS.filter((field) =>
+        COMMERCIAL_NUMERIC_FIELDS.has(field)
+          ? Number(previous[field] || 0) !== Number(incoming[field] || 0)
+          : String(previous[field] ?? "").trim() !==
+            String(incoming[field] ?? "").trim(),
+      );
+      if (changed.length) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error:
+            "A viagem está aprovada. Solicite ao Comercial a reabertura antes de alterar dados comerciais.",
+        });
+      }
     }
     const editAudit = userAudit(req.user);
-    const { rowCount } = await client.query(`
+    const { rowCount } = await client.query(
+      `
       UPDATE ${tableName("cadastro_cotacao_frete")}
       SET ${updateAssignments}, atualizado_por_id = $${viagemParamCount + 2}, atualizado_por_login = $${viagemParamCount + 3}, atualizado_em = CURRENT_TIMESTAMP
       WHERE id = $${viagemParamCount + 1}
-    `, [...viagemParams(req.body), id, editAudit.id, editAudit.login]);
+    `,
+      [...viagemParams(req.body), id, editAudit.id, editAudit.login],
+    );
 
     if (!rowCount) {
       await client.query("ROLLBACK");
@@ -715,11 +1009,26 @@ viagensRouter.put("/viagens/:id", async (req, res, next) => {
     }
 
     await replaceParadas(client, id, req.body.paradas);
-    await replaceDocumentosFinanceiros(client, id, req.body.documentosFinanceiros, req.user);
+    await replaceDocumentosFinanceiros(
+      client,
+      id,
+      req.body.documentosFinanceiros,
+      req.user,
+    );
     await syncSituacaoAfterDocuments(client, id, req.body);
     const viagem = await getViagemById(client, id);
-    const current = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`, [id]);
-    await auditViagem(client, id, "edicao", previous, current.rows[0], req.user);
+    const current = await client.query(
+      `SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1`,
+      [id],
+    );
+    await auditViagem(
+      client,
+      id,
+      "edicao",
+      previous,
+      current.rows[0],
+      req.user,
+    );
     await client.query("COMMIT");
     res.json(viagem);
   } catch (error) {
@@ -734,38 +1043,110 @@ viagensRouter.post("/viagens/:id/aprovacao", async (req, res, next) => {
   const client = await pool.connect();
   try {
     const id = Number(req.params.id);
-    const action = String(req.body.acao || "").trim().toLowerCase();
+    const action = String(req.body.acao || "")
+      .trim()
+      .toLowerCase();
     const reason = String(req.body.motivo || "").trim();
-    const transitions = { enviar: "aguardando_aprovacao", aprovar: "aprovada", corrigir: "correcao_solicitada", reprovar: "reprovada", reabrir: "correcao_solicitada", cancelar: "cancelada" };
+    const transitions = {
+      enviar: "aguardando_aprovacao",
+      aprovar: "aprovada",
+      corrigir: "correcao_solicitada",
+      reprovar: "reprovada",
+      reabrir: "correcao_solicitada",
+      cancelar: "cancelada",
+    };
     const nextStatus = transitions[action];
-    if (!APPROVAL_STATUSES.has(nextStatus)) return res.status(400).json({ error: "Ação de aprovação inválida." });
-    if (["aprovar", "corrigir", "reprovar", "reabrir"].includes(action) && !canApprove(req.user)) return res.status(403).json({ error: "Apenas Comercial ou administrador pode realizar esta ação." });
-    if (["corrigir", "reprovar", "reabrir", "cancelar"].includes(action) && !reason) return res.status(400).json({ error: "Informe uma justificativa." });
+    if (!APPROVAL_STATUSES.has(nextStatus))
+      return res.status(400).json({ error: "Ação de aprovação inválida." });
+    if (
+      ["aprovar", "corrigir", "reprovar", "reabrir"].includes(action) &&
+      !canApprove(req.user)
+    )
+      return res.status(403).json({
+        error: "Apenas Comercial ou administrador pode realizar esta ação.",
+      });
+    if (
+      ["corrigir", "reprovar", "reabrir", "cancelar"].includes(action) &&
+      !reason
+    )
+      return res.status(400).json({ error: "Informe uma justificativa." });
     await client.query("BEGIN");
-    const previousResult = await client.query(`SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`, [id]);
+    const previousResult = await client.query(
+      `SELECT * FROM ${tableName("cadastro_cotacao_frete")} WHERE id=$1 FOR UPDATE`,
+      [id],
+    );
     const previous = previousResult.rows[0];
-    if (!previous) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Viagem não encontrada." }); }
-    if (action === "enviar" && !["rascunho", "correcao_solicitada", "reprovada"].includes(previous.status_aprovacao)) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Esta viagem não pode ser enviada neste estado." }); }
+    if (!previous) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Viagem não encontrada." });
+    }
+    if (
+      action === "enviar" &&
+      !["rascunho", "correcao_solicitada", "reprovada"].includes(
+        previous.status_aprovacao,
+      )
+    ) {
+      await client.query("ROLLBACK");
+      return res
+        .status(409)
+        .json({ error: "Esta viagem não pode ser enviada neste estado." });
+    }
     if (action === "aprovar") {
-      const missing = [["cliente",previous.cliente],["origem",previous.cidade_origem],["destino",previous.cidade_destino],["material",previous.material],["valor do cliente",Number(previous.valor_cliente)>0]].filter(([,value])=>!value).map(([label])=>label);
-      if (missing.length) { await client.query("ROLLBACK"); return res.status(400).json({ error: `Não é possível aprovar. Faltam: ${missing.join(", ")}.` }); }
+      const missing = [
+        ["cliente", previous.cliente],
+        ["origem", previous.cidade_origem],
+        ["destino", previous.cidade_destino],
+        ["material", previous.material],
+        ["valor do cliente", Number(previous.valor_cliente) > 0],
+      ]
+        .filter(([, value]) => !value)
+        .map(([label]) => label);
+      if (missing.length) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: `Não é possível aprovar. Faltam: ${missing.join(", ")}.`,
+        });
+      }
     }
     const audit = userAudit(req.user);
-    const { rows } = await client.query(`UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao=$2,motivo_aprovacao=$3,aprovado_por_id=CASE WHEN $2='aprovada' THEN $4 ELSE aprovado_por_id END,aprovado_por_login=CASE WHEN $2='aprovada' THEN $5 ELSE aprovado_por_login END,aprovado_em=CASE WHEN $2='aprovada' THEN NOW() ELSE aprovado_em END,atualizado_por_id=$4,atualizado_por_login=$5,atualizado_em=NOW() WHERE id=$1 RETURNING *`, [id, nextStatus, reason || null, audit.id, audit.login]);
-    await auditViagem(client, id, action, previous, rows[0], req.user, reason || null);
+    const { rows } = await client.query(
+      `UPDATE ${tableName("cadastro_cotacao_frete")} SET status_aprovacao=$2,motivo_aprovacao=$3,aprovado_por_id=CASE WHEN $2='aprovada' THEN $4 ELSE aprovado_por_id END,aprovado_por_login=CASE WHEN $2='aprovada' THEN $5 ELSE aprovado_por_login END,aprovado_em=CASE WHEN $2='aprovada' THEN NOW() ELSE aprovado_em END,atualizado_por_id=$4,atualizado_por_login=$5,atualizado_em=NOW() WHERE id=$1 RETURNING *`,
+      [id, nextStatus, reason || null, audit.id, audit.login],
+    );
+    await auditViagem(
+      client,
+      id,
+      action,
+      previous,
+      rows[0],
+      req.user,
+      reason || null,
+    );
     const viagem = await getViagemById(client, id);
     await client.query("COMMIT");
     res.json(viagem);
-  } catch (error) { await client.query("ROLLBACK").catch(()=>{}); next(error); } finally { client.release(); }
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally {
+    client.release();
+  }
 });
 
 viagensRouter.delete("/viagens/:id", async (req, res, next) => {
   try {
-    if (!req.user?.admin) return res.status(403).json({ error: "Exclusão definitiva é restrita ao administrador. Use o cancelamento auditado." });
-    const { rowCount } = await pool.query(`
+    if (!req.user?.admin)
+      return res.status(403).json({
+        error:
+          "Exclusão definitiva é restrita ao administrador. Use o cancelamento auditado.",
+      });
+    const { rowCount } = await pool.query(
+      `
       DELETE FROM ${tableName("cadastro_cotacao_frete")}
       WHERE id = $1
-    `, [Number(req.params.id)]);
+    `,
+      [Number(req.params.id)],
+    );
 
     if (!rowCount) {
       res.status(404).json({ error: "Viagem nao encontrada." });
