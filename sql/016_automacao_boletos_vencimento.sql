@@ -180,7 +180,9 @@ SELECT
   cliente_documento,
   cliente_contato,
   email_envio,
-  telefone_envio,
+  NULL::text AS telefone_envio,
+  telefone_envio AS telefone_cliente,
+  TRUE AS modo_teste,
   telefone_1,
   telefone_2,
   data_emissao,
@@ -204,30 +206,35 @@ SELECT
   boleto_agrupado,
   duplicatas_agrupadas,
   CONCAT(
-    'Olá',
-    CASE WHEN cliente_contato IS NOT NULL THEN ' ' || cliente_contato ELSE '' END,
-    ', tudo bem? 😊',
+    'Olá, *',
+    COALESCE(cliente_nome, cliente_razao, 'cliente'),
+    '*! Tudo bem? 😊',
     E'\n\n',
-    'Passando para lembrar que o boleto nº ',
+    'Este é um lembrete sobre o boleto nº *',
     COALESCE(boleto_seu_numero::text, nosso_numero::text, duplicata::text),
-    CASE WHEN boleto_agrupado THEN ' (referente aos títulos ' || duplicatas_agrupadas || ')' ELSE '' END,
-    ', no valor de R$ ',
-    TO_CHAR(valor_aberto, 'FM999G999G999G990D00'),
-    ', ',
+    '*.',
+    E'\n\n',
+    '📅 *Vencimento:* ',
     CASE
-      WHEN tipo_lembrete = 'vence_hoje' THEN 'vence hoje'
-      WHEN tipo_lembrete = 'vence_em_breve' THEN 'vence em ' || dias_para_vencer::text || ' dia(s)'
-      ELSE 'está vencido há ' || ABS(dias_para_vencer)::text || ' dia(s)'
+      WHEN tipo_lembrete = 'vence_hoje' THEN 'hoje'
+      WHEN tipo_lembrete = 'vence_em_breve' AND dias_para_vencer = 1 THEN 'amanhã'
+      WHEN tipo_lembrete = 'vence_em_breve' THEN 'em ' || dias_para_vencer::text || ' dias'
+      WHEN ABS(dias_para_vencer) = 1 THEN 'vencido há 1 dia'
+      ELSE 'vencido há ' || ABS(dias_para_vencer)::text || ' dias'
     END,
-    ' (',
-    TO_CHAR(data_vencimento, 'DD/MM/YYYY'),
-    ').',
+    ' (', TO_CHAR(data_vencimento, 'DD/MM/YYYY'), ')',
+    E'\n',
+    '💰 *Valor:* R$ ',
+    TO_CHAR(valor_aberto, 'FM999G999G999G990D00'),
+    CASE WHEN boleto_agrupado THEN E'\n📄 *Títulos vinculados:* ' || duplicatas_agrupadas ELSE '' END,
     E'\n\n',
     'Caso o pagamento já tenha sido realizado, por favor desconsidere esta mensagem.',
     E'\n\n',
-    'Se você ainda não recebeu o boleto ou estiver com qualquer dúvida, entre em contato com nosso setor financeiro pelo WhatsApp: +55 48 9970-0358.',
+    'Precisa da segunda via do boleto ou ficou com alguma dúvida? Fale com nosso setor financeiro pelo WhatsApp: +55 48 9970-0358.',
     E'\n\n',
-    'Agradecemos a atenção e permanecemos à disposição!'
+    'Atenciosamente,',
+    E'\n',
+    '*Equipe Financeira | Rodobach*'
   ) AS mensagem_sugerida
 FROM agrupada
 WHERE (email_envio IS NOT NULL OR telefone_envio IS NOT NULL)

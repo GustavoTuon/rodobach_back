@@ -15,11 +15,22 @@ function r2(value) {
   return Math.round((num(value) + Number.EPSILON) * 100) / 100;
 }
 
-function documentIdentity(documento, codigo) {
+function documentIdentity(documento, codigo, empresa) {
   const digits = String(documento || "").replace(/\D/g, "");
-  if (digits.length === 14) return { key: `cnpj:${digits.slice(0, 8)}`, type: "cnpj", root: digits.slice(0, 8) };
-  if (digits.length === 11) return { key: `cpf:${digits}`, type: "cpf", root: digits };
-  return { key: `codigo:${codigo}`, type: "codigo", root: null };
+  const repeatedDigits = /^(\d)\1+$/.test(digits);
+  if (digits.length === 14 && !repeatedDigits) return { key: `cnpj:${digits.slice(0, 8)}`, type: "cnpj", root: digits.slice(0, 8) };
+  if (digits.length === 11 && !repeatedDigits) return { key: `cpf:${digits}`, type: "cpf", root: digits };
+  return { key: `cadastro:${rowCompanyKey(empresa)}:${codigo}`, type: "cadastro", root: null };
+}
+
+function rowCompanyKey(empresa) {
+  return empresa == null || empresa === "" ? "geral" : String(empresa);
+}
+
+function isTechnicalClient(row) {
+  const name = String(row.nome || "").trim().toUpperCase();
+  const digits = String(row.documento || "").replace(/\D/g, "");
+  return /^(DESTINATARIO|REMETENTE|NULO)$/.test(name) && (!digits || /^(\d)\1+$/.test(digits));
 }
 
 function dateTime(value) {
@@ -37,7 +48,7 @@ export function consolidateClientBranches(rows = []) {
   ];
 
   for (const row of rows) {
-    const identity = documentIdentity(row.documento, row.codigo);
+    const identity = documentIdentity(row.documento, row.codigo, row.empresa);
     let group = groups.get(identity.key);
     if (!group) {
       group = {
@@ -46,6 +57,7 @@ export function consolidateClientBranches(rows = []) {
         identidade_cliente: identity.key,
         documento_raiz: identity.root,
         tipo_documento: identity.type,
+        cliente_tecnico: isTechnicalClient(row),
         filiais: [],
       };
       groups.set(identity.key, group);
@@ -53,6 +65,7 @@ export function consolidateClientBranches(rows = []) {
 
     for (const field of sumFields) group[field] += num(row[field]);
     group.filiais.push({
+      empresa: row.empresa ?? null,
       codigo: row.codigo,
       nome: row.nome || "Sem identificação",
       documento: row.documento || null,
@@ -330,14 +343,17 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
       SELECT rec.*,
         CASE
           WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 14
+            AND regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g') !~ '^([0-9])\\1+$'
             THEN 'cnpj:' || left(regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g'), 8)
           WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 11
+            AND regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g') !~ '^([0-9])\\1+$'
             THEN 'cpf:' || regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g')
-          ELSE 'codigo:' || rec.clienterec::text
+          ELSE 'cadastro:' || rec.empresarec::text || ':' || rec.clienterec::text
         END AS identidade_cliente
       FROM financeiro.receber rec
       LEFT JOIN LATERAL (
-        SELECT cnpjcpfcli FROM gerais.clientes WHERE codigocli = rec.clienterec LIMIT 1
+        SELECT cnpjcpfcli FROM gerais.clientes WHERE codigocli = rec.clienterec
+        ORDER BY (empresacli = rec.empresarec) DESC, empresacli LIMIT 1
       ) cli ON true
       WHERE rec.dataemissaorec::date >= $1
         AND rec.dataemissaorec::date <= $2
@@ -364,15 +380,18 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
         COALESCE(NULLIF(cli.fantasiacli,''), NULLIF(cli.nomecli,''), 'Sem nome') AS nome,
         CASE
           WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 14
+            AND regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g') !~ '^([0-9])\\1+$'
             THEN 'cnpj:' || left(regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g'), 8)
           WHEN length(regexp_replace(COALESCE(cli.cnpjcpfcli, ''), '[^0-9]', '', 'g')) = 11
+            AND regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g') !~ '^([0-9])\\1+$'
             THEN 'cpf:' || regexp_replace(cli.cnpjcpfcli, '[^0-9]', '', 'g')
-          ELSE 'codigo:' || rec.clienterec::text
+          ELSE 'cadastro:' || rec.empresarec::text || ':' || rec.clienterec::text
         END AS identidade_cliente
       FROM financeiro.receber rec
       LEFT JOIN LATERAL (
         SELECT nomecli, fantasiacli, cnpjcpfcli
-        FROM gerais.clientes WHERE codigocli = rec.clienterec LIMIT 1
+        FROM gerais.clientes WHERE codigocli = rec.clienterec
+        ORDER BY (empresacli = rec.empresarec) DESC, empresacli LIMIT 1
       ) cli ON true
       WHERE rec.dataemissaorec::date >= $1 AND rec.dataemissaorec::date <= $2
         AND rec.statusrec IN (1,2)
@@ -420,15 +439,17 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   }
 
   const allClients = consolidateClientBranches(clientsRes.rows);
+  const businessClients = allClients.filter(c => !c.cliente_tecnico);
 
   // ── Summary calculations ──────────────────────────────────────────────────
-  const withBilling = allClients.filter(c => num(c.total_periodo) > 0);
-  const totalFaturado = withBilling.reduce((s, c) => s + num(c.total_periodo), 0);
+  const allWithBilling = allClients.filter(c => num(c.total_periodo) > 0);
+  const withBilling = businessClients.filter(c => num(c.total_periodo) > 0);
+  const totalFaturado = allWithBilling.reduce((s, c) => s + num(c.total_periodo), 0);
   const totalRecebido = allClients.reduce((s, c) => s + num(c.total_recebido), 0);
   const totalAberto = allClients.reduce((s, c) => s + num(c.total_aberto), 0);
   const totalVencido = allClients.reduce((s, c) => s + num(c.total_vencido), 0);
   const totalInadimplente = allClients.reduce((s, c) => s + num(c.total_inadimplente), 0);
-  const documentosPeriodo = withBilling.reduce((s, c) => s + num(c.lancamentos_periodo), 0);
+  const documentosPeriodo = allWithBilling.reduce((s, c) => s + num(c.lancamentos_periodo), 0);
   const totalAnoAnterior = allClients.reduce((s, c) => s + num(c.total_ano_anterior), 0);
   const documentosAnoAnterior = allClients.reduce((s, c) => s + num(c.documentos_ano_anterior), 0);
   const clientesAtivos = withBilling.length;
@@ -436,7 +457,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const topCliente = withBilling.length > 0 ? withBilling[0] : null;
 
   // ── Map clients with business rules ──────────────────────────────────────
-  const mapped = allClients.map((c) => {
+  const mapped = businessClients.map((c) => {
     const total = num(c.total_periodo);
     const anterior = num(c.total_anterior);
     const totalYoY = num(c.total_ano_anterior);
@@ -490,10 +511,10 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const filteredClients = filterClientsForView(mapped, { status, inativoMin, inativoMax, incluirSemFaturamento });
 
   // ── Inactive distribution ─────────────────────────────────────────────────
-  const inativo30 = allClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 30 && d <= 60; }).length;
-  const inativo60 = allClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 60 && d <= 90; }).length;
-  const inativo90 = allClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 90 && d <= 120; }).length;
-  const inativo120 = allClients.filter(c => num(c.dias_sem_faturar) > 120).length;
+  const inativo30 = businessClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 30 && d <= 60; }).length;
+  const inativo60 = businessClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 60 && d <= 90; }).length;
+  const inativo90 = businessClients.filter(c => { const d = num(c.dias_sem_faturar); return d > 90 && d <= 120; }).length;
+  const inativo120 = businessClients.filter(c => num(c.dias_sem_faturar) > 120).length;
 
   logAnaliseClientes("consulta-consolidada", {
     sql: clientsQuery,

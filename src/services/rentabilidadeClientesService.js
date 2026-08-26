@@ -134,6 +134,7 @@ export const BASE_SQL = `
       MAX(cvf.cidadeorigemcvf) AS cidade_origem,
       MAX(cvf.cidadedestinocvf) AS cidade_destino,
       MAX(NULLIF(TRIM(cvf.veiculocvf::text), '')) AS veiculo_cvf,
+      COALESCE(SUM(GREATEST(COALESCE(cvf.kmfinalcvf, 0) - COALESCE(cvf.kminicialcvf, 0), 0)), 0)::numeric AS km,
       COALESCE(SUM(cvf.valorfretecvf), 0)::numeric AS receita_frete,
       COALESCE(SUM(cvf.valortotalcvf), 0)::numeric AS receita_total_frete,
       COALESCE(SUM(cvf.valorfretemotoristacvf), 0)::numeric AS custo_motorista_frete,
@@ -184,6 +185,7 @@ export const BASE_SQL = `
       con.dataemissaocon::date AS data,
       COALESCE(con.viagemcon, cvf.viagem, con.numeroviagemcon, con.cargacontroleviagemcon) AS viagem,
       COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), cvf.veiculo_cvf) AS placa,
+      COALESCE(cvf.km, 0)::numeric AS km,
       vei.tipopropriedadevei AS tipo_propriedade,
       CASE WHEN vei.tipopropriedadevei::text = 'P' THEN 'Frota' ELSE 'Terceiro' END AS tipo_veiculo,
       con.motoristacon AS motorista_codigo,
@@ -215,6 +217,7 @@ export const BASE_SQL = `
       con.tomadorservicoctecon,
       COALESCE(NULLIF(cli.fantasiacli, ''), NULLIF(cli.nomecli, ''), 'Sem identificacao') AS cliente_nome,
       cli.cnpjcpfcli AS cliente_documento,
+      COALESCE(NULLIF(cliente_operacao.fantasiacli, ''), NULLIF(cliente_operacao.nomecli, ''), 'Sem identificacao') AS cliente_operacao_nome,
       COALESCE(NULLIF(dest_cli.fantasiacli, ''), NULLIF(dest_cli.nomecli, ''), '') AS destinatario_nome,
       COALESCE(NULLIF(exp_cli.fantasiacli, ''), NULLIF(exp_cli.nomecli, ''), '') AS expedidor_nome,
       COALESCE(NULLIF(rec_cli.fantasiacli, ''), NULLIF(rec_cli.nomecli, ''), '') AS recebedor_nome,
@@ -272,6 +275,13 @@ export const BASE_SQL = `
       ORDER BY (empresacli = con.empresacon) DESC, empresacli
       LIMIT 1
     ) cli ON true
+    LEFT JOIN LATERAL (
+      SELECT nomecli, fantasiacli
+      FROM gerais.clientes
+      WHERE codigocli = con.clientecon
+      ORDER BY (empresacli = con.empresacon) DESC, empresacli
+      LIMIT 1
+    ) cliente_operacao ON true
     LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli = con.destinatariocon LIMIT 1) dest_cli ON true
     LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli = con.expedidorcon LIMIT 1) exp_cli ON true
     LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli = con.recebedorcon LIMIT 1) rec_cli ON true
@@ -317,6 +327,11 @@ export const BASE_SQL = `
       COALESCE(cvg.totalpedagiocvg, 0)::numeric AS pedagio,
       COALESCE(cvg.totaldiariascvg, 0)::numeric AS diarias,
       COALESCE(cvg.totaldespesasextrascvg, 0)::numeric AS outros,
+      COALESCE(
+        NULLIF(cvg.kmdiferencacvg, 0),
+        NULLIF(COALESCE(cvg.kmchegadacvg, 0) - COALESCE(cvg.kmsaidacvg, 0), 0),
+        0
+      )::numeric AS km_viagem,
       COALESCE(cvg.valorcomissaomotoristacvg, cvg.totaldespesasvalorcomissaocvg, 0)::numeric AS motorista_viagem,
       cvg.observacaocvg,
       cvg.obsprincipalcvg
@@ -380,6 +395,7 @@ export const BASE_SQL = `
   conhecimento_custos AS (
     SELECT
       cb.*,
+      COALESCE(NULLIF(cb.km, 0), cv.km_viagem, 0)::numeric AS km_cotacao,
       COALESCE(cv.abastecimentos, 0) * CASE WHEN tt.receita_viagem > 0 THEN cb.receita / tt.receita_viagem ELSE 1 / NULLIF(tt.qtd_ctes, 0) END AS custo_abastecimentos,
       COALESCE(cv.despesas, 0) * CASE WHEN tt.receita_viagem > 0 THEN cb.receita / tt.receita_viagem ELSE 1 / NULLIF(tt.qtd_ctes, 0) END AS custo_despesas,
       COALESCE(cv.pedagio, 0) * CASE WHEN tt.receita_viagem > 0 THEN cb.receita / tt.receita_viagem ELSE 1 / NULLIF(tt.qtd_ctes, 0) END AS custo_pedagio,
@@ -438,8 +454,8 @@ export async function getRentabilidadeClientes(filters = {}) {
     SELECT
       id, empresacon, seriecon, codigocon, numero_cte, data, viagem, placa, tipo_propriedade, tipo_veiculo, motorista_codigo, motorista,
       comercial_codigo, comercial,
-      cidade_origem_codigo, cidade_destino_codigo, origem, destino, material,
-      cliente_codigo, cliente_nome, cliente_documento, clientecon, destinatariocon, destinatario_nome,
+      cidade_origem_codigo, cidade_destino_codigo, origem, destino, material, km_cotacao AS km,
+      cliente_codigo, cliente_nome, cliente_documento, cliente_operacao_nome, clientecon, destinatariocon, destinatario_nome,
       expedidorcon, expedidor_nome, recebedorcon, recebedor_nome, tomadorservicoctecon,
       receita, custo_motorista, custo_abastecimentos, custo_despesas, custo_pedagio, custo_diarias,
       custo_manutencao, custo_outros_viagem, custo_total, cartas_frete, observacao_custo
@@ -517,8 +533,10 @@ export async function getRentabilidadeClientes(filters = {}) {
       origem: row.origem || "",
       destino: row.destino || "",
       material: row.material || "",
+      km: r2(row.km),
       clienteCodigo: row.cliente_codigo,
       cliente: row.cliente_nome || "Sem identificacao",
+      clienteOperacao: row.cliente_operacao_nome || "Sem identificacao",
       documento: row.cliente_documento || "",
       receita: r2(receita),
       custo: r2(custo),

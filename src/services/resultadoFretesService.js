@@ -338,8 +338,8 @@ export async function getResultadoFretes(filters = {}) {
       retorno: summarize(documentos.filter((row) => row.direcao === "retorno")),
     },
     comparativoOperacao: {
-      frota: summarize(documentos.filter(row => row.tipoOperacao === "frota")),
-      terceiro: summarize(documentos.filter(row => row.tipoOperacao === "terceiro")),
+      frota: summarize(filtrados.filter(row => row.tipoOperacao === "frota")),
+      terceiro: summarize(filtrados.filter(row => row.tipoOperacao === "terceiro")),
     },
     conciliacaoDre: {
       operacional: operacionalCompleto,
@@ -391,9 +391,9 @@ export async function getResultadoFretes(filters = {}) {
       },
       escopo: "A conciliação usa o período completo e todas as operações, independentemente dos filtros de direção e frota/terceiro.",
     },
-    clientesPorOperacao: compareClientsByOperation(documentos),
+    clientesPorOperacao: compareClientsByOperation(filtrados),
     comerciaisPorMovimento: ["saida", "chegada", "fora", "interno"].flatMap(movimento =>
-      groupBy(documentos.filter(row => row.movimento === movimento), "comercial")
+      groupBy(filtrados.filter(row => row.movimento === movimento), "comercial")
         .map(row => ({ ...row, movimento }))
     ),
     documentos: filtrados.sort((a, b) => String(b.data || "").localeCompare(String(a.data || ""))),
@@ -405,7 +405,7 @@ export async function getResultadoFretes(filters = {}) {
     },
     veiculos: groupVehicles(filtrados),
     filtros: { ...base.filtros, tipoOperacao },
-    pendencias: documentos.filter((row) => row.pendenciaCusto).length,
+    pendencias: filtrados.filter((row) => row.pendenciaCusto).length,
     auditoria: {
       totaisConferem: receitaRecalculada === resumoFiltrado.receita
         && custoRecalculado === resumoFiltrado.custo

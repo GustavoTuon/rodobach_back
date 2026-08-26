@@ -39,6 +39,8 @@ consultaCteRouter.get("/cte/ncm-rateio", async (req, res, next) => {
           COALESCE(nf.pesocnf, 0)::numeric AS peso_nota,
           NULLIF(TRIM(nf.ncmpredominantecnf), '') AS ncm_predominante,
           COALESCE(NULLIF(TRIM(emitente.fantasiacli), ''), NULLIF(TRIM(emitente.nomecli), ''), NULLIF(TRIM(cli.fantasiacli), ''), NULLIF(TRIM(cli.nomecli), ''), 'Nao identificado') AS fornecedor,
+          COALESCE(NULLIF(TRIM(dest.fantasiacli), ''), NULLIF(TRIM(dest.nomecli), ''), 'Nao identificado') AS destinatario,
+          dest.cnpjcpfcli AS destinatario_documento,
           nf.dataemissaocnf AS data_emissao,
           'CT-e vinculado'::text AS origem
         FROM logistica.conhecimentos con
@@ -50,6 +52,13 @@ consultaCteRouter.get("/cte/ncm-rateio", async (req, res, next) => {
           ON cli.empresacli = con.empresacon AND cli.codigocli = con.clientecon
         LEFT JOIN gerais.clientes emitente
           ON regexp_replace(COALESCE(emitente.cnpjcpfcli::text, ''), '[^0-9]', '', 'g') = SUBSTRING(regexp_replace(COALESCE(nf.chavenfecnf, ''), '[^0-9]', '', 'g') FROM 7 FOR 14)
+        LEFT JOIN LATERAL (
+          SELECT destinatario.nomecli, destinatario.fantasiacli, destinatario.cnpjcpfcli
+          FROM gerais.clientes destinatario
+          WHERE destinatario.codigocli = con.destinatariocon
+          ORDER BY (destinatario.empresacli = con.empresacon) DESC, destinatario.empresacli
+          LIMIT 1
+        ) dest ON true
         WHERE ${filtroCte}
           AND ($3::text = '%%' OR CONCAT_WS(' ', emitente.nomecli, emitente.fantasiacli, emitente.cnpjcpfcli, cli.nomecli, cli.fantasiacli, cli.cnpjcpfcli) ILIKE $3)
 
@@ -68,11 +77,20 @@ consultaCteRouter.get("/cte/ncm-rateio", async (req, res, next) => {
           COALESCE(mer.pesobrutomer, mer.pesoliquidomer, 0)::numeric AS peso_nota,
           NULLIF(TRIM(mer.ncmpredominantemer), '') AS ncm_predominante,
           COALESCE(NULLIF(TRIM(cli.fantasiacli), ''), NULLIF(TRIM(cli.nomecli), ''), 'Nao identificado') AS fornecedor,
+          COALESCE(NULLIF(TRIM(dest.fantasiacli), ''), NULLIF(TRIM(dest.nomecli), ''), 'Nao identificado') AS destinatario,
+          dest.cnpjcpfcli AS destinatario_documento,
           mer.dataemissaomer AS data_emissao,
           'XML da NF-e'::text AS origem
         FROM armazem.mercadorias mer
         LEFT JOIN gerais.clientes cli
           ON cli.empresacli = mer.empresamer AND cli.codigocli = mer.emitentemer
+        LEFT JOIN LATERAL (
+          SELECT destinatario.nomecli, destinatario.fantasiacli, destinatario.cnpjcpfcli
+          FROM gerais.clientes destinatario
+          WHERE destinatario.codigocli = mer.destinatariomer
+          ORDER BY (destinatario.empresacli = mer.empresamer) DESC, destinatario.empresacli
+          LIMIT 1
+        ) dest ON true
         WHERE mer.numeromer::text = LTRIM($1, '0')
           AND TRIM(LEADING '0' FROM COALESCE(mer.seriemer, '')) = TRIM(LEADING '0' FROM $2)
           AND ($3::text = '%%' OR CONCAT_WS(' ', cli.nomecli, cli.fantasiacli, cli.cnpjcpfcli) ILIKE $3)`
@@ -107,6 +125,8 @@ consultaCteRouter.get("/cte/ncm-rateio", async (req, res, next) => {
         pesoNota: Number(row.peso_nota || 0),
         ncmPredominante: row.ncm_predominante || "",
         fornecedor: row.fornecedor,
+        destinatario: row.destinatario,
+        destinatarioDocumento: String(row.destinatario_documento || "").trim(),
         dataEmissao: row.data_emissao,
         origem: row.origem,
       })),
