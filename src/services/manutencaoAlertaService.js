@@ -236,5 +236,4 @@ export function startMaintenanceAlertScheduler() {
   const first = setTimeout(execute, 120000);
   const timer = setInterval(execute, 10 * 60000);
   first.unref?.();
-  timer.unref?.();
 }

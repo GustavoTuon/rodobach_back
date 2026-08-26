@@ -100,5 +100,5 @@ export function startEmptyVehicleAlertScheduler() {
   const execute = () => runEmptyVehicleAlerts().catch((error) => console.error("Alerta de veiculo vazio:", error.message));
   const first = setTimeout(execute, 120000);
   const timer = setInterval(execute, Math.max(5, config.statusCargaAlert.intervaloMinutos) * 60000);
-  first.unref?.(); timer.unref?.();
+  first.unref?.();
 }

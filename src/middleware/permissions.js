@@ -6,6 +6,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/pneus(?:\/|$)/, "pneus"],
   [/^\/frota\/multas(?:\/|$)/, "multas-frota"],
   [/^\/manutencao(?:\/|$)/, "manutencao"],
+  [/^\/cargas-viagens-v2(?:\/|$)/, "viagens"],
   [/^\/viagens(?:\/|$)/, "viagens"],
   [/^\/motoristas\/folgas(?:\/|$)/, "folgas-motoristas"],
   [/^\/frota\/status-carga(?:\/|$)/, "status-carga"],

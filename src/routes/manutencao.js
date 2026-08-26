@@ -210,9 +210,18 @@ function mergeHistoricos(systemHistory, manualHistory) {
 }
 
 function pickUltimaManutencao(row, historico = []) {
+  const linked = historico.find((item) =>
+    item.origem === "historico_manutencao_veiculo"
+    && Number(item.automacaoId) === Number(row?.id)
+    && Number(item?.km) > 0
+  );
+  if (linked) return linked;
   const desired = desiredMaintenanceTags(row?.titulo);
   const withKm = historico.filter((item) => Number(item?.km) > 0);
-  const candidates = withKm.filter((item) => item.tags?.some((tag) => desired.includes(tag)));
+  const candidates = withKm.filter((item) =>
+    !item.automacaoId
+    && item.tags?.some((tag) => desired.includes(tag))
+  );
   return candidates[0] || null;
 }
 

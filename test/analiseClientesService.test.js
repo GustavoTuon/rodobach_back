@@ -32,6 +32,20 @@ test("mantem CPFs e cadastros sem documento como clientes separados", () => {
   assert.equal(consolidateClientBranches(rows).length, 4);
 });
 
+test("nao agrupa cadastros tecnicos com documento zerado como se fossem filiais", () => {
+  const rows = [
+    { codigo: 1562, nome: "DESTINATARIO", documento: "00000000000000", total_periodo: 100 },
+    { codigo: 1561, nome: "REMETENTE", documento: "00000000000000", total_periodo: 50 },
+    { codigo: 646, nome: "NULO", documento: "00000000000000", total_periodo: 0 },
+  ];
+
+  const result = consolidateClientBranches(rows);
+
+  assert.equal(result.length, 3);
+  assert.ok(result.every(row => row.tipo_documento === "cadastro"));
+  assert.ok(result.every(row => row.cliente_tecnico));
+});
+
 test("ranking pode incluir clientes sem faturamento sem alterar a visao padrao", () => {
   const rows = [
     { codigo: 1, totalPeriodo: 100, diasSemFaturar: 2 },
