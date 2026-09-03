@@ -135,6 +135,7 @@ class TrafegusSession {
 const session = new TrafegusSession();
 let cache = null;
 let rawSmsById = new Map();
+const historyCache = new Map();
 
 function digits(value) {
   return String(value || "").replace(/\D/g, "");
@@ -226,6 +227,36 @@ export async function getTrafegusDashboard({ force = false } = {}) {
   };
   cache = { cachedAt: Date.now(), payload };
   return payload;
+}
+
+function trafegusDate(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!match) return null;
+  const [, day, month, year, hour = "00", minute = "00", second = "00"] = match;
+  const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}-03:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export async function getTrafegusSmsHistory({ placa, inicio, fim, length = 1000, force = false } = {}) {
+  const normalizedPlate = String(placa || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  const cacheKey = `${normalizedPlate}|${inicio || ""}|${fim || ""}|${length}`;
+  const cached = historyCache.get(cacheKey);
+  if (!force && cached && Date.now() - cached.at < 60_000) return cached.value;
+  const start = inicio ? new Date(`${inicio}T00:00:00-03:00`) : new Date(0);
+  const end = fim ? new Date(`${fim}T23:59:59.999-03:00`) : new Date();
+  const page = await session.dataTable("/solicitacaomonitoramento/getjsondata", {
+    length: Math.min(2000, Math.max(1, Number(length) || 1000)),
+    search: normalizedPlate,
+    orderColumn: 1,
+  });
+  const rows = page.rows.map(normalizeSm).filter((sm) => {
+    if (normalizedPlate && String(sm.placa).replace(/[^A-Z0-9]/gi, "").toUpperCase() !== normalizedPlate) return false;
+    const eventAt = trafegusDate(sm.inicio || sm.previsaoInicio || sm.fim || sm.previsaoFim);
+    return eventAt && eventAt >= start && eventAt <= end;
+  }).sort((a, b) => (trafegusDate(a.inicio || a.previsaoInicio) || 0) - (trafegusDate(b.inicio || b.previsaoInicio) || 0));
+  const value = { totalEncontrado: page.total, inicio: start.toISOString(), fim: end.toISOString(), placa: normalizedPlate, rows };
+  historyCache.set(cacheKey, { at: Date.now(), value });
+  return value;
 }
 
 async function resolveDriverPhone(sm) {

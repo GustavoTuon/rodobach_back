@@ -10,6 +10,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/viagens(?:\/|$)/, "viagens"],
   [/^\/motoristas\/folgas(?:\/|$)/, "folgas-motoristas"],
   [/^\/frota\/status-carga(?:\/|$)/, "status-carga"],
+  [/^\/frota\/ociosidade(?:\/|$)/, "status-carga"],
   [/^\/trafegus(?:\/|$)/, "trafegus"],
   [/^\/oportunidades-retorno(?:\/|$)/, "oportunidades-retorno"],
   [/^\/cte(?:\/|$)/, "consulta-cte"],

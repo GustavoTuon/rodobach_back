@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getStatusCargaFrota } from "../services/statusCargaService.js";
+import { getOciosidadeFrota } from "../services/ociosidadeFrotaService.js";
 import { listEmptyVehicleAlerts, runEmptyVehicleAlerts } from "../services/statusCargaAlertaService.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 
@@ -14,6 +15,18 @@ statusCargaRouter.get("/frota/status-carga", async (req, res, next) => {
       search: req.query.search,
       dias: req.query.dias,
       limit: req.query.limit,
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+statusCargaRouter.get("/frota/ociosidade", async (req, res, next) => {
+  try {
+    res.json(await getOciosidadeFrota({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      placa: req.query.placa,
     }));
   } catch (error) {
     next(error);
