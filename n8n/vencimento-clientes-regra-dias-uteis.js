@@ -34,7 +34,9 @@ const empresa = item.cliente_nome || item.cliente_razao || "cliente";
 const temBoleto = Boolean(item.boleto_codigo || item.nosso_numero);
 const numeroDocumento = item.boleto_seu_numero || item.nosso_numero;
 const titulo = [item.serie, item.duplicata].filter(Boolean).join("-") + (item.parcela ? `/${item.parcela}` : "");
-const identificador = temBoleto ? `boleto nº *${numeroDocumento || titulo}*` : `título *${titulo}*`;
+// Keep the workflow source ASCII-only. Some n8n import/deploy paths can decode
+// literal UTF-8 as Windows-1252, while escapes are interpreted safely by JS.
+const identificador = temBoleto ? `boleto n\u00ba *${numeroDocumento || titulo}*` : `t\u00edtulo *${titulo}*`;
 const valor = Number(item.valor_aberto || 0).toLocaleString("pt-BR", {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
 });
@@ -42,24 +44,24 @@ const data = vencimento.toLocaleDateString("pt-BR", { timeZone: "UTC" });
 const situacao = diasCorridos === 0
   ? "hoje"
   : diasCorridos === 1
-    ? "amanhã"
+    ? "amanh\u00e3"
     : diasCorridos > 1
       ? `em ${diasCorridos} dias`
-      : diasUteisRegra === 1 ? "vencido há 1 dia útil" : `vencido há ${diasUteisRegra} dias úteis`;
+      : diasUteisRegra === 1 ? "vencido h\u00e1 1 dia \u00fatil" : `vencido h\u00e1 ${diasUteisRegra} dias \u00fateis`;
 const titulos = item.boleto_agrupado && item.duplicatas_agrupadas
-  ? `\n📄 *Títulos vinculados:* ${item.duplicatas_agrupadas}`
+  ? `\n\u{1F4C4} *T\u00edtulos vinculados:* ${item.duplicatas_agrupadas}`
   : "";
 
-item.mensagem_sugerida = `Olá, *${empresa}*! Tudo bem? 😊
+item.mensagem_sugerida = `Ol\u00e1, *${empresa}*! Tudo bem? \u{1F60A}
 
-Este é um lembrete sobre o ${identificador}.
+Este \u00e9 um lembrete sobre o ${identificador}.
 
-📅 *Vencimento:* ${situacao} (${data})
-💰 *Valor:* R$ ${valor}${titulos}
+\u{1F4C5} *Vencimento:* ${situacao} (${data})
+\u{1F4B0} *Valor:* R$ ${valor}${titulos}
 
-Caso o pagamento já tenha sido realizado, por favor desconsidere esta mensagem.
+Caso o pagamento j\u00e1 tenha sido realizado, por favor desconsidere esta mensagem.
 
-Precisa da segunda via do boleto ou ficou com alguma dúvida? Fale com nosso setor financeiro pelo WhatsApp: +55 48 9970-0358.
+Precisa da segunda via do boleto ou ficou com alguma d\u00favida? Fale com nosso setor financeiro pelo WhatsApp: +55 48 9970-0358.
 
 Atenciosamente,
 *Equipe Financeira | Rodobach*`;
