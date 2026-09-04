@@ -25,7 +25,18 @@ test("mensagem de boleto vencido usa dias uteis e identidade Rodobach", async ()
   });
   const item = result[0].json;
   assert.match(item.mensagem_sugerida, /Olá, \*Empresa Exemplo Ltda\*! Tudo bem/);
+  assert.match(item.mensagem_sugerida, /😊/);
+  assert.match(item.mensagem_sugerida, /boleto nº/);
+  assert.match(item.mensagem_sugerida, /📅 \*Vencimento:\*/);
+  assert.match(item.mensagem_sugerida, /💰 \*Valor:\*/);
+  assert.match(item.mensagem_sugerida, /📄 \*Títulos vinculados:\*/);
   assert.match(item.mensagem_sugerida, /dias úteis/);
   assert.match(item.mensagem_sugerida, /Títulos vinculados/);
   assert.match(item.mensagem_sugerida, /Equipe Financeira \| Rodobach/);
+  assert.doesNotMatch(item.mensagem_sugerida, /�|\?\?/);
+});
+
+test("fonte do nó n8n é ASCII para não corromper no deploy", async () => {
+  const code = await fs.readFile(new URL("../n8n/vencimento-clientes-regra-dias-uteis.js", import.meta.url), "utf8");
+  assert.equal(/[^\x00-\x7F]/.test(code), false);
 });
