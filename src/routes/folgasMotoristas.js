@@ -5,12 +5,19 @@ import {
   registrarSaida,
   registrarMovimentoFolga,
 } from "../services/folgasMotoristasService.js";
+import { getJornadaMacros } from "../services/jornadaMacrosService.js";
 
 export const folgasMotoristasRouter = Router();
 
 folgasMotoristasRouter.get("/motoristas/folgas", async (req, res, next) => {
   try {
     res.json(await listarMotoristasFolgas(req.query));
+  } catch (error) { next(error); }
+});
+
+folgasMotoristasRouter.get("/motoristas/jornada-macros", async (req, res, next) => {
+  try {
+    res.json(await getJornadaMacros(req.query));
   } catch (error) { next(error); }
 });
 
