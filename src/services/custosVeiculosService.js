@@ -952,6 +952,21 @@ async function queryCostRows(sql, params) {
   return rows;
 }
 
+export async function getFixedCostsByVehicle({ endDate, placas = [] } = {}) {
+  const end = dateOnly(endDate) || new Date().toISOString().slice(0, 10);
+  const start = new Date(`${end}T12:00:00Z`); start.setUTCDate(start.getUTCDate() - 89);
+  const normalizedPlates = [...new Set(placas.map(normalizePlate).filter(Boolean))];
+  const { rows } = await clientPool.query(`
+    ${baseCostCte()}
+    SELECT placa_resolvida AS placa, COALESCE(SUM(valor), 0) AS custo_fixo_90d
+    FROM custos_status
+    WHERE natureza_gerencial = 'fixo'
+      AND ($3::text[] IS NULL OR regexp_replace(UPPER(COALESCE(placa_resolvida, '')), '[^A-Z0-9]', '', 'g') = ANY($3::text[]))
+    GROUP BY placa_resolvida
+  `, [start.toISOString().slice(0, 10), end, normalizedPlates.length ? normalizedPlates : null]);
+  return rows.map((row) => ({ placa: normalizePlate(row.placa), custoFixo90d: money(row.custo_fixo_90d), custoFixoDiario: money(num(row.custo_fixo_90d) / 90) }));
+}
+
 export async function getCustosVeiculos(filters = {}) {
   const period = resolvePeriod({ startDate: filters.startDate || filters.dataInicio, endDate: filters.endDate || filters.dataFim });
   const baseParams = [period.startDate, period.endDate];
