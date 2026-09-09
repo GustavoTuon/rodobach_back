@@ -12,6 +12,31 @@ const num = (value) => Number(value) || 0;
 const money = (value) => Math.round((num(value) + Number.EPSILON) * 100) / 100;
 
 const FINANCING_PATTERN = /(financi|empr[eé]stim|cons[oó]rc)/i;
+const INVESTMENT_PATTERN = /(imobiliz|aquisi[cç][aã]o.*(ve[ií]culo|equipamento|m[aá]quina)|compra.*(ve[ií]culo|equipamento|m[aá]quina)|obra|terreno|ativo permanente)/i;
+const FINANCIAL_PATTERN = /(juros|tarifa banc[aá]ria|taxa banc[aá]ria|iof|aplica[cç][aã]o|resgate|rendimento)/i;
+const NON_OPERATIONAL_PATTERN = /(aporte|s[oó]cio|indeniza[cç][aã]o|venda.*ativo|multa|doa[cç][aã]o|dividendo|distribui[cç][aã]o|retirada.*s[oó]cio)/i;
+
+export function classifyCashMovement(row = {}) {
+  const text = `${row.categoria || ""} ${row.historico || ""}`;
+  if (FINANCING_PATTERN.test(text)) return "financiamentos";
+  if (INVESTMENT_PATTERN.test(text)) return "investimentos";
+  if (FINANCIAL_PATTERN.test(text)) return "financeiro";
+  if (NON_OPERATIONAL_PATTERN.test(text)) return "nao-operacional";
+  return row.tipo === "entrada" ? "entradas-operacionais" : "saidas-operacionais";
+}
+
+export function summarizeCashOperations(rows = []) {
+  const totals = { "entradas-operacionais": 0, "saidas-operacionais": 0, financeiro: 0, investimentos: 0, financiamentos: 0, "nao-operacional": 0 };
+  for (const row of rows) {
+    const group = row.grupoCaixa || classifyCashMovement(row);
+    totals[group] = (totals[group] || 0) + (row.tipo === "entrada" ? num(row.valor) : -num(row.valor));
+  }
+  Object.keys(totals).forEach((key) => { totals[key] = money(totals[key]); });
+  const geracaoOperacional = money(totals["entradas-operacionais"] + totals["saidas-operacionais"]);
+  const fluxoLiquido = money(Object.values(totals).reduce((sum, value) => sum + value, 0));
+  const receitaOperacional = totals["entradas-operacionais"];
+  return { totals, geracaoOperacional, fluxoLiquido, margemCaixaOperacional: receitaOperacional ? money(geracaoOperacional / receitaOperacional * 100) : 0, operacaoLucrativa: geracaoOperacional > 0 };
+}
 
 export function summarizeFutureExpenses(rows = []) {
   const normalized = rows.map((row) => ({
@@ -197,7 +222,11 @@ export async function getFluxoCaixa(filters = {}) {
     ORDER BY pag.datavencimentopag
   `, [company, search]);
 
-  const movements = rows.map((row) => ({ ...row, data: iso(row.data), vencimento: iso(row.vencimento), valor: money(row.valor), diasAtraso: row.vencido && row.vencimento ? Math.max(0, Math.floor((Date.now() - new Date(row.vencimento).getTime()) / 86400000)) : 0 }));
+  const movements = rows.map((row) => {
+    const movement = { ...row, data: iso(row.data), vencimento: iso(row.vencimento), valor: money(row.valor), diasAtraso: row.vencido && row.vencimento ? Math.max(0, Math.floor((Date.now() - new Date(row.vencimento).getTime()) / 86400000)) : 0 };
+    movement.grupoCaixa = classifyCashMovement(movement);
+    return movement;
+  });
   const entradas = money(movements.filter((x) => x.tipo === "entrada").reduce((s, x) => s + x.valor, 0));
   const saidas = money(movements.filter((x) => x.tipo === "saida").reduce((s, x) => s + x.valor, 0));
   const overdueRows = overdueRowsRaw.map((row) => ({ ...row, data: iso(row.data), vencimento: iso(row.vencimento), valor: money(row.valor), diasAtraso: Math.max(0, Math.floor((Date.now() - new Date(row.vencimento).getTime()) / 86400000)) }));
@@ -237,6 +266,7 @@ export async function getFluxoCaixa(filters = {}) {
   };
   overdueRows.sort((a,b) => (b.diasAtraso - a.diasAtraso) || (b.valor - a.valor));
   const futureExpenses = summarizeFutureExpenses(futureRowsRaw);
+  const cashAnalysis = summarizeCashOperations(movements);
   const result = {
     period: range,
     mode,
@@ -247,6 +277,7 @@ export async function getFluxoCaixa(filters = {}) {
     concentration: { clientes: personSummary("entrada"), fornecedores: personSummary("saida") },
     overdue: { quantidade: overdueRows.length, receberQuantidade: overdueRows.filter((x) => x.tipo === "entrada").length, pagarQuantidade: overdueRows.filter((x) => x.tipo === "saida").length, maior: overdueRows.slice().sort((a,b) => b.valor - a.valor)[0] || null, maisAntigo: overdueRows[0] || null, movements: overdueRows },
     futureExpenses,
+    cashAnalysis,
     note: "Saldo acumulado representa apenas a movimentação do período; não inclui saldo bancário inicial.",
   };
   if (!filters._skipComparison) {
@@ -258,7 +289,7 @@ export async function getFluxoCaixa(filters = {}) {
     const previous = comparisonMode ? await getFluxoCaixa({ ...filters, mode: comparisonMode, dataInicio: iso(prevStart), dataFim: iso(prevEnd), _skipComparison: true }) : null;
     const currentComparison = comparisonMode === "realizado" && mode !== "realizado" ? await getFluxoCaixa({ ...filters, mode: "realizado", _skipComparison: true }) : result;
     const variation = (current, old) => old ? money((current - old) / Math.abs(old) * 100) : null;
-    result.comparison = previous ? { basis: "realizado", period: previous.period, entradas: variation(currentComparison.summary.entradas, previous.summary.entradas), saidas: variation(currentComparison.summary.saidas, previous.summary.saidas), saldo: variation(currentComparison.summary.saldo, previous.summary.saldo) } : { basis: null, entradas: null, saidas: null, saldo: null };
+    result.comparison = previous ? { basis: "realizado", period: previous.period, entradas: variation(currentComparison.summary.entradas, previous.summary.entradas), saidas: variation(currentComparison.summary.saidas, previous.summary.saidas), saldo: variation(currentComparison.summary.saldo, previous.summary.saldo), geracaoOperacional: variation(currentComparison.cashAnalysis.geracaoOperacional, previous.cashAnalysis.geracaoOperacional), grupos: Object.fromEntries(Object.keys(currentComparison.cashAnalysis.totals).map((key) => [key, variation(currentComparison.cashAnalysis.totals[key], previous.cashAnalysis.totals[key])])) } : { basis: null, entradas: null, saidas: null, saldo: null, geracaoOperacional: null, grupos: {} };
   }
   return result;
 }
