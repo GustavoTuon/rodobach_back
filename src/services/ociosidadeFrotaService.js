@@ -37,6 +37,7 @@ export function buildSmOperationalIntervals(sms, startDate, endDate, now = new D
       id: gaps.length + 1, placa: sm.placa, inicio: sm.fimIso, fim: next.inicioIso,
       entregaAt: sm.fimIso, proximaOperacaoAt: next.inicioIso, documento: `SM ${sm.id}`,
       proximoDocumento: `SM ${next.id}`, destino: sm.destino || "", cliente: sm.embarcador || "",
+      proximaOrigem: next.origem || next.embarcador || "",
       entregaPrecisa: true, entregaFonte: "fim_sm_trafegus", classificacao: "vazio_provavel",
     });
   }
@@ -134,13 +135,35 @@ export function buildEmptyIntervals(documents, startDate, endDate, now = new Dat
   return intervals.sort((a, b) => b.inicio.localeCompare(a.inicio));
 }
 
-async function loadDocuments(startDate, endDate, plate = "") {
+export function reconcileEmptyInterval(interval, documents) {
+  const evidence = documents.filter((doc) => {
+    if (normalizePlate(doc.placa) !== normalizePlate(interval.placa)) return false;
+    const start = iso(doc.operacao_at);
+    const delivery = iso(doc.entrega_at);
+    // An old document without a usable delivery is not evidence of ongoing cargo forever.
+    if (!delivery || delivery <= start) return start && start >= interval.inicio && start < interval.fim;
+    // A date-only delivery cannot establish an unloading time: keep the whole day uncertain.
+    const end = delivery && delivery > start
+      ? (doc.entrega_precisa ? delivery : new Date(new Date(delivery).getTime() + DAY_MS).toISOString())
+      : interval.fim;
+    return start && start < interval.fim && end > interval.inicio;
+  }).map((doc) => ({
+    codigo: doc.codigo, documento: [doc.serie, doc.numero].filter(Boolean).join("-"),
+    cliente: doc.cliente, destino: [doc.destino_cidade, doc.destino_uf].filter(Boolean).join("/"),
+    emissao: iso(doc.operacao_at), entrega: iso(doc.entrega_at), entregaPrecisa: Boolean(doc.entrega_precisa),
+  }));
+  return { ...interval, documentosERP: evidence, requerConciliacao: evidence.length > 0,
+    classificacao: evidence.length ? "a_conciliar" : interval.classificacao || "vazio_provavel" };
+}
+
+export async function loadDocuments(startDate, endDate, plate = "") {
   const from = new Date(`${startDate}T00:00:00Z`);
   from.setUTCDate(from.getUTCDate() - 45);
   const { rows } = await clientPool.query(`
-    SELECT UPPER(TRIM(con.veiculocon::text)) placa, con.seriecon serie,
+    SELECT con.empresacon empresa, UPPER(TRIM(con.veiculocon::text)) placa, con.seriecon serie,
       COALESCE(con.numeroctecon, con.codigocon) numero, con.codigocon codigo,
       COALESCE(con.datahoracon, con.dataemissaocon::timestamp + COALESCE(con.horaemissaocon::time, TIME '00:00')) operacao_at,
+      con.dataemissaocon::timestamp + COALESCE(con.horaemissaocon::time, TIME '00:00') emissao_documento_at,
       COALESCE(con.datahoraentregacon, con.dataentregacon::timestamp) entrega_at,
       (con.datahoraentregacon IS NOT NULL AND con.datahoraentregacon::time <> TIME '00:00') entrega_precisa,
       destino.nomecid destino_cidade, destino_uf.abreviaturaest destino_uf,
@@ -157,42 +180,6 @@ async function loadDocuments(startDate, endDate, plate = "") {
     ORDER BY con.dataemissaocon, con.codigocon
   `, [from.toISOString().slice(0, 10), endDate, plate ? [normalizePlate(plate)] : PLATES]);
   return rows;
-}
-
-async function enrichOperationalDeliveries(documents, endDate) {
-  const ordered = documents.map((row, index) => ({ ...row, audit_id: index + 1, placa_norm: normalizePlate(row.placa), operacao_iso: iso(row.operacao_at) }))
-    .filter((row) => row.placa_norm && row.operacao_iso);
-  const payload = ordered.map((row) => {
-    const next = ordered.filter((item) => item.placa_norm === row.placa_norm && item.operacao_iso > row.operacao_iso).sort((a, b) => a.operacao_iso.localeCompare(b.operacao_iso))[0];
-    return { id: row.audit_id, placa: row.placa_norm, inicio: row.operacao_iso, fim: next?.operacao_iso || `${endDate}T23:59:59-03:00`, destino: row.destino_cidade || "" };
-  });
-  if (!payload.length) return documents;
-  const schema = quoteIdent(process.env.VEICULOS_DB_SCHEMA || "rodobach");
-  const pool = getVeiculosPool();
-  const [arrivals, macros] = await Promise.all([
-    pool.query(`WITH alvo AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(id int,placa text,inicio timestamptz,fim timestamptz,destino text))
-      SELECT a.id,p.data_hora FROM alvo a LEFT JOIN LATERAL (
-        SELECT m.data_hora FROM ${schema}.veiculos v JOIN ${schema}.mensagens_cb m ON m.veiculo_id=v.veiculo_id
-        WHERE regexp_replace(upper(v.placa),'[^A-Z0-9]','','g')=a.placa AND m.data_hora BETWEEN a.inicio AND a.fim
-          AND upper(trim(m.municipio))=upper(trim(a.destino)) ORDER BY m.data_hora LIMIT 1
-      ) p ON true`, [JSON.stringify(payload)]),
-    pool.query(`WITH alvo AS (SELECT id,placa,inicio,fim FROM jsonb_to_recordset($1::jsonb) AS x(id int,placa text,inicio timestamptz,fim timestamptz,destino text))
-      SELECT a.id,regexp_replace(upper(v.placa),'[^A-Z0-9]','','g') placa,m.data_hora,m.macro_descricao
-      FROM alvo a JOIN ${schema}.veiculos v ON regexp_replace(upper(v.placa),'[^A-Z0-9]','','g')=a.placa
-      JOIN ${schema}.mensagens_cb m ON m.veiculo_id=v.veiculo_id AND m.data_hora BETWEEN a.inicio AND a.fim
-      WHERE upper(m.macro_descricao) LIKE '%CHEGADA NO DESTINO%' ORDER BY m.data_hora`, [JSON.stringify(payload)]),
-  ]);
-  const arrivalById = new Map(arrivals.rows.filter((row) => row.data_hora).map((row) => [Number(row.id), iso(row.data_hora)]));
-  return documents.map((row, index) => {
-    const enriched = ordered.find((item) => item.audit_id === index + 1);
-    if (!enriched) return row;
-    const telemetryArrival = arrivalById.get(index + 1);
-    const macroArrival = macros.rows.find((event) => Number(event.id) === index + 1)?.data_hora;
-    const arrival = telemetryArrival || iso(macroArrival);
-    if (!arrival) return row;
-    const unloadedAt = new Date(new Date(arrival).getTime() + 2 * 3600000).toISOString();
-    return { ...row, entrega_operacional_at: unloadedAt, entrega_precisa: false, entrega_fonte: telemetryArrival ? "telemetria_destino_mais_2h" : "macro_chegada_mais_2h", chegada_operacional_at: arrival };
-  });
 }
 
 async function loadTelemetryMetrics(intervals, basePolygon = null, holidays = []) {
@@ -216,6 +203,13 @@ async function loadTelemetryMetrics(intervals, basePolygon = null, holidays = []
       JOIN ${schema}.mensagens_cb m ON m.veiculo_id=v.veiculo_id AND m.data_hora BETWEEN i.inicio AND i.fim
     )
     SELECT id, COUNT(*)::int amostras, MIN(data_hora) primeira_amostra, MAX(data_hora) ultima_amostra,
+      COUNT(*) FILTER (WHERE odometro>0 AND odometro_anterior>0 AND odometro<odometro_anterior)::int regressoes_odometro,
+      COUNT(*) FILTER (WHERE odometro_anterior>0 AND odometro>0 AND odometro-odometro_anterior>GREATEST(5, EXTRACT(EPOCH FROM data_hora-anterior_at)/3600*140+2))::int saltos_odometro,
+      MIN(odometro) FILTER (WHERE odometro>0) odometro_minimo,
+      MAX(odometro) FILTER (WHERE odometro>0) odometro_maximo,
+      COALESCE(SUM(CASE WHEN anterior_at IS NOT NULL AND velocidade_anterior>=5
+        AND EXTRACT(EPOCH FROM data_hora-anterior_at) BETWEEN 0 AND 7200
+        THEN EXTRACT(EPOCH FROM data_hora-anterior_at)/3600 ELSE 0 END),0) horas_movimento,
       GREATEST(0, COALESCE(MAX(odometro) FILTER (WHERE odometro>0),0)-COALESCE(MIN(odometro) FILTER (WHERE odometro>0),0)) km_odometro,
       COALESCE(SUM(CASE WHEN anterior_at IS NOT NULL AND COALESCE(velocidade_anterior,0)<5
         AND EXTRACT(EPOCH FROM data_hora-anterior_at) BETWEEN 0 AND 7200
@@ -241,6 +235,7 @@ async function loadTelemetryMetrics(intervals, basePolygon = null, holidays = []
 }
 
 export async function getOciosidadeFrota(filters = {}) {
+  // Document experiments are suspended: even legacy requests use SMs only.
   const today = new Date().toISOString().slice(0, 10);
   const endDate = /^\d{4}-\d{2}-\d{2}$/.test(String(filters.endDate || "")) ? filters.endDate : today;
   const fallbackStart = new Date(`${endDate}T00:00:00Z`);
@@ -252,23 +247,11 @@ export async function getOciosidadeFrota(filters = {}) {
   const requestedPlates = filters.placa ? [normalizePlate(filters.placa)] : PLATES;
   const histories = await Promise.all(requestedPlates.map((placa) => getTrafegusSmsHistory({ placa, inicio: startDate, fim: endDate }).catch(() => null)));
   const sms = histories.flatMap((history) => history?.rows || []);
-  const rawDocuments = sms.length ? [] : await loadDocuments(startDate, endDate, filters.placa);
-  const documents = sms.length ? [] : await enrichOperationalDeliveries(rawDocuments, endDate);
-  let intervals = buildEmptyIntervals(documents, startDate, endDate);
-  const rangeStart = new Date(`${startDate}T00:00:00-03:00`).toISOString();
-  const rangeEnd = new Date(`${endDate}T23:59:59-03:00`).toISOString();
-  let loadedIntervals = mergeIntervals(documents.map((doc) => ({ placa: normalizePlate(doc.placa), inicio: iso(doc.operacao_at), fim: iso(doc.chegada_operacional_at) })).filter((item) => item.placa && item.inicio && item.fim && item.fim > item.inicio))
-    .map((item, index) => ({ ...item, id: index + 1, inicio: item.inicio > rangeStart ? item.inicio : rangeStart, fim: item.fim < rangeEnd ? item.fim : rangeEnd }))
-    .filter((item) => item.fim > item.inicio);
-  let confirmedEmptyIntervals = [];
-  let trafegusAvailable = false;
-  if (sms.length) {
-    const smIntervals = buildSmOperationalIntervals(sms, startDate, endDate);
-    loadedIntervals = smIntervals.loaded.map((item, index) => ({ ...item, id: index + 1 }));
-    confirmedEmptyIntervals = smIntervals.confirmedEmpty.map((item, index) => ({ ...item, id: index + 1 }));
-    intervals = smIntervals.gaps;
-    trafegusAvailable = true;
-  }
+  const smIntervals = buildSmOperationalIntervals(sms, startDate, endDate);
+  const loadedIntervals = mergeIntervals(smIntervals.loaded);
+  const confirmedEmptyIntervals = smIntervals.confirmedEmpty.map((item, index) => ({ ...item, id: index + 1 }));
+  const intervals = smIntervals.gaps;
+  const documentosDetalhados = [];
   const overlapIntervals = [];
   for (const loaded of loadedIntervals) for (const empty of intervals) {
     if (loaded.placa !== empty.placa) continue;
@@ -289,11 +272,26 @@ export async function getOciosidadeFrota(filters = {}) {
     const confiancaTelemetria = Number(metric.amostras || 0) < 2 ? "sem telemetria" : coverage >= 0.4 ? "média" : "baixa";
     const confianca = confiancaTelemetria;
     const horasNaBase = Math.min(horasVazio, Number(metric.horas_parado_base || 0));
-    return { ...interval, horasVazio: round(horasVazio), horasParadoVazio: round(Math.min(horasVazio, Math.max(0, Number(metric.horas_parado || 0) - horasNaBase))), horasDescartadasBase: round(horasNaBase), horasParadoDiaUtil: round(metric.horas_parado_dia_util), horasParadoFimSemana: round(metric.horas_parado_fim_semana), horasParadoFeriado: round(metric.horas_parado_feriado), kmVazio: round(metric.km_odometro), amostras: Number(metric.amostras || 0), coberturaPercentual: round(coverage * 100, 0), confianca };
+    return { ...interval, regressoesOdometro: Number(metric.regressoes_odometro || 0), saltosOdometro: Number(metric.saltos_odometro || 0), horasEmMovimento: round(metric.horas_movimento), odometroMinimo: metric.odometro_minimo == null ? null : Number(metric.odometro_minimo), odometroMaximo: metric.odometro_maximo == null ? null : Number(metric.odometro_maximo), kmIncrementosValidos: round(metric.km_vazio), primeiraAmostra: iso(metric.primeira_amostra), ultimaAmostra: iso(metric.ultima_amostra), horasVazio: round(horasVazio), horasParadoVazio: round(Math.min(horasVazio, Math.max(0, Number(metric.horas_parado || 0) - horasNaBase))), horasDescartadasBase: round(horasNaBase), horasParadoDiaUtil: round(metric.horas_parado_dia_util), horasParadoFimSemana: round(metric.horas_parado_fim_semana), horasParadoFeriado: round(metric.horas_parado_feriado), kmVazio: round(metric.km_odometro), amostras: Number(metric.amostras || 0), coberturaPercentual: round(coverage * 100, 0), confianca };
   });
+  for (const row of rows) {
+    row.kmIntervalo = row.kmVazio;
+  }
   const summary = {
+    modo: "sms",
+    documentosIgnorados: 0,
+    kmObservadoIntervalos: round(rows.reduce((sum, row) => sum + row.kmIntervalo, 0)),
+    horasObservadasIntervalos: round(rows.reduce((sum, row) => sum + row.horasVazio, 0)),
+    horasParadoObservadas: round(rows.reduce((sum, row) => sum + row.horasParadoVazio, 0)),
+    horasMovimentoObservadas: round(rows.reduce((sum, row) => sum + row.horasEmMovimento, 0)),
+    horasParadoDiaUtilObservadas: round(rows.reduce((sum, row) => sum + row.horasParadoDiaUtil, 0)),
+    horasParadoFimSemanaObservadas: round(rows.reduce((sum, row) => sum + row.horasParadoFimSemana, 0)),
+    horasParadoFeriadoObservadas: round(rows.reduce((sum, row) => sum + row.horasParadoFeriado, 0)),
+    intervalosConciliar: rows.filter((row) => row.requerConciliacao).length,
+    kmIntervalosConciliar: round(rows.filter((row) => row.requerConciliacao).reduce((sum, row) => sum + row.kmIntervalo, 0)),
     veiculos: new Set(rows.map((row) => row.placa)).size,
     intervalos: rows.length,
+    horasEmMovimento: round(rows.reduce((sum, row) => sum + row.horasEmMovimento, 0)),
     horasVazio: round(rows.reduce((sum, row) => sum + row.horasVazio, 0)),
     horasParadoVazio: round(rows.reduce((sum, row) => sum + row.horasParadoVazio, 0)),
     horasDescartadasBase: round(rows.reduce((sum, row) => sum + row.horasDescartadasBase, 0)),
@@ -328,7 +326,7 @@ export async function getOciosidadeFrota(filters = {}) {
     const kmVazio = group.kmVazio + kmVazioConfirmado;
     const cobertura = group.coberturas.length ? group.coberturas.reduce((a, b) => a + b, 0) / group.coberturas.length : 0;
     const kmNaoClassificado = Math.max(0, kmTotal - kmCarregado - kmVazio);
-    return { placa, kmTotal: round(kmTotal), kmCarregado: round(kmCarregado), kmVazio: round(kmVazio), kmVazioConfirmado: round(kmVazioConfirmado), kmNaoClassificado: round(kmNaoClassificado), percentualVazio: kmTotal ? round(kmVazio / kmTotal * 100, 1) : 0, horasVazio: round(group.horasVazio), horasParadoVazio: round(group.horasParado), percentualParado: group.horasVazio ? round(group.horasParado / group.horasVazio * 100, 0) : 0, coberturaPercentual: round(cobertura, 0), intervalos: group.intervalos };
+    return { placa, requerConciliacao: rows.some((row) => row.placa === placa && (row.requerConciliacao || row.regressoesOdometro || row.saltosOdometro)), kmTotal: round(kmTotal), kmCarregado: round(kmCarregado), kmVazio: round(kmVazio), kmVazioConfirmado: round(kmVazioConfirmado), kmNaoClassificado: round(kmNaoClassificado), percentualVazio: kmTotal ? round(kmVazio / kmTotal * 100, 1) : 0, horasVazio: round(group.horasVazio), horasParadoVazio: round(group.horasParado), percentualParado: group.horasVazio ? round(group.horasParado / group.horasVazio * 100, 0) : 0, coberturaPercentual: round(cobertura, 0), intervalos: group.intervalos };
   }).filter((item) => item.kmTotal || item.intervalos).sort((a, b) => b.kmVazio - a.kmVazio);
   const fixedCosts = await getFixedCostsByVehicle({ endDate, placas: requestedPlates }).catch(() => []);
   const fixedCostByPlate = new Map(fixedCosts.map((item) => [item.placa, item]));
@@ -354,7 +352,7 @@ export async function getOciosidadeFrota(filters = {}) {
   summary.percentualKmVazio = summary.kmTotal ? round((summary.kmVazio + summary.kmVazioConfirmado) / summary.kmTotal * 100, 1) : 0;
   summary.percentualClassificado = summary.kmTotal ? round((summary.kmCarregado + summary.kmVazio + summary.kmVazioConfirmado) / summary.kmTotal * 100, 1) : 0;
   summary.coberturaPercentual = rows.length ? round(rows.reduce((sum, row) => sum + row.coberturaPercentual, 0) / rows.length, 0) : 0;
-  const qualityScore = Math.round(summary.percentualClassificado * .65 + summary.coberturaPercentual * .35);
+  const qualityScore = Math.min(rows.some((row) => row.requerConciliacao || row.regressoesOdometro || row.saltosOdometro) ? 54 : 100, Math.round(summary.percentualClassificado * .65 + summary.coberturaPercentual * .35));
   const qualidade = { score: qualityScore, nivel: qualityScore >= 90 ? "Excelente" : qualityScore >= 75 ? "Boa" : qualityScore >= 55 ? "Regular" : "Insuficiente" };
   const top = ranking[0];
   const insights = [
@@ -363,5 +361,5 @@ export async function getOciosidadeFrota(filters = {}) {
     top ? { nivel: "atencao", titulo: "Maior oportunidade", texto: `${top.placa} lidera com ${round(top.kmVazio, 0)} km vazios no período.` } : null,
     { nivel: qualidade.score >= 75 ? "ok" : "atencao", titulo: "Qualidade da análise", texto: `${qualidade.score}/100 — ${qualidade.nivel}; ${summary.coberturaPercentual}% de cobertura média.` },
   ].filter(Boolean);
-  return { periodo: { startDate, endDate }, summary, qualidade, insights, ranking, rows, calendario: { feriadosNacionais: holidays }, cercaBase: baseGeofence ? { nome: baseGeofence.name, aplicada: true } : { nome: null, aplicada: false }, metodologia: { fonteOperacional: trafegusAvailable ? "SM Trafegus" : "CT-e e telemetria (fallback)", total: "variacao entre o menor e o maior odometro valido da telemetria no periodo", carregado: trafegusAvailable ? "inicio ao fim de cada SM carregada" : "emissao do CT-e ate chegada ao destino confirmada por telemetria ou macro", vazioConfirmado: "inicio ao fim de SM marcada como vazia", vazio: trafegusAvailable ? "fim de uma SM ate o inicio da proxima SM" : "chegada ao destino mais 2h ate a proxima operacao", parado: "intervalos vazios com velocidade abaixo de 5 km/h; periodos dentro da cerca da base sao descartados; lacunas de telemetria maiores que 2h nao sao somadas", naoClassificado: "distancia sem evidencias suficientes para carregado ou vazio" }, filters: { placas: PLATES } };
+  return { periodo: { startDate, endDate }, documentosDetalhados, summary, qualidade, insights, ranking, rows, calendario: { feriadosNacionais: holidays }, cercaBase: baseGeofence ? { nome: baseGeofence.name, aplicada: true } : { nome: null, aplicada: false }, metodologia: { fonteOperacional: "SM Trafegus + telemetria", total: "variacao entre o menor e o maior odometro valido da telemetria no periodo", carregado: "inicio ao fim de cada SM carregada", vazioConfirmado: "inicio ao fim de SM marcada como vazia", vazio: "fim de uma SM ate o inicio da proxima SM", parado: "intervalos vazios com velocidade abaixo de 5 km/h; periodos dentro da cerca da base sao descartados; lacunas de telemetria maiores que 2h nao sao somadas", naoClassificado: "distancia sem evidencias suficientes para carregado ou vazio" }, filters: { placas: PLATES } };
 }

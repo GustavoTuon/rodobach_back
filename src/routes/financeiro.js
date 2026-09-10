@@ -1,3 +1,4 @@
+import {getCustoRastreabilidade} from '../services/custoRastreabilidade.js';
 import { Router } from "express";
 import {
   getAvailableDrivers,
@@ -13,6 +14,7 @@ import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
 import { getRentabilidadeClientes } from "../services/rentabilidadeClientesService.js";
 import {
+  getEvolucaoCustos,
   getAuditoriaCustosVeiculos,
   getCustosVeiculoDetalhe,
   getCustosVeiculos,
@@ -504,6 +506,13 @@ financeiroRouter.get("/financeiro/custos-veiculos/auditoria", async (req, res, n
   }
 });
 
+financeiroRouter.get("/financeiro/custos-veiculos/evolucao", async (req, res, next) => {
+  try { res.json(await getEvolucaoCustos(req.query)); } catch (error) { next(error); }
+});
+
+financeiroRouter.get("/financeiro/custos-veiculos/rastreabilidade", async (req,res,next)=>{
+  try {res.json(await getCustoRastreabilidade(req.query.id));} catch(error){next(error);}
+});
 financeiroRouter.get("/financeiro/custos-veiculos/:placa", async (req, res, next) => {
   try {
     const data = await getCustosVeiculoDetalhe(req.params.placa, {
