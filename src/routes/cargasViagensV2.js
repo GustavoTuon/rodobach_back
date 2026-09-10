@@ -10,9 +10,6 @@ const VIAGENS = () => tableName("viagens_v2");
 const VINCULOS = () => tableName("viagem_cargas_v2");
 const ROTAS = () => tableName("carga_rotas_v2");
 const DOCUMENTOS = () => tableName("carga_documentos_v2");
-const APROVACAO_AUDITORIA = () => tableName("carga_aprovacao_auditoria_v2");
-const APPROVAL_STATUSES = new Set(["rascunho", "aguardando_aprovacao", "aprovada", "correcao_solicitada", "reprovada", "cancelada"]);
-const canApprove = (user) => Boolean(user?.admin || user?.permissions?.["aprovar-viagens"]);
 
 const EMPTY_FINANCIAL = Object.freeze({
   status: "sem_cte",
@@ -739,7 +736,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
       [date(input.data), text(input.cliente, ""), text(input.clienteFinal), text(input.tomadorServico), text(input.vendedor),
         text(input.origem, ""), text(input.ufOrigem, "").slice(0, 2).toUpperCase(), text(input.destino, ""),
         text(input.ufDestino, "").slice(0, 2).toUpperCase(), text(input.material), number(input.peso),
-        number(input.valorCliente), text(input.condicaoPagamento), text(input.observacoes), text(input.statusAprovacao, "rascunho"),
+        number(input.valorCliente), text(input.condicaoPagamento), text(input.observacoes), "rascunho",
         user.id, user.login],
     );
     const id = rows[0].id;
@@ -783,69 +780,9 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
   finally { client.release(); }
 });
 
-cargasViagensV2Router.post("/cargas-viagens-v2/cargas/:id/aprovacao", async (req, res, next) => {
-  const client = await pool.connect();
-  try {
-    const action = text(req.body?.acao, "").toLowerCase();
-    const reason = text(req.body?.motivo, "");
-    const transitions = {
-      enviar: "aguardando_aprovacao",
-      aprovar: "aprovada",
-      corrigir: "correcao_solicitada",
-      reprovar: "reprovada",
-      reabrir: "correcao_solicitada",
-      cancelar: "cancelada",
-    };
-    const nextStatus = transitions[action];
-    if (!APPROVAL_STATUSES.has(nextStatus)) return res.status(400).json({ error: "Acao de aprovacao invalida." });
-    if (["aprovar", "corrigir", "reprovar", "reabrir"].includes(action) && !canApprove(req.user)) {
-      return res.status(403).json({ error: "Apenas Comercial ou administrador pode realizar esta acao." });
-    }
-    if (["corrigir", "reprovar", "reabrir", "cancelar"].includes(action) && !reason) {
-      return res.status(400).json({ error: "Informe uma justificativa." });
-    }
-    await client.query("BEGIN");
-    const currentResult = await client.query(`SELECT * FROM ${CARGAS()} WHERE id=$1 FOR UPDATE`, [req.params.id]);
-    const current = currentResult.rows[0];
-    if (!current) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Carga nao encontrada." });
-    }
-    if (action === "enviar" && !["rascunho", "correcao_solicitada", "reprovada"].includes(current.status_aprovacao)) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ error: "Esta carga nao pode ser enviada neste estado." });
-    }
-    if (action === "aprovar") {
-      const missing = [
-        ["cliente", current.cliente], ["origem", current.cidade_origem],
-        ["destino", current.cidade_destino], ["material", current.material],
-        ["valor do cliente", Number(current.valor_cliente) > 0],
-      ].filter(([, value]) => !value).map(([label]) => label);
-      if (missing.length) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ error: `Nao e possivel aprovar. Faltam: ${missing.join(", ")}.` });
-      }
-    }
-    const user = auditUser(req.user);
-    await client.query(
-      `UPDATE ${CARGAS()} SET status_aprovacao=$2::varchar,motivo_aprovacao=$3,
-       aprovado_por_id=CASE WHEN $2::varchar='aprovada' THEN $4 ELSE aprovado_por_id END,
-       aprovado_por_login=CASE WHEN $2::varchar='aprovada' THEN $5 ELSE aprovado_por_login END,
-       aprovado_em=CASE WHEN $2::varchar='aprovada' THEN NOW() ELSE aprovado_em END,
-       atualizado_por_id=$4,atualizado_por_login=$5,atualizado_em=NOW() WHERE id=$1`,
-      [req.params.id, nextStatus, reason || null, user.id, user.login],
-    );
-    await client.query(
-      `INSERT INTO ${APROVACAO_AUDITORIA()} (carga_id,acao,status_anterior,status_novo,motivo,usuario_id,usuario_login)
-       VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [req.params.id, action, current.status_aprovacao, nextStatus, reason || null, user.id, user.login],
-    );
-    await client.query("COMMIT");
-    const saved = await pool.query(`${cargaSelect()} WHERE c.id=$1`, [req.params.id]);
-    const [item] = await enrichCargasFinancial([mapCarga(saved.rows[0])], req.log);
-    res.json(item);
-  } catch (error) { await client.query("ROLLBACK"); next(error); }
-  finally { client.release(); }
+// Historical approval records are retained, but no longer participate in this workflow.
+cargasViagensV2Router.post("/cargas-viagens-v2/cargas/:id/aprovacao", (_req, res) => {
+  res.status(410).json({ error: "O fluxo de aprovacao foi desativado. Edite e programe a carga diretamente." });
 });
 
 cargasViagensV2Router.delete("/cargas-viagens-v2/cargas/:id", async (req, res, next) => {

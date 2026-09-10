@@ -1,8 +1,8 @@
+import { avaliarOdometros, carregarKmTelemetria } from './kmAbastecimento.js';
 import { clientPool } from "../db/clientPool.js";
 import { getCustosVeiculos } from "./custosVeiculosService.js";
 import { getDreEmpresarial } from "./dreEmpresarialService.js";
 import { getManutencoesVeiculos } from "./manutencoesVeiculosService.js";
-import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
 
 function num(value) {
   const n = Number(value);
@@ -95,8 +95,7 @@ export async function getAbastecimento(filters = {}) {
   const period = resolvePeriod(filters);
   const params = [period.startDate, period.endDate];
   const where = filterClause(filters, params);
-  const telemetria = await getTelemetriaResumoPorPlaca(filters);
-  const telemetriaPorPlaca = new Map(telemetria.byPlate.map((row) => [row.placa, row]));
+  const telemetria = { summary: {}, byPlate: [] };
 
   const baseJoin = `
     FROM frotas.abastecimentos a
@@ -166,7 +165,6 @@ export async function getAbastecimento(filters = {}) {
       ${baseJoin}
       GROUP BY UPPER(TRIM(a.veiculoaba::text)), COALESCE(NULLIF(v.modelovei, ''), NULLIF(v.marcamodelorenavamvei, ''), 'Nao informado')
       ORDER BY total DESC
-      LIMIT 15
     `, params),
     clientPool.query(`
       SELECT COALESCE(NULLIF(v.modelovei, ''), NULLIF(v.marcamodelorenavamvei, ''), 'Nao informado') AS modelo, AVG(NULLIF(a.mediaaba, 0)) AS media, COALESCE(SUM(a.totalaba), 0) AS total, COUNT(DISTINCT UPPER(TRIM(a.veiculoaba::text)))::int AS veiculos
@@ -204,7 +202,8 @@ export async function getAbastecimento(filters = {}) {
     `, params),
     clientPool.query(`
       SELECT
-        a.dataaba::date AS data,
+        a.dataaba AS data,
+        a.kilometragematualaba AS odometro,
         UPPER(TRIM(a.veiculoaba::text)) AS placa,
         a.litrosaba AS litros,
         a.valorlitroaba AS valor_litro_tabela,
@@ -249,48 +248,29 @@ export async function getAbastecimento(filters = {}) {
   const total = money(s.total);
   const desconto = money(s.desconto);
   const litros = money(s.litros);
-  const km = money(s.km);
   const precoMedio = money(s.preco_medio);
   const precoAnterior = money(previous.rows[0]?.preco_medio);
-  const mediaFrota = telemetria.summary.mediaConsumoKmL || (litros > 0 ? money(km / litros) : 0);
-
-  const rankingRows = byVehicle.rows.map((row) => {
-    const placa = row.placa || "Sem placa";
-    const telemetriaPlaca = telemetriaPorPlaca.get(placa);
-    return {
-      placa,
-      modelo: telemetriaPlaca?.modelo || row.modelo || "Nao informado",
-      litros: telemetriaPlaca?.consumoTotalLitros || money(row.litros),
-      total: money(row.total),
-      km: telemetriaPlaca?.distanciaKm || money(row.km),
-      media: telemetriaPlaca?.mediaConsumoKmL || money(row.media),
-      mediaAbastecimento: money(row.media),
-      mediaTelemetria: telemetriaPlaca?.mediaConsumoKmL || 0,
-      consumoTotalTelemetria: telemetriaPlaca?.consumoTotalLitros || 0,
-      kmTelemetria: telemetriaPlaca?.distanciaKm || 0,
-      origemConsumo: telemetriaPlaca ? "telemetria" : "abastecimento",
-      reaisKm: num(row.km) > 0 ? money(row.total / row.km) : money(row.reais_km),
-    };
+  let falhaTelemetria = false;
+  const kmTracker = await carregarKmTelemetria(byVehicle.rows.map(r => r.placa), period).catch(() => {
+    falhaTelemetria = true;
+    return new Map();
   });
-
-  for (const telemetriaPlaca of telemetria.byPlate) {
-    if (rankingRows.some((row) => row.placa === telemetriaPlaca.placa)) continue;
-    rankingRows.push({
-      placa: telemetriaPlaca.placa,
-      modelo: telemetriaPlaca.modelo || "Telemetria",
-      marca: telemetriaPlaca.marca || "",
-      litros: telemetriaPlaca.consumoTotalLitros,
-      total: 0,
-      km: telemetriaPlaca.distanciaKm,
-      media: telemetriaPlaca.mediaConsumoKmL,
-      mediaAbastecimento: 0,
-      mediaTelemetria: telemetriaPlaca.mediaConsumoKmL,
-      consumoTotalTelemetria: telemetriaPlaca.consumoTotalLitros,
-      kmTelemetria: telemetriaPlaca.distanciaKm,
-      origemConsumo: "telemetria",
-      reaisKm: 0,
-    });
-  }
+  const rankingRows = byVehicle.rows.map(row => {
+    const tracker = kmTracker.get(row.placa);
+    const erp = avaliarOdometros(rows.rows.filter(r => r.placa === row.placa).map(r => ({data:r.data, km:r.odometro})), period.startDate, period.endDate, false);
+    const leitura = tracker || erp;
+    const distancia = leitura ? money(leitura.km) : null;
+    return { placa:row.placa, modelo:row.modelo, litros:money(row.litros), total:money(row.total),
+      km:distancia, media:distancia !== null && num(row.litros)>0 ? money(distancia/row.litros) : null,
+      reaisKm:distancia>0 ? money(row.total/distancia) : null,
+      origemConsumo:tracker ? 'telemetria' : erp ? 'erp' : 'indisponivel',
+      leitura, kmTelemetria:tracker ? distancia : 0 };
+  });
+  const validos = rankingRows.filter(r => r.km !== null);
+  const km = money(validos.reduce((sum,r)=>sum+r.km,0));
+  const litrosComKm = validos.reduce((sum,r)=>sum+r.litros,0);
+  const valorComKm = validos.reduce((sum,r)=>sum+r.total,0);
+  const mediaFrota = litrosComKm>0 ? money(km/litrosComKm) : null;
   const postoRows = bySupplier.rows.map((row) => ({
     codigo: row.fornecedor_codigo,
     fornecedor: row.fornecedor,
@@ -353,7 +333,9 @@ export async function getAbastecimento(filters = {}) {
       precoMedio,
       precoMedioPonderado: money(precoMedioPostos),
       km,
-      reaisKm: km > 0 ? money(total / km) : 0,
+      reaisKm: km > 0 ? money(valorComKm / km) : null,
+      fontesKm: { telemetria:rankingRows.filter(r=>r.origemConsumo==="telemetria").length, erp:rankingRows.filter(r=>r.origemConsumo==="erp").length, indisponivel:rankingRows.length-validos.length },
+      falhaTelemetria,
       mediaFrota,
       mediaTelemetria: telemetria.summary.mediaConsumoKmL,
       kmTelemetria: telemetria.summary.distanciaKm,

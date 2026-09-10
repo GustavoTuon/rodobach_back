@@ -1913,3 +1913,13 @@ export async function getCustosVeiculoDetalhe(placa, filters = {}) {
     })),
   };
 }
+
+export async function getEvolucaoCustos(filters = {}) {
+  const period = resolvePeriod(filters);
+  const days = (new Date(period.endDate)-new Date(period.startDate))/86400000;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(period.startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(period.endDate) || !Number.isFinite(days) || days<0 || days>366) throw Object.assign(new Error('Selecione um intervalo de ate 366 dias.'),{status:400});
+  const prior = previousPeriod(period);
+  const where = buildWhere(filters,2);
+  const rows = await queryCostRows(`${baseCostCte()} SELECT * FROM custos_status ${where.clause} ${where.clause ? "AND" : "WHERE"} data::date BETWEEN $1::date AND $2::date ORDER BY data DESC,id`,[prior.startDate,period.endDate,...where.values]);
+  return {period, prior, launches:rows.map(mapLaunch)};
+}
