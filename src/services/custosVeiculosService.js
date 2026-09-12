@@ -1,4 +1,5 @@
 import { clientPool } from "../db/clientPool.js";
+import { abastecimentoFinanceiroMatchSql } from "./abastecimentoFinanceiroSql.js";
 import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
 
 function num(value) {
@@ -78,7 +79,9 @@ function monthLabel(value) {
   return `${label.charAt(0).toUpperCase()}${label.slice(1)}/${String(year).slice(2)}`;
 }
 
-function baseCostCte() {
+// A base financeira e a fonte dos totais. A uniao operacional serve apenas
+// para auditorias comparativas, nunca como parametro das telas.
+export function baseCostCte({ includeOperational = false } = {}) {
   return `
     WITH pagamentos AS (
       SELECT
@@ -197,6 +200,7 @@ function baseCostCte() {
       ) vei_cc ON true
       WHERE pag.datavencimentopag::date >= $1::date
         AND pag.datavencimentopag::date <= $2::date
+        AND pag.statuspag IN (1, 2)
         AND COALESCE(prt.valorrateioprt, 0) <> 0
     ),
     abastecimentos_operacionais AS (
@@ -245,15 +249,10 @@ function baseCostCte() {
       WHERE aba.dataaba::date >= $1::date
         AND aba.dataaba::date <= $2::date
         AND COALESCE(aba.totalaba, 0) <> 0
-        AND (
-          aba.duplicatageradaaba IS NULL
-          OR NOT EXISTS (
-            SELECT 1
-            FROM financeiro.pagar pag
-            WHERE pag.empresapag = COALESCE(aba.empresaaba, pag.empresapag)
-              AND pag.seriepag = COALESCE(aba.seriegeradaaba, aba.serieaba, pag.seriepag)
-              AND pag.duplicatapag = COALESCE(aba.duplicatageradaaba, aba.duplicataaba)
-          )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM financeiro.pagar pag
+          WHERE ${abastecimentoFinanceiroMatchSql()}
         )
     ),
     despesas_viagem_operacionais AS (
@@ -646,6 +645,7 @@ function baseCostCte() {
     ),
     custos_base AS (
       SELECT * FROM rateios
+      ${includeOperational ? `
       UNION ALL
       SELECT * FROM abastecimentos_operacionais
       UNION ALL
@@ -658,6 +658,7 @@ function baseCostCte() {
       SELECT * FROM multas_operacionais
       UNION ALL
       SELECT * FROM pneus_operacionais
+      ` : ""}
     ),
     custos_status AS (
       SELECT
@@ -1010,15 +1011,15 @@ export async function getCustosVeiculos(filters = {}) {
     queryCostRows(`
       ${cte}
       SELECT
-        TO_CHAR(DATE_TRUNC('month', data), 'YYYY-MM') AS mes,
+        TO_CHAR(DATE_TRUNC('month', vencimento), 'YYYY-MM') AS mes,
         COALESCE(SUM(valor), 0) AS custo,
         COALESCE(SUM(valor_pago), 0) AS pago,
         COALESCE(SUM(valor_aberto), 0) AS aberto,
         COALESCE(SUM(CASE WHEN situacao = 'vencido' THEN valor_aberto ELSE 0 END), 0) AS vencido
       FROM custos_status
       ${where.clause}
-      GROUP BY DATE_TRUNC('month', data), TO_CHAR(DATE_TRUNC('month', data), 'YYYY-MM')
-      ORDER BY DATE_TRUNC('month', data)
+      GROUP BY DATE_TRUNC('month', vencimento), TO_CHAR(DATE_TRUNC('month', vencimento), 'YYYY-MM')
+      ORDER BY DATE_TRUNC('month', vencimento)
     `, params),
     queryCostRows(`
       SELECT
@@ -1165,7 +1166,8 @@ export async function getCustosVeiculos(filters = {}) {
           AND pag.parcelapag = prt.parcelaprt
           AND pag.fornecedorpag = prt.fornecedorprt
          WHERE pag.datavencimentopag::date >= $1::date
-           AND pag.datavencimentopag::date <= $2::date) AS financeiro_rateios_periodo,
+           AND pag.datavencimentopag::date <= $2::date
+           AND pag.statuspag IN (1, 2)) AS financeiro_rateios_periodo,
         (SELECT COALESCE(SUM(valor), 0) FROM custos_status) AS base_periodo,
         (SELECT COALESCE(SUM(valor), 0) FROM custos_status ${where.clause}) AS base_filtrada
     `, params),
@@ -1201,12 +1203,9 @@ export async function getCustosVeiculos(filters = {}) {
         (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
           WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
             AND COALESCE(aba.totalaba, 0) <> 0
-            AND aba.duplicatageradaaba IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM financeiro.pagar pag
-              WHERE pag.empresapag = COALESCE(aba.empresaaba, pag.empresapag)
-                AND pag.seriepag = COALESCE(aba.seriegeradaaba, aba.serieaba, pag.seriepag)
-                AND pag.duplicatapag = COALESCE(aba.duplicatageradaaba, aba.duplicataaba)
+              WHERE ${abastecimentoFinanceiroMatchSql()}
             )) AS abastecimentos_ja_no_financeiro,
         (SELECT COUNT(*)::int FROM frotas.abastecimentos aba
           WHERE aba.dataaba::date >= $1::date AND aba.dataaba::date <= $2::date
@@ -1416,7 +1415,7 @@ export async function getCustosVeiculos(filters = {}) {
       },
       fontes: {
         receita: "logistica.conhecimentos (statuscon=2, dataemissaocon, totalcon/valorfretecon, placa em veiculocon).",
-        custo: "financeiro.pagarrateios + financeiro.pagar, com frotas.abastecimentos sem duplicata financeira.",
+        custo: "Contas a pagar com status 1 ou 2 (mesmos status aceitos no DRE), pelo valor rateado e no periodo de vencimento. O DRE usa emissao; registros operacionais nao sao somados aos totais.",
       },
     },
     audit: {
@@ -1459,6 +1458,7 @@ export async function getCustosVeiculos(filters = {}) {
       veiculosTelemetriaParcial: profitRows.filter((row) => row.coberturaTelemetria === "parcial").length,
       veiculosSemTelemetria: profitRows.filter((row) => row.coberturaTelemetria === "indisponivel").length,
       observacoes: [
+        "Custos usam somente contas a pagar com status 1 ou 2 e seus rateios, pela data de vencimento; o DRE usa emissao. Registros operacionais nao entram novamente na soma.",
         "Padrao frota: registros precisam resolver para veiculo com tipopropriedadevei = 'P'; NULL e demais valores sao terceiro.",
         "Centros administrativos sem placa resolvida ficam fora quando o filtro de proprietario e frota/terceiro.",
         "Receita de lucro por veiculo vem de conhecimentos/CT-e, nao de financeiro.receber.",
