@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { clientPool } from "../db/clientPool.js";
 import { parseOfficialPolyline } from "./trafegusRoute.js";
+import {parseElitePosition} from './elitePosition.js';
+import {eliteDistanceFilters,parseEliteDistance} from './eliteDistance.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const legacyEnvPath = path.resolve(moduleDir, "../../../Api-trafegos/.env");
@@ -138,6 +140,46 @@ const session = new TrafegusSession();
 let cache = null;
 let rawSmsById = new Map();
 const historyCache = new Map();
+const positionCache = new Map();
+export async function getTrafegusPosition(smId,placa) {
+  const key=`${smId}|${placa}`,hit=positionCache.get(key);
+  if(hit&&Date.now()-hit.at<60000)return hit.position;
+  const raw=rawSmsById.get(String(smId));
+  if(!raw?.mapaViagem)return null;
+  const url=new URL(raw.mapaViagem);
+  if(url.protocol==='http:'&&url.hostname==='elite.trafegus.com.br')url.protocol='https:';
+  if(url.protocol!=='https:'||url.hostname!=='elite.trafegus.com.br'||!url.pathname.startsWith('/trafeguswebnovo/mapaviagem/'))return null;
+  const response=await fetchWithTimeout(url.href,{redirect:'error'});
+  if(!response.ok)throw new Error(`Posição Elite: HTTP ${response.status}`);
+  const position=parseElitePosition(await response.text(),placa);
+  if(positionCache.size>100)positionCache.clear();
+  positionCache.set(key,{at:Date.now(),position});
+  return position;
+}
+
+const distanceCache = new Map();
+export async function getTrafegusDailyDistance(smId, placa, day) {
+  const raw = rawSmsById.get(String(smId));
+  if (!raw?.veiculoId || String(raw.veiculoPlaca).replace(/[^a-z0-9]/gi,'').toUpperCase() !== placa) return null;
+  const key = `${raw.veiculoId}|${day}`, hit = distanceCache.get(key);
+  if (hit && Date.now()-hit.at < 60000) return hit.value;
+  const filters = eliteDistanceFilters(raw.veiculoId,day);
+  const body = new URLSearchParams({'data[draw]':'1','data[start]':'0','data[length]':'50'});
+  for (const [name,value] of Object.entries(filters)) body.set(`dataFiltro[${name}]`,value);
+  let payload;
+  for (let attempt=0;attempt<2;attempt++) {
+    const response = await session.request('/relatorioquilometro/getjsondata',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body});
+    const text = await response.text();
+    if (attempt===0 && (response.status===401 || response.status===403 || text.includes(LOGIN_FORM_MARKER))) {await session.login();continue;}
+    if (!response.ok) throw new Error(`Quilometragem Elite: HTTP ${response.status}`);
+    payload = JSON.parse(text);
+    break;
+  }
+  const value = parseEliteDistance(payload,raw.veiculoId,placa,day);
+  if (distanceCache.size>200) distanceCache.clear();
+  distanceCache.set(key,{at:Date.now(),value});
+  return value;
+}
 
 function digits(value) {
   return String(value || "").replace(/\D/g, "");

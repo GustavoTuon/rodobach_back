@@ -23,13 +23,13 @@ test('km hoje valida hodômetro, distingue zero de ausência e marca início par
 test('SM ativa não comprova carga; SM vazia tem tempo próprio e conflitos ficam visíveis',()=>{
  const now=new Date('2026-09-14T15:00:00Z');
  const row={estado:'carregado_confirmado',statusFonte:'trafegus'};
- assert.equal(tvLoad(row,{id:1,operacao:'TRANSPORTE'},now).codigo,'conferir');
+ assert.equal(tvLoad(row,{id:1,operacao:'TRANSPORTE'},now).codigo,'sem_confirmacao');
  const empty=tvLoad(row,{operacao:'VAZIO',inicio:'14/09/2026 09:00:00'},now);
  assert.equal(empty.codigo,'vazio');assert.equal(empty.horasVazio,3);
- assert.equal(tvLoad({...row,statusFonte:'automatico'},{operacao:'VAZIO'},now).codigo,'conferir');
+ assert.equal(tvLoad({...row,statusFonte:'automatico'},{operacao:'VAZIO',inicio:'14/09/2026 09:00:00'},now).confirmacaoPendente,true);
  assert.equal(tvLoad({estado:'vazio_sem_operacao'},null,now).horasVazio,null);
- assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'alta',entregaAt:'2026-09-14T12:00:00Z'},null,now).horasVazio,3);
- assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'baixa'},null,now).codigo,'conferir');
+ assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'alta',entregaAt:'2026-09-14T12:00:00Z'},null,now).horasVazio,null);
+ assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'baixa'},null,now).codigo,'sem_confirmacao');
 });
 test('painel TV exige a permissão de status de carga',()=>{
  assert.equal(ROUTE_PERMISSIONS.find(([regex])=>regex.test('/frota/painel-tv'))?.[1],'status-carga');

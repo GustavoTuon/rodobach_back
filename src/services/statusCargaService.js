@@ -2,6 +2,7 @@ import { clientPool } from "../db/clientPool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { quoteIdent } from "../config.js";
 import { getTrafegusDashboard } from "./trafegusService.js";
+import { activeRodobachPlates } from './painelTerceiros.js';
 
 const PLACAS_STATUS_CARGA = [
   "RAA8G18",
@@ -183,6 +184,33 @@ async function getLatestLocations(plates = []) {
   }));
 }
 
+export function pendingDocumentsInOperation(active, pendingDocs = []) {
+  if (!active?.viagem || active.empresaOperacao == null) return [];
+  return pendingDocs.filter(doc => doc.viagem && doc.empresaOperacao != null
+    && String(doc.viagem) === String(active.viagem)
+    && String(doc.empresaOperacao) === String(active.empresaOperacao));
+}
+
+// Evidence for the TV panel: a partial delivery never closes the whole trip.
+export function cargoOperationEvidence(docs = [], now = new Date()) {
+  const valid = docs.filter(doc => !["CANCELADO", "INUTILIZADO", "ANULADO"].includes(doc.statusConhecimento)
+    && Number(doc.pesoKg) > 0 && doc.emissaoAt && new Date(doc.emissaoAt) <= now)
+    .sort((a, b) => new Date(b.saidaAt || b.emissaoAt) - new Date(a.saidaAt || a.emissaoAt));
+  const latest = valid[0];
+  if (!latest) return null;
+  const operation = latest.viagem && latest.empresaOperacao != null
+    ? pendingDocumentsInOperation(latest, valid) : [latest];
+  const pending = operation.filter(doc => !doc.entregaAt || !Number.isFinite(+new Date(doc.entregaAt)) || new Date(doc.entregaAt) > now);
+  const completedAt = pending.length ? null : operation.map(doc => doc.entregaAt)
+    .sort((a, b) => new Date(b) - new Date(a))[0];
+  return {viagem: latest.viagem || null, empresa: latest.empresaOperacao ?? null,
+    inicio: latest.saidaAt || latest.emissaoAt, ultimaEmissao: latest.emissaoAt,
+    pendentes: [...new Set(pending.map(doc => doc.documento))], entregaFinal: completedAt,
+    agrupamentoConhecido: Boolean(latest.viagem && latest.empresaOperacao != null),
+    baixasNaoConfirmadas: operation.filter(doc => !doc.entregaAt && doc.entregaInformadaAt && new Date(doc.entregaInformadaAt) <= now).map(doc => doc.documento),
+    destino: pending[0]?.destino || null};
+}
+
 function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm = null) {
   const activeDocs = docs
     .filter((doc) =>
@@ -244,6 +272,7 @@ function classifyVehicle(vehicle, docs = [], thirdPartyFreights = [], trafegusSm
           ...active,
           trafegusSm,
           trafegusDivergente: true,
+          documentosPendentesOperacao: pendingDocumentsInOperation(active, pendingActiveDocs).map(doc => doc.documento),
           estado: "carregado_confirmado",
           estadoLabel: "Carregado",
           confianca: "media",
@@ -495,7 +524,7 @@ export async function getStatusCargaFrota(filters = {}) {
   const limit = Math.min(Number(filters.limit || 500), 1000);
   const targetPlates = placa
     ? PLACAS_STATUS_CARGA.filter((item) => item === placa)
-    : PLACAS_STATUS_CARGA;
+    : [...PLACAS_STATUS_CARGA];
 
   const vehicleParams = [targetPlates];
   const vehicleWhere = ["COALESCE(v.situacaovei::text, '') <> 'I'", "v.tipopropriedadevei::text = 'P'"];
@@ -507,10 +536,20 @@ export async function getStatusCargaFrota(filters = {}) {
     erro: error?.message || "Trafegus indisponivel",
   }));
 
+  if (filters.includeThirdPartySms && !placa) {
+    const candidates=activeRodobachPlates(trafegusDashboard.sms);
+    const {rows:thirdParty}=await clientPool.query(`SELECT DISTINCT regexp_replace(upper(placavei::text),'[^A-Z0-9]','','g') placa
+      FROM frotas.veiculos WHERE tipopropriedadevei::text='T'
+      AND regexp_replace(upper(placavei::text),'[^A-Z0-9]','','g')=ANY($1::text[])`,[candidates]);
+    targetPlates.push(...thirdParty.map(r=>r.placa).filter(p=>!targetPlates.includes(p)));
+    vehicleWhere[1]="v.tipopropriedadevei::text IN ('P','T')";
+  }
+
   const [vehicleResult, docsResult, pefResult, locations] = await Promise.all([
     clientPool.query(`
       SELECT DISTINCT ON (UPPER(TRIM(v.placavei::text)))
         UPPER(TRIM(v.placavei::text)) AS placa,
+        v.tipopropriedadevei::text AS propriedade,
         v.nomevei AS veiculo,
         COALESCE(NULLIF(v.modelovei, ''), NULLIF(v.marcamodelorenavamvei, ''), 'Nao informado') AS modelo,
         v.anomodelovei AS ano_modelo,
@@ -534,6 +573,7 @@ export async function getStatusCargaFrota(filters = {}) {
       SELECT
         UPPER(TRIM(con.veiculocon::text)) AS placa,
         con.empresacon,
+        con.empresaviagemcon,
         con.seriecon,
         con.codigocon,
         con.numeroctecon,
@@ -550,6 +590,7 @@ export async function getStatusCargaFrota(filters = {}) {
         con.numeroviagemcon,
         con.datahoraentregacon,
         con.dataentregacon,
+        con.dataprevistaentregacon,
         origem.nomecid AS origem_cidade,
         origem_uf.abreviaturaest AS origem_uf,
         destino.nomecid AS destino_cidade,
@@ -694,9 +735,11 @@ export async function getStatusCargaFrota(filters = {}) {
     const saidaAt = rawSaidaAt && emissaoAt && daysBetween(emissaoAt, rawSaidaAt) > 3
       ? dateTimeISO(row.dataemissaocon, row.horaemissaocon)
       : rawSaidaAt;
-    const entregaAt = row.datahoraentregacon
+    const entregaInformadaAt = row.datahoraentregacon
       ? (row.datahoraentregacon.toISOString?.() || String(row.datahoraentregacon))
-      : dateTimeISO(row.dataentregacon, null);
+      : null;
+    // This field mirrors forecast dates in this ERP; only explicit delivery is a completion.
+    const entregaAt = row.dataentregacon ? dateTimeISO(row.dataentregacon, null) : null;
     const rawChegadaViagemAt = dateTimeISO(row.datachegadacvg, row.horachegadacvg);
     const rawEntregaViagemAt = dateTimeISO(row.dataentregavia, row.horaretornovia);
     const chegadaViagemAt = rawChegadaViagemAt
@@ -708,6 +751,7 @@ export async function getStatusCargaFrota(filters = {}) {
     const eventoReferenciaAt = entregaAt || chegadaViagemAt || entregaViagemAt || saidaAt || emissaoAt;
 
     const doc = {
+      empresaOperacao: row.empresaviagemcon ?? row.empresacon,
       documento: [row.seriecon, row.numeroctecon || row.codigocon].filter(Boolean).join("-"),
       codigoConhecimento: row.codigocon,
       chaveCte: row.chavectecon || "",
@@ -721,6 +765,8 @@ export async function getStatusCargaFrota(filters = {}) {
       emissaoAt,
       saidaAt,
       entregaAt,
+      entregaInformadaAt,
+      previsaoEntregaAt: dateOnly(row.dataprevistaentregacon),
       chegadaViagemAt,
       entregaViagemAt,
       eventoReferenciaAt,
@@ -781,6 +827,7 @@ export async function getStatusCargaFrota(filters = {}) {
   let rows = vehicleResult.rows.map((vehicle) => {
     const normalized = {
       placa: normalizePlate(vehicle.placa),
+      tipoFrota: vehicle.propriedade === 'T' ? 'terceiro' : 'proprio',
       veiculo: vehicle.veiculo || "",
       modelo: vehicle.modelo || "",
       anoModelo: vehicle.ano_modelo || null,
@@ -799,6 +846,10 @@ export async function getStatusCargaFrota(filters = {}) {
     const alertaDivergencia = buildDivergenceAlert(classified);
     return {
       ...classified,
+      documentosCarga: (docsByPlate.get(normalized.placa) || [])
+        .filter(doc => !['CANCELADO', 'INUTILIZADO', 'ANULADO'].includes(doc.statusConhecimento))
+        .map(doc => String(doc.chaveCte || `${doc.empresaOperacao ?? ''}:${doc.documento}`)),
+      operacaoCarga: cargoOperationEvidence(docsByPlate.get(normalized.placa) || []),
       alertaDivergencia,
       situacaoOperacional: buildOperationalSituation({ ...classified, alertaDivergencia }),
     };

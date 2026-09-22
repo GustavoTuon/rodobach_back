@@ -24,7 +24,7 @@ statusCargaRouter.post('/frota/painel-tv/confirmacoes',requireAdmin,async(req,re
     const item=data.itens.find(item=>item.placa===input.placa);
     if(!item)return res.status(400).json({error:'Veículo não encontrado no painel.'});
     if(item.contextoCarga!==input.contexto)return res.status(409).json({error:'A operação mudou. Atualize o painel e confira novamente.'});
-    res.status(201).json({registro:await saveCargoConfirmation(input,req.user)});
+    res.status(201).json({registro:await saveCargoConfirmation(input,req.user,item)});
   } catch(error){next(error);}
 });
 statusCargaRouter.delete('/frota/painel-tv/confirmacoes/:id',requireAdmin,async(req,res,next)=>{
