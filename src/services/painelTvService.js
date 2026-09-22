@@ -1,9 +1,12 @@
 import {getStatusCargaFrota} from './statusCargaService.js';
 import {carregarCiclosPorPlaca} from './folgasMotoristasService.js';
-import {getTrafegusDashboard} from './trafegusService.js';
+import {getTrafegusDashboard,getTrafegusSmsHistory,getTrafegusPosition,getTrafegusDailyDistance} from './trafegusService.js';
 import {getVeiculosPool} from '../db/pool-veiculos.js';
 import {quoteIdent} from '../config.js';
 import {cargoContext,withCargoConfirmations} from './painelCargaConfirmacoes.js';
+import {loadCargoMacros,cargoMacroEvidence} from './painelCargaMacros.js';
+import {loadDeliveryGuide,deliveryProgress} from './painelEntregas.js';
+import {isBaseReturn,emptyReturnEvidence} from './retornoVazio.js';
 
 const plate=value=>String(value||'').replace(/[^A-Z0-9]/gi,'').toUpperCase();
 const timestamp=value=>{const match=String(value||'').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);return match?`${match[3]}-${match[2]}-${match[1]}T${match[4]||'00'}:${match[5]||'00'}:${match[6]||'00'}-03:00`:value;};
@@ -68,17 +71,62 @@ export function distanceBySource(points,day){
  return {...best,parcial:best.parcial||combined.km==null||latest-new Date(best.fim)>15*60000,metodo:'sequencia_por_fonte',observacao:'Uma sequência validada; outras fontes e trechos não são somados',duplicatasIgnoradas:combined.duplicatasIgnoradas};
 }
 export function tvLoad(row,sm,now=new Date()){
- const emptySm=sm&&/\bvazi[oa]\b/i.test(sm.operacao||'');
- const conflict=row?.situacaoOperacional?.tipo==='divergente'||(emptySm&&row?.estado==='carregado_confirmado'&&row.statusFonte!=='trafegus');
- let codigo='conferir',label='Conferir carga',desde=null,fonte='Informações insuficientes';
- if(conflict){fonte='Fontes com informações diferentes';}
- else if(emptySm){codigo='vazio';label='SM de vazio';desde=timestamp(sm.inicio)||null;fonte='Início da SM de vazio';}
- else if(row?.estado==='carregado_confirmado'){codigo=row.statusFonte==='trafegus'?'conferir':'carregado';label=row.statusFonte==='trafegus'?'SM ativa · conferir carga':'Carregado';fonte=row.statusFonte==='trafegus'?'SM ativa; carga não confirmada por documento':'Conforme documentos da operação';}
- else if(row?.estado==='vazio_confirmado'&&row.entregaAt&&row.confianca!=='baixa'){codigo='vazio';label='Vazio';desde=row.entregaAt;fonte='Desde a entrega registrada';}
- else if(row?.estado==='vazio_provavel'){codigo='conferir';label='Possivelmente vazio';fonte='Aguardando confirmação de descarga';}
- else if(row?.estado==='vazio_sem_operacao'){label='Sem operação identificada';}
- const elapsed=desde?(now-new Date(desde))/3600000:null;
- return {codigo,label,desde,horasVazio:elapsed!=null&&Number.isFinite(elapsed)&&elapsed>=0?Math.round(elapsed*100)/100:null,fonte};
+ if(row?.retornoVazio){
+  const evidence=row.retornoVazio;
+  return {codigo:'vazio',label:'Vazio',desde:evidence.desde,horasVazio:Math.max(0,(now-new Date(evidence.desde))/3600000),confirmacaoPendente:false,fonte:evidence.fonte};
+ }
+ const started=sm&&!sm.fim&&sm.inicio&&new Date(timestamp(sm.inicio))<=now;
+ const emptySm=started&&/\bvazi[oa]\b/i.test(sm.operacao||'');
+ const loadedSm=started&&!emptySm&&/\bcarregad[oa]\b/i.test(sm.operacao||'');
+ const op=row?.operacaoCarga;
+ const macros=row?.macrosCarga;
+ const event=macros?.operacional;
+ const eventNote={chegada:'Macro de chegada/parada no cliente; falta confirmar a descarga.',
+  descarga:'Macro de fim de descarga; falta confirmar se foi a última entrega.',
+  fim_viagem:'Macro de fim de viagem; falta confirmar se o veículo ficou vazio.'}[event?.tipo];
+ const newerSm=started&&op?.entregaFinal&&new Date(timestamp(sm.inicio))>new Date(op.entregaFinal);
+ const result=(codigo,fonte,{desde=null,pendente=false}={})=>{
+  if(macros?.conflito){pendente=true;fonte+=' Macros simultâneas informam situações diferentes.';}
+  if(eventNote){pendente=true;fonte+=` ${eventNote}`;}
+  const elapsed=desde?(now-new Date(desde))/3600000:null;
+  return {codigo,label:codigo==='carregado'?'Carregado':codigo==='vazio'?'Vazio':'—',desde,
+   horasVazio:codigo==='vazio'&&!pendente&&elapsed!=null&&Number.isFinite(elapsed)&&elapsed>=0?Math.round(elapsed*100)/100:null,
+   confirmacaoPendente:pendente,fonte:pendente?`Confirmação pendente · ${fonte}`:fonte};
+ };
+ if(macros?.confirmacao){
+  const confirmation=macros.confirmacao;
+  // Subsequent arrival/end events preserve the last state, with confirmation pending.
+  return result(confirmation.tipo,`Conforme macro: ${confirmation.descricao}.`,
+   {desde:confirmation.dataHora,pendente:now-new Date(confirmation.dataHora)>24*3600000});
+ }
+ if(emptySm){
+  const conflict=Boolean(op?.pendentes?.length||(!op&&row?.estado==='carregado_confirmado'&&row.statusFonte!=='trafegus'));
+  if(conflict)return result('carregado','Documentos sem baixa; SM informa deslocamento vazio.',{pendente:true});
+  return result('vazio','Conforme SM de deslocamento vazio.',{desde:timestamp(sm.inicio)});
+ }
+ if(loadedSm&&(!op?.entregaFinal||newerSm))return result('carregado','Conforme SM de transporte carregado.');
+ if(row?.statusFonte==='pef_terceiro')return result('carregado','Indicação de frete de terceiro ativo; confirmar carregamento.',{pendente:true});
+ if(op?.pendentes?.length){
+  const stale=now-new Date(op.ultimaEmissao)>21*86400000;
+  if(op.baixasNaoConfirmadas?.length)return result('carregado',
+   'Última carga documentada, sem descarga comprovada. As datas anteriores de previsão não confirmam entrega.'+(started?' SM ativa; confirmar vínculo com a carga atual.':''),{pendente:true});
+  if(new Date(timestamp(op.inicio))>now)return result('carregado','Carga documentada com saída futura; confirmar carregamento concluído.',{pendente:true});
+  return result('carregado',stale?'Última operação com documentos sem baixa; confirmar situação atual.'
+   :row?.trafegusDivergente?`Há entregas pendentes na viagem ${op.viagem || 'atual'}; a baixa de ${row.documento} não encerra a carga.`
+   :'Conforme documentos da operação; aguardando a última entrega.',{pendente:stale});
+ }
+ if(op?.entregaFinal){
+  if(newerSm)return result('sem_confirmacao',`SM ${sm.id} posterior à última descarga; confirmar o novo carregamento.`,{pendente:true});
+  const pending=Boolean(started||!op.agrupamentoConhecido);
+  return result('vazio',pending?'Última entrega registrada; confirmar encerramento de toda a carga.'
+   :'Desde a última entrega registrada da viagem.',{desde:op.entregaFinal,pendente:pending});
+ }
+ if(row?.estado==='vazio_confirmado'&&row.entregaAt&&new Date(row.entregaAt)<=now){
+  return result('vazio','Última entrega registrada; confirmar situação atual.',{pendente:true});
+ }
+ if(row?.estado==='carregado_confirmado'&&row.statusFonte!=='trafegus')return result('carregado','Conforme documentos da operação.');
+ return result('sem_confirmacao',sm?'SM sem indicação de carga; confirme Carregado ou Vazio em Corrigir carga.'
+  :'Sem referência suficiente; confirme Carregado ou Vazio em Corrigir carga.',{pendente:true});
 }
 export function tvRoute(row,sm){
  // A previsão de fim pertence à SM, e não comprova horário de entrega.
@@ -86,6 +134,7 @@ export function tvRoute(row,sm){
   const raw=timestamp(sm.previsaoFim),date=raw?new Date(raw):null;
   return {destino:String(sm.destino||'').trim()||null,fonte:'SM ativa',previsaoFim:date&&Number.isFinite(date.getTime())?date.toISOString():null};
  }
+ if(row?.operacaoCarga?.pendentes?.length)return {destino:row.operacaoCarga.destino||null,fonte:'Documento da operação',previsaoFim:null};
  // Documentos encerrados não representam o próximo destino do veículo vazio.
  if(row?.estado==='carregado_confirmado'&&row.statusFonte!=='trafegus'&&row.situacaoOperacional?.tipo!=='divergente'){
   return {destino:String(row.destino||'').trim()||null,fonte:'Documento da operação',previsaoFim:null};
@@ -105,22 +154,50 @@ async function distanceToday(day){
 let cached=null,pending=null;
 export async function getPainelTv({force=false}={}){
  const day=tvDay();
+ const yesterday=new Date(new Date(`${day}T12:00:00Z`).getTime()-86400000).toISOString().slice(0,10);
  if(!force&&cached&&cached.data.dia===day&&Date.now()-cached.at<60000)return withCargoConfirmations(cached.data);
  if(pending)return withCargoConfirmations(await pending);
  pending=(async()=>{
-  const cargoPromise=getStatusCargaFrota({dias:180});
+  const cargoPromise=getStatusCargaFrota({dias:180,includeThirdPartySms:true});
   const smPromise=cargoPromise.then(()=>getTrafegusDashboard(),()=>getTrafegusDashboard());
-  const results=await Promise.allSettled([cargoPromise,carregarCiclosPorPlaca(),smPromise,distanceToday(day)]);
-  const [cargo,base,sms,km]=results.map(r=>r.status==='fulfilled'?r.value:null);
+  const macroPromise=cargoPromise.then(cargo=>loadCargoMacros(cargo.rows.map(row=>plate(row.placa))));
+  const results=await Promise.allSettled([cargoPromise,carregarCiclosPorPlaca(),smPromise,distanceToday(day),macroPromise,distanceToday(yesterday)]);
+  const [cargo,base,sms,km,macros,kmYesterday]=results.map(r=>r.status==='fulfilled'?r.value:null);
   const smAvailable=Boolean(sms&&!sms.indisponivel);
   if(!cargo?.rows?.length)throw new Error('Não foi possível carregar os veículos. Tente atualizar novamente.');
   const now=new Date();
-  const items=cargo.rows.map(row=>{
+  const items=(await Promise.all(cargo.rows.map(async row=>{
    const p=plate(row.placa),cycle=base?.cycles.get(p)?.at(-1),sm=sms?.sms?.filter(s=>plate(s.placa)===p&&!s.fim).sort((a,b)=>String(timestamp(b.inicio||b.previsaoInicio)||'').localeCompare(String(timestamp(a.inicio||a.previsaoInicio)||'')))[0];
    const outside=cycle&&!cycle.retornoEm;
-   return {placa:p,contextoCarga:cargoContext(row,sm),rota:tvRoute(row,sm),motorista:String(row.motorista||'').trim()||null,carga:tvLoad(row,sm,now),sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmHoje:km?.get(p)||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
-  }).sort((a,b)=>a.placa.localeCompare(b.placa));
-  const data={dia:day,atualizadoEm:now.toISOString(),itens:items,fontes:{carga:true,base:Boolean(base?.geofence),sm:smAvailable,quilometragem:Boolean(km)},avisos:results.map((r,i)=>r.status==='rejected'?['Carga indisponível','Tempo fora indisponível','SM indisponível','Quilometragem indisponível'][i]:null).filter(Boolean)};
+   const localTime=+new Date(row.localizacao?.dataHora||row.localizacao?.data_hora);
+   if(row.tipoFrota==='terceiro'&&sm?.id&&(!Number.isFinite(localTime)||now-localTime>1800000)){
+    const elite=await getTrafegusPosition(sm.id,p).catch(()=>null);
+    if(elite&&(!Number.isFinite(localTime)||+new Date(elite.dataHora)>localTime))row={...row,localizacao:elite};
+   }
+   const [eliteYesterday,eliteToday]=row.tipoFrota==='terceiro'&&sm?.id
+    ?await Promise.all([yesterday,day].map(date=>getTrafegusDailyDistance(sm.id,p,date).catch(()=>null))):[null,null];
+   const dailyYesterday=row.tipoFrota==='terceiro'?eliteYesterday:kmYesterday?.get(p);
+   const dailyToday=row.tipoFrota==='terceiro'?eliteToday:km?.get(p);
+   const dates=[row.operacaoCarga?.ultimaEmissao,row.operacaoCarga?.inicio,row.operacaoCarga?.entregaFinal,sm?.inicio]
+    .filter(Boolean).map(value=>+new Date(timestamp(value))).filter(Number.isFinite);
+   const macroData=cargoMacroEvidence(macros?.get(p)||[],dates.length?new Date(Math.max(...dates)):null,now);
+   const enriched={...row,macrosCarga:macroData,macroCargaContexto:macroData.confirmacao
+    ?`${macroData.confirmacao.tipo}:${new Date(macroData.confirmacao.dataHora).toISOString()}`:null};
+   let entregas=null;
+   if(sm?.id){
+    try{
+     const locations=await loadDeliveryGuide(sm.id);
+     entregas=deliveryProgress(locations,macros?.get(p)||[],timestamp(sm.inicio),row.localizacao,now);
+     if(isBaseReturn(sm,locations)){
+      const history=await getTrafegusSmsHistory({placa:p});
+      enriched.retornoVazio=emptyReturnEvidence(row,sm,locations,history,macros?.get(p)||[],now);
+     }
+    }
+    catch{entregas={disponivel:false,observacao:'Sequência de entregas indisponível na Elite.'};}
+   }
+   return {placa:p,tipoFrota:row.tipoFrota,documentosCarga:row.documentosCarga,entregas,contextoCarga:cargoContext(enriched,sm),rota:tvRoute(row,sm),motorista:String((row.tipoFrota==='terceiro'?sm?.motorista:null)||row.motorista||'').trim()||null,carga:tvLoad(enriched,sm,now),macros:{...macroData,disponivel:Boolean(macros)},sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmOntem:{dia:yesterday,...(dailyYesterday||{km:null,motivo:'Sem leituras suficientes ontem'})},kmHoje:dailyToday||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoFonte:row.localizacao?.fonte||null,posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
+  }))).sort((a,b)=>a.placa.localeCompare(b.placa));
+  const data={dia:day,atualizadoEm:now.toISOString(),itens:items,fontes:{carga:true,base:Boolean(base?.geofence),sm:smAvailable,quilometragem:Boolean(km),quilometragemOntem:Boolean(kmYesterday),macros:Boolean(macros)},avisos:results.map((r,i)=>r.status==='rejected'?['Carga indisponível','Tempo fora indisponível','SM indisponível','Quilometragem indisponível','Macros indisponíveis','Quilometragem de ontem indisponível'][i]:null).filter(Boolean)};
   if(sms?.incompleto)data.avisos.push("Consulta parcial de SMs: confira veiculos sem viagem na origem.");
   cached={at:Date.now(),data};return data;
  })();
