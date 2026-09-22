@@ -4,3 +4,4 @@ npm-debug.log*
 .env.local
 server.*.log
 *.log
+.local-logs/

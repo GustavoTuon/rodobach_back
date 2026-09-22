@@ -1,3 +1,5 @@
+import { createAsyncCache } from "./asyncCache.js";
+const dreCache = createAsyncCache({ maxEntries: 10, maxPending: 6 });
 import { clientPool } from "../db/clientPool.js";
 
 const DRE_ORDER = [
@@ -261,6 +263,10 @@ export async function getDreEmpresarial({
   search,
 } = {}) {
   const resolved = resolvePeriod({ period, startDate, endDate, mesAno });
+  const validDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+  if ((mesAno && !/^\d{4}-(0[1-9]|1[0-2])$/.test(String(mesAno))) || (!mesAno && Boolean(startDate) !== Boolean(endDate)) || !validDate(resolved.startDate) || !validDate(resolved.endDate) || resolved.startDate > resolved.endDate || Date.parse(resolved.endDate) - Date.parse(resolved.startDate) > 366 * 86400000) {
+    throw Object.assign(new Error("Selecione um periodo valido de ate 366 dias."), { status: 400 });
+  }
   const empresaCod = empresa ? Number(empresa) || null : null;
   const params = [
     empresaCod,
@@ -727,7 +733,7 @@ export async function getDreEmpresarial({
     ORDER BY b.data_base DESC, b.categoria_dre, b.valor
   `;
 
-  const result = await clientPool.query(query, params);
+  const result = { rows: await dreCache.get(JSON.stringify(params), async () => (await clientPool.query(query, params)).rows) };
   const rows = result.rows.map((row) => {
     const categoria = row.categoria_dre;
     const valor = r2(row.valor);

@@ -1,9 +1,11 @@
+import {maintenanceMutation, getMaintenanceAudit} from "../services/maintenanceAudit.js";
+import {registerMaintenance} from "../services/maintenanceRegistration.js";
 import express from "express";
 import { tableName } from "../config.js";
 import { clientPool } from "../db/clientPool.js";
 import { pool } from "../db/pool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
-import { selectCurrentOdometer } from "../services/odometerSelection.js";
+import { loadMaintenanceOdometers } from "../services/maintenanceOdometer.js";
 
 export const manutencaoRouter = express.Router();
 
@@ -443,42 +445,6 @@ async function loadHistoricoManutencoes(placas = []) {
   return byPlate;
 }
 
-async function loadOdometrosErp(placas = []) {
-  const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
-  if (!normalized.length) return new Map();
-  const { rows } = await clientPool.query(`
-    WITH eventos AS (
-      SELECT regexp_replace(upper(veiculocvg::text), '[^A-Z0-9]', '', 'g') AS placa,
-             COALESCE(datachegadacvg, datasaidacvg)::date AS data_ref,
-             GREATEST(COALESCE(kmchegadacvg, 0), COALESCE(kmsaidacvg, 0))::numeric AS km,
-             'viagem'::text AS origem
-      FROM logistica.controleviagens
-      UNION ALL
-      SELECT regexp_replace(upper(veiculoaba::text), '[^A-Z0-9]', '', 'g'),
-             dataaba::date, kilometragematualaba::numeric, 'abastecimento'::text
-      FROM frotas.abastecimentos
-      UNION ALL
-      SELECT regexp_replace(upper(veiculoose::text), '[^A-Z0-9]', '', 'g'),
-             COALESCE(dataentradaose, dataemissaoose)::date,
-             kilometragematualveiculoose::numeric, 'ordem_servico'::text
-      FROM frotas.ordensservicosexterna
-    ), validos AS (
-      SELECT * FROM eventos
-      WHERE placa = ANY($1::text[])
-        AND km BETWEEN 10000 AND 2000000
-        AND data_ref IS NOT NULL
-    )
-    SELECT DISTINCT ON (placa) placa, data_ref, km, origem
-    FROM validos
-    ORDER BY placa, data_ref DESC, km DESC
-  `, [normalized]);
-  return new Map(rows.map(row => [row.placa, {
-    odometro: Number(row.km),
-    data: row.data_ref,
-    origem: row.origem,
-  }]));
-}
-
 async function loadUltimasAfericoesTacografo(placas = []) {
   const normalized = [...new Set(placas.map(normalizePlate).filter(Boolean))];
   if (!normalized.length) return new Map();
@@ -583,21 +549,9 @@ function mapDetalheVeiculo(row, detalhe, historico, planoAutorizado, telemetria,
     || telemetria?.vehicle_model
     || telemetria?.identificacao_equipamento
     || null;
-  const selectedOdometer = selectCurrentOdometer({
-    telemetryKm: telemetria?.odometro,
-    telemetryDate: telemetria?.odometro_data,
-    erpKm: odometroErp?.odometro,
-    erpDate: odometroErp?.data,
-  });
-  const usaTelemetria = selectedOdometer.source === "telemetria";
   return {
     ...row,
-    km_atual: selectedOdometer.km,
-    km_fonte: usaTelemetria ? "telemetria" : (odometroErp?.origem || "indisponivel"),
-    km_data: usaTelemetria ? (telemetria?.odometro_data || null) : (odometroErp?.data || null),
-    telemetria_descartada: selectedOdometer.telemetryRejected,
-    telemetria_km: selectedOdometer.telemetryRejected ? selectedOdometer.telemetryKm : null,
-    telemetria_motivo: selectedOdometer.rejectionReason || null,
+    ...(odometroErp || {km_atual: null, km_fonte: "indisponivel", km_data: null}),
     km_proximo_envio: ultima?.km != null
       ? Number(ultima.km) + Number(row.intervalo_km || 0)
       : proximoKmProgramado(row.km_atual, row.intervalo_km),
@@ -640,7 +594,7 @@ manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
       loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
       loadUltimasAfericoesTacografo(placas),
-      loadOdometrosErp(placas),
+      loadMaintenanceOdometers(placas),
       loadEngates(placas),
     ]);
     const historicos = mergeHistoricos(historicosSistema, historicosManuais);
@@ -871,30 +825,14 @@ manutencaoRouter.post("/manutencao/registros", async (req, res, next) => {
     if (!placa || !HISTORY_TYPES.has(tipo) || !descricao || !dataServico || !Number.isInteger(kmServico) || kmServico < 0) {
       return res.status(400).json({ error: "Placa, tipo, descricao, data e KM validos sao obrigatorios." });
     }
-    const { rows } = await pool.query(`
-      INSERT INTO ${HISTORY_TABLE()} (
-        automacao_id, placa, tipo_movimento, descricao, data_servico, km_servico,
-        fornecedor, documento, observacao, criado_por
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      RETURNING *
-    `, [
-      automacaoId, placa, tipo, descricao, dataServico, kmServico,
-      String(req.body.fornecedor || "").trim() || null,
-      String(req.body.documento || "").trim() || null,
-      String(req.body.observacao || "").trim() || null,
-      req.user?.id || null,
-    ]);
-    if (automacaoId) {
-      await pool.query(`
-        UPDATE ${TABLE()}
-        SET km_proximo_envio = CASE WHEN tipo_controle = 'km' THEN $1 + intervalo_km ELSE km_proximo_envio END,
-            data_ultimo_servico = CASE WHEN tipo_controle = 'data' THEN $2::date ELSE data_ultimo_servico END,
-            data_proximo_envio = CASE WHEN tipo_controle = 'data' THEN $2::date + intervalo_dias ELSE data_proximo_envio END,
-            atualizado_em = NOW()
-        WHERE id = $3 AND regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $4
-      `, [kmServico, dataServico, automacaoId, placa]);
-    }
-    res.status(201).json({ registro: rows[0] });
+    const result = await registerMaintenance(pool, {
+      automacao_id: automacaoId, placa, tipo_movimento: tipo, descricao,
+      data_servico: dataServico, km_servico: kmServico,
+      fornecedor: String(req.body.fornecedor || "").trim(),
+      documento: String(req.body.documento || "").trim(),
+      observacao: String(req.body.observacao || "").trim(),
+    }, req.user?.id, req.user?.login);
+    res.status(201).json(result);
   } catch (error) {
     next(error);
   }
@@ -924,6 +862,11 @@ manutencaoRouter.post("/manutencao/contatos", async (req, res, next) => {
   }
 });
 
+manutencaoRouter.get("/manutencao/auditoria", async (req, res, next) => {
+  try { res.json(await getMaintenanceAudit(pool, req.query)); }
+  catch (error) { next(error); }
+});
+
 // GET /api/manutencao
 manutencaoRouter.get("/manutencao", async (_req, res, next) => {
   try {
@@ -937,7 +880,7 @@ manutencaoRouter.get("/manutencao", async (_req, res, next) => {
       loadHistoricoManual(placas),
       loadPlanosAutorizados(placas),
       loadDetalhesTelemetria(placas),
-      loadOdometrosErp(placas),
+      loadMaintenanceOdometers(placas),
     ]);
     const historicos = mergeHistoricos(historicosSistema, historicosManuais);
     res.json({
@@ -990,7 +933,7 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
       const km = Number(km_atual || 0);
       const intervalo = tipoControle === "km" ? Number(intervalo_km) : null;
       const intervaloDias = tipoControle === "data" ? Number(intervalo_dias) : null;
-      const { rows } = await pool.query(
+      const { rows } = await maintenanceMutation(pool, req.user,
         `INSERT INTO ${TABLE()} (
            placa, titulo, mensagem, intervalo_km, km_atual, km_proximo_envio,
            numeros, contato_id, contato_nome, contato_numero,
@@ -1017,7 +960,7 @@ manutencaoRouter.post("/manutencao", async (req, res, next) => {
       );
       criados.push(rows[0]);
       if (tipoControle === "km" && kmUltimoServico != null && dataUltimoServicoKm) {
-        await pool.query(`
+        await maintenanceMutation(pool, req.user, `
           INSERT INTO ${HISTORY_TABLE()} (
             automacao_id, placa, tipo_movimento, descricao, data_servico, km_servico, observacao, criado_por
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1068,14 +1011,24 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     if (placa !== undefined)        { sets.push(`placa = $${i++}`);        vals.push(String(placa).toUpperCase().trim()); }
     if (titulo !== undefined)       { sets.push(`titulo = $${i++}`);       vals.push(titulo); }
     if (mensagem !== undefined)     { sets.push(`mensagem = $${i++}`);     vals.push(mensagem); }
-    if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(Number(intervalo_km)); }
-    if (intervalo_dias !== undefined) { sets.push(`intervalo_dias = $${i++}`); vals.push(Number(intervalo_dias)); }
+    if (intervalo_km != null && (!Number.isSafeInteger(Number(intervalo_km)) || Number(intervalo_km) <= 0)) {
+      return res.status(400).json({error: "O intervalo em KM deve ser um inteiro positivo."});
+    }
+    if (intervalo_km !== undefined) { sets.push(`intervalo_km = $${i++}`); vals.push(intervalo_km == null ? null : Number(intervalo_km)); }
+    if (intervalo_dias != null && (!Number.isSafeInteger(Number(intervalo_dias)) || Number(intervalo_dias) <= 0)) {
+      return res.status(400).json({error: "O intervalo em dias deve ser um inteiro positivo."});
+    }
+    if (intervalo_dias !== undefined) { sets.push(`intervalo_dias = $${i++}`); vals.push(intervalo_dias == null ? null : Number(intervalo_dias)); }
     if (tipo_controle !== undefined) { sets.push(`tipo_controle = $${i++}`); vals.push(tipo_controle === "data" ? "data" : "km"); }
     if (data_ultimo_servico !== undefined) {
       sets.push(`data_ultimo_servico = $${i++}`); vals.push(data_ultimo_servico || null);
-      if (intervalo_dias !== undefined) {
-        sets.push(`data_proximo_envio = $${i++}`); vals.push(addDays(data_ultimo_servico, intervalo_dias));
-      }
+    }
+    if (data_ultimo_servico !== undefined || intervalo_dias !== undefined) {
+      const dateExpr = data_ultimo_servico !== undefined ? `$${i++}::date` : "data_ultimo_servico";
+      if (data_ultimo_servico !== undefined) vals.push(data_ultimo_servico || null);
+      const daysExpr = intervalo_dias !== undefined ? `$${i++}::integer` : "intervalo_dias";
+      if (intervalo_dias !== undefined) vals.push(intervalo_dias == null ? null : Number(intervalo_dias));
+      sets.push(`data_proximo_envio = ${dateExpr} + ${daysExpr}`);
     }
     if (km_atual !== undefined)     { sets.push(`km_atual = $${i++}`);     vals.push(Number(km_atual)); }
     if (ativo !== undefined)        { sets.push(`ativo = $${i++}`);        vals.push(Boolean(ativo)); }
@@ -1095,20 +1048,16 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
       sets.push(`contato_nome = $${i++}`); vals.push(contato.contato_nome);
       sets.push(`contato_numero = $${i++}`); vals.push(contato.contato_numero);
     }
-    // Recalcula km_proximo_envio se km_atual ou intervalo_km mudar
-    if (km_atual !== undefined || intervalo_km !== undefined) {
-      sets.push(`km_proximo_envio = $${i++}`);
-      // Busca os valores atuais do registro para calcular corretamente
-      const { rows: atual } = await pool.query(
-        `SELECT km_atual, intervalo_km FROM ${TABLE()} WHERE id = $1`, [id]
-      );
-      if (atual.length > 0) {
-        const novoKm = km_atual !== undefined ? Number(km_atual) : atual[0].km_atual;
-        const novoIntervalo = intervalo_km !== undefined ? Number(intervalo_km) : atual[0].intervalo_km;
-        vals.push(proximoKmProgramado(novoKm, novoIntervalo));
-      } else {
-        vals.push(0);
-      }
+    // Editing the current odometer is not a service. Preserve the reference
+    // of the last service when changing its interval; sending never advances it.
+    if (intervalo_km != null) {
+      const parameter = `$${i++}::integer`;
+      vals.push(Number(intervalo_km));
+      sets.push(`km_proximo_envio = CASE
+        WHEN km_proximo_envio > 0 AND intervalo_km > 0
+          THEN km_proximo_envio - intervalo_km + ${parameter}
+        ELSE GREATEST(1, CEIL(km_atual::numeric / ${parameter})) * ${parameter}
+        END`);
     }
     sets.push(`atualizado_em = $${i++}`);
     vals.push(new Date());
@@ -1118,7 +1067,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
     }
 
     vals.push(id);
-    const { rows } = await pool.query(
+    const { rows } = await maintenanceMutation(pool, req.user,
       `UPDATE ${TABLE()} SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`,
       vals
     );
@@ -1135,7 +1084,7 @@ manutencaoRouter.put("/manutencao/:id", async (req, res, next) => {
 // DELETE /api/manutencao/:id
 manutencaoRouter.delete("/manutencao/:id", async (req, res, next) => {
   try {
-    const { rowCount } = await pool.query(
+    const { rowCount } = await maintenanceMutation(pool, req.user,
       `DELETE FROM ${TABLE()} WHERE id = $1`, [req.params.id]
     );
     if (rowCount === 0) {

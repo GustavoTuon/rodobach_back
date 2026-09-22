@@ -16,6 +16,7 @@ function evolutionConfig() {
 async function evolutionFetch(path, options = {}) {
   const { url, key } = evolutionConfig();
   const res = await fetch(`${url}${path}`, {
+    signal: AbortSignal.timeout(30000),
     ...options,
     headers: {
       "apikey": key,

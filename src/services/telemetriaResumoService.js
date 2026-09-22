@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { config } from "../config.js";
+import { createAsyncCache } from "./asyncCache.js";
+
+const metricCache = createAsyncCache({ ttlMs: 300000, maxEntries: 256 });
 
 function normalizePlate(value) {
   return String(value || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
@@ -12,8 +15,10 @@ function dateOnly(value) {
   return String(value).slice(0, 10);
 }
 
-function parseBrazilNumber(value) {
+export function parseBrazilNumber(value) {
   if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "object") return parseBrazilNumber(value.result);
   const raw = String(value)
     .replace(/\./g, "")
     .replace(",", ".")
@@ -52,13 +57,33 @@ function overlapsPeriod(report, filters = {}) {
   return report.startDate <= endDate && report.endDate >= startDate;
 }
 
+function reportKey(filename) {
+  const period = parsePeriodFromFilename(filename);
+  return `${normalizePlate(filename.split("_")[0])}|${period.startDate || ""}|${period.endDate || ""}`;
+}
+
+function reportTimestamp(filename) {
+  const match = filename.match(/_(\d{8})_(\d{6})\.xlsx$/i);
+  return match ? `${match[1]}${match[2]}` : "";
+}
+
+function latestReports(files) {
+  const selected = new Map();
+  for (const filename of files) {
+    const key = reportKey(filename);
+    const current = selected.get(key);
+    if (!current || reportTimestamp(filename) > reportTimestamp(current)) selected.set(key, filename);
+  }
+  return [...selected.values()];
+}
+
 function addDays(date, days) {
   const value = new Date(`${date}T00:00:00.000Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
 }
 
-function telemetryCoverage(periods, filters = {}) {
+export function telemetryCoverage(periods, filters = {}) {
   const startDate = dateOnly(filters.startDate || filters.dataInicio);
   const endDate = dateOnly(filters.endDate || filters.dataFim);
   const valid = periods
@@ -73,6 +98,7 @@ function telemetryCoverage(periods, filters = {}) {
       if (period.startDate > startDate) return "parcial";
       coveredUntil = period.endDate;
     } else {
+      if (period.startDate <= coveredUntil) return "parcial";
       if (period.startDate > addDays(coveredUntil, 1)) return "parcial";
       if (period.endDate > coveredUntil) coveredUntil = period.endDate;
     }
@@ -81,6 +107,11 @@ function telemetryCoverage(periods, filters = {}) {
 }
 
 async function readMetricPairs(filePath) {
+  const stat = await fs.promises.stat(filePath);
+  return metricCache.get(`${filePath}|${stat.mtimeMs}|${stat.size}`, () => loadMetricPairs(filePath));
+}
+
+async function loadMetricPairs(filePath) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
   const sheet = workbook.worksheets[0];
@@ -103,24 +134,33 @@ async function readMetricPairs(filePath) {
 function resolveTelemetryDir() {
   if (config.telemetriaResumoDir) return config.telemetriaResumoDir;
   if (!process.env.USERPROFILE) return "";
-  return path.join(process.env.USERPROFILE, "OneDrive", "Desktop", "SXY5D26");
+  return path.join(process.env.USERPROFILE, "OneDrive", "Desktop", "trucks");
 }
 
 export async function getTelemetriaResumoPorPlaca(filters = {}) {
   const dir = resolveTelemetryDir();
-  if (!dir || !fs.existsSync(dir)) {
+  let directoryFiles;
+  try { directoryFiles = dir ? await fs.promises.readdir(dir) : null; }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (!directoryFiles) {
     return {
       summary: { placas: 0, distanciaKm: 0, consumoTotalLitros: 0, mediaConsumoKmL: 0 },
       byPlate: [],
-      source: { dir, files: 0, available: false },
+      source: { files: 0, available: false },
     };
   }
 
   const targetPlate = normalizePlate(filters.placa);
-  const files = fs.readdirSync(dir)
+  const discoveredFiles = directoryFiles
     .filter((name) => /\.xlsx$/i.test(name) && /Resumo de Telemetria/i.test(name));
+  const files = latestReports(discoveredFiles).sort((a, b) => {
+    const pa = parsePeriodFromFilename(a), pb = parsePeriodFromFilename(b);
+    const inside = p => (!filters.startDate || p.startDate >= filters.startDate) && (!filters.endDate || p.endDate <= filters.endDate);
+    return Number(inside(pb)) - Number(inside(pa)) || (new Date(pb.endDate) - new Date(pb.startDate)) - (new Date(pa.endDate) - new Date(pa.startDate)) || a.localeCompare(b);
+  });
   const byPlate = new Map();
   const errors = [];
+  let overlapsIgnored = 0;
 
   for (const filename of files) {
     const reportPeriod = parsePeriodFromFilename(filename);
@@ -141,6 +181,15 @@ export async function getTelemetriaResumoPorPlaca(filters = {}) {
         arquivos: [],
         periodos: [],
       };
+
+      if (!reportPeriod.startDate || !reportPeriod.endDate) throw new Error("Periodo do relatorio nao identificado.");
+      const overlap = current.periodos.find(p => p.startDate <= reportPeriod.endDate && p.endDate >= reportPeriod.startDate);
+      if (overlap) {
+        overlapsIgnored++;
+        // A contained report adds no coverage. A crossing report cannot be split safely.
+        if (!(overlap.startDate <= reportPeriod.startDate && overlap.endDate >= reportPeriod.endDate)) current.conflitoPeriodo = true;
+        continue;
+      }
 
       current.distanciaKm += parseBrazilNumber(metrics["Distância percorrida"]);
       current.consumoTotalLitros += parseBrazilNumber(metrics["Consumo Total"]);
@@ -168,7 +217,7 @@ export async function getTelemetriaResumoPorPlaca(filters = {}) {
         mediaConsumoKmL: money(mediaConsumoKmL),
         arquivos: row.arquivos,
         periodos: row.periodos,
-        cobertura: telemetryCoverage(row.periodos, filters),
+        cobertura: row.conflitoPeriodo ? "parcial" : telemetryCoverage(row.periodos, filters),
       };
     })
     .sort((a, b) => a.placa.localeCompare(b.placa));
@@ -190,6 +239,12 @@ export async function getTelemetriaResumoPorPlaca(filters = {}) {
       placasSemConsumo: rows.filter((row) => row.distanciaKm > 0 && row.consumoTotalLitros <= 0).map((row) => row.placa),
     },
     byPlate: rows,
-    source: { dir, files: files.length, available: true, errors },
+    source: {
+      files: files.length,
+      overlapsIgnored,
+      duplicatesIgnored: discoveredFiles.length - files.length,
+      available: true,
+      errors,
+    },
   };
 }

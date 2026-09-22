@@ -1,5 +1,6 @@
 import pg from "pg";
 import { config } from "../config.js";
+import { tlsOptions } from "./tls.js";
 
 export const clientPool = new pg.Pool({
   host: config.clientDb.host,
@@ -7,7 +8,7 @@ export const clientPool = new pg.Pool({
   database: config.clientDb.database,
   user: config.clientDb.user,
   password: config.clientDb.password,
-  ssl: config.clientDb.ssl ? { rejectUnauthorized: false } : false,
+  ssl: tlsOptions(config.clientDb.ssl, "CLIENT_DB"),
   max: config.clientDb.max,
   connectionTimeoutMillis: config.clientDb.connectionTimeoutMillis,
   query_timeout: config.clientDb.queryTimeoutMillis,
@@ -20,3 +21,4 @@ export const clientPool = new pg.Pool({
     "-c default_transaction_read_only=on",
   ].join(" "),
 });
+clientPool.on("error", error => console.error("Pool do ERP indisponivel:", error.code));

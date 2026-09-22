@@ -13,12 +13,18 @@
     "db:veiculos:add-fuel": "node scripts/add-mensagens-cb-combustivel-litros.js",
     "n8n:fix-login": "node scripts/fix-n8n-login-body.js",
     "import:abastecimento-acordos": "node src/db/import-abastecimento-acordos-xlsx.js",
-    "check": "node --test && eslint src",
+    "check": "npm test && npm run lint",
     "test": "node --test test/*.test.js",
     "lint": "eslint src",
-    "format:check": "prettier --check src package.json"
+    "format:check": "prettier --check src package.json",
+    "security:check": "node scripts/check-security.mjs",
+    "maintenance:preview": "node scripts/maintenance-alerts.mjs --preview",
+    "maintenance:send": "node scripts/maintenance-alerts.mjs --send",
+    "worker:maintenance": "node scripts/maintenance-alerts.mjs --worker"
   },
-  "overrides": { "uuid": "^11.1.1" },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",

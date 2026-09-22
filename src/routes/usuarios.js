@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import express from "express";
 import { tableName } from "../config.js";
 import { pool } from "../db/pool.js";
+import { createUserSchema, updateUserSchema, validateBody } from "../middleware/validate.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 
 export const usuariosRouter = express.Router();
@@ -31,21 +32,21 @@ usuariosRouter.get("/usuarios", requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/usuarios
-usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
+usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), async (req, res, next) => {
   try {
     const {
       login, senha, email, numero,
       admin = false, ativo = true,
-      perm_diretoria = true, perm_simulador = true, perm_viagens = true,
-      perm_dre_empresarial = true, perm_analise_frota = true, perm_abastecimentos = true, perm_precos_combustivel = true,
-      perm_faturamento_diario = true, perm_comparativo_faturamento = true, perm_lucro_viagens = true,
-      perm_custos_veiculos = true, perm_manutencoes_veiculos = true,
-      perm_clientes = true, perm_clientes_lucro = true,
-      perm_status_carga = true, perm_pneus = true, perm_multas_frota = true, perm_settings = true, perm_manutencao = true,
-      perm_automacoes_n8n = true,
-      perm_folgas_motoristas = true, perm_trafegus = true,
-      perm_oportunidades_retorno = true, perm_consulta_nfe = true,
-      perm_manutencao_posicoes = true, perm_controle_canhotos = true, perm_aprovar_viagens = false,
+      perm_diretoria = false, perm_simulador = false, perm_viagens = false,
+      perm_dre_empresarial = false, perm_analise_frota = false, perm_abastecimentos = false, perm_precos_combustivel = false,
+      perm_faturamento_diario = false, perm_comparativo_faturamento = false, perm_lucro_viagens = false,
+      perm_custos_veiculos = false, perm_manutencoes_veiculos = false,
+      perm_clientes = false, perm_clientes_lucro = false,
+      perm_status_carga = false, perm_pneus = false, perm_multas_frota = false, perm_settings = false, perm_manutencao = false,
+      perm_automacoes_n8n = false,
+      perm_folgas_motoristas = false, perm_trafegus = false,
+      perm_oportunidades_retorno = false, perm_consulta_nfe = false,
+      perm_manutencao_posicoes = false, perm_controle_canhotos = false, perm_aprovar_viagens = false,
     } = req.body;
 
     if (!login || !senha) {
@@ -99,7 +100,7 @@ usuariosRouter.post("/usuarios", requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/usuarios/:id
-usuariosRouter.put("/usuarios/:id", requireAdmin, async (req, res, next) => {
+usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema), async (req, res, next) => {
   try {
     const { id } = req.params;
     const body = req.body;

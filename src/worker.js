@@ -1,7 +1,10 @@
 import { logger } from "./logger.js";
+import { config } from "./config.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
-import { startMaintenanceAlertScheduler } from "./services/manutencaoAlertaService.js";
 
-startEmptyVehicleAlertScheduler();
-startMaintenanceAlertScheduler();
-logger.info("Worker de alertas iniciado");
+if (config.readOnly) {
+  logger.info("Worker desabilitado: modo somente consulta");
+} else {
+  startEmptyVehicleAlertScheduler();
+  logger.info("Worker de alertas de veículos vazios iniciado; manutenção usa npm run worker:maintenance");
+}

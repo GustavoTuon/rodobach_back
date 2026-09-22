@@ -5,7 +5,6 @@ import { getVeiculosPool } from "../db/pool-veiculos.js";
 
 const JORNADAS = () => tableName("jornada_motorista");
 const MOVIMENTOS = () => tableName("movimento_folga_motorista");
-const DIAS_POR_FOLGA = 6;
 const DATA_INICIO_APURACAO = "2026-05-25";
 const MINUTOS_SAIDA = 10;
 const MINUTOS_RETORNO = 15;
@@ -44,13 +43,13 @@ export function buildBaseCycles(runs = [], macros = [], now = new Date()) {
     const hours = hoursBetween(cycle.saidaEm, end);
     return { id: `cerca-${index}-${cycle.saidaEm}`, ...cycle, origemSaida: "cerca_base",
       origemRetorno: cycle.retornoEm ? "cerca_base" : null, horasFora: Math.round(hours * 100) / 100,
-      diasTrabalhados: Math.floor(hours / 24), macrosConfirmacao: confirmations.length,
+      diasTrabalhados: Math.floor(hours / 24), diasFora: Math.floor(hours / 24), macrosConfirmacao: confirmations.length,
       telemetriaAte: end.toISOString(),
       primeiraMacro: confirmations[0]?.macro_descricao || null, ultimaMacro: confirmations.at(-1)?.macro_descricao || null };
   });
 }
 
-async function carregarCiclosPorPlaca() {
+export async function carregarCiclosPorPlaca() {
   const schema = quoteIdent(process.env.VEICULOS_DB_SCHEMA || "rodobach");
   const telemetryPool = getVeiculosPool();
   const { rows: bases } = await telemetryPool.query(`SELECT name,shape_type,polygon_points FROM ${schema}.geofences
@@ -77,8 +76,14 @@ async function carregarCiclosPorPlaca() {
   [PLACAS_FROTA, DATA_INICIO_APURACAO]);
   const group = (rows) => rows.reduce((map, row) => { const key=normalizePlate(row.placa), list=map.get(key)||[]; list.push(row); map.set(key,list); return map; }, new Map());
   const runMap = group(runs), macroMap = group(macroRows), cycles = new Map();
-  for (const plate of PLACAS_FROTA) cycles.set(plate, buildBaseCycles(runMap.get(plate)||[], macroMap.get(plate)||[]));
-  return { cycles, geofence: base.name };
+  const presence = new Map();
+  for (const plate of PLACAS_FROTA) {
+    const plateRuns = runMap.get(plate)||[];
+    cycles.set(plate, buildBaseCycles(plateRuns, macroMap.get(plate)||[]));
+    const latest = plateRuns.at(-1);
+    if (latest) presence.set(plate, {naBase: latest.na_base === true && hoursBetween(latest.inicio, latest.fim)*60 >= MINUTOS_RETORNO, observadoEm: latest.fim});
+  }
+  return { cycles, presence, geofence: base.name };
 }
 
 async function carregarMovimentos(keys) {
@@ -109,24 +114,25 @@ export async function listarMotoristasFolgas({ busca="", status="", pagina=1, li
   let itens=motoristas.map((motorista)=>{
     const all=cycles.get(normalizePlate(motorista.placa))||[], jornada=all.at(-1)||null;
     const completas=all.filter((item)=>item.retornoEm), atual=jornada&&!jornada.retornoEm?jornada:null;
-    const diasTrabalhados=completas.reduce((sum,item)=>sum+item.diasTrabalhados,0)+(atual?.diasTrabalhados||0);
-    const diasFolga=Math.floor(diasTrabalhados/DIAS_POR_FOLGA),saldoDias=diasTrabalhados%DIAS_POR_FOLGA;
+    const horasForaTotal=all.reduce((sum,item)=>sum+item.horasFora,0);
     const mov=movimentos.get(`${motorista.empresa}:${motorista.codigo}`)||{utilizadas:0,ajustes:0};
-    const folgasDisponiveis=Math.max(0,diasFolga-mov.utilizadas+mov.ajustes), currentOutside=Boolean(atual);
+    const currentOutside=Boolean(atual);
     return { empresa:Number(motorista.empresa),codigo:Number(motorista.codigo),nome:motorista.nome||motorista.apelido||"Motorista",
       apelido:motorista.apelido||"",telefone:motorista.telefone||"",placa:motorista.placa||"",jornada,
-      status:currentOutside?"fora":"disponivel",diasFora:jornada?.diasTrabalhados||0,horasFora:jornada?.horasFora||0,
+      status:currentOutside?"fora":jornada?"na_base":"sem_dados",diasFora:jornada?.diasFora??null,horasFora:jornada?.horasFora??null,
+      ciclos:all.slice().reverse(),
+      descansoLegal:{apuravel:false,saldoHoras:null,motivo:"Tempo fora da base não comprova jornada nem repousos já usufruídos. É necessário confirmar o motorista de cada ciclo, o registro de jornada, os descansos e a norma coletiva aplicável."},
       retroativo:{dataCorte:DATA_INICIO_APURACAO,viagensCompletas:completas.length,viagensPendentes:currentOutside?1:0,
-        diasFora:diasTrabalhados,diasFolga,saldoDias,folgasUtilizadas:mov.utilizadas,ajustes:mov.ajustes,folgasDisponiveis},
+        diasFora:Math.floor(horasForaTotal/24),horasForaTotal:Math.round(horasForaTotal*100)/100,diasFolga:null,saldoDias:null,folgasUtilizadas:mov.utilizadas,ajustes:mov.ajustes,folgasDisponiveis:null},
       validacao:{nivel:jornada?.macrosConfirmacao?"confirmado":jornada?"provavel":"sem_dados",total:all.length,
         confirmadas:all.filter((item)=>item.macrosConfirmacao).length,parciais:all.filter((item)=>!item.macrosConfirmacao).length,
         divergentes:0,coberturaDesde:DATA_INICIO_APURACAO} };
   });
   if(status) itens=itens.filter((item)=>item.status===status);
-  const total=itens.length,resumo={total,fora:itens.filter((x)=>x.status==="fora").length,emFolga:0,disponiveis:itens.filter((x)=>x.status==="disponivel").length};
+  const total=itens.length,resumo={total,fora:itens.filter((x)=>x.status==="fora").length,naBase:itens.filter((x)=>x.status==="na_base").length,semDados:itens.filter((x)=>x.status==="sem_dados").length};
   const page=Math.max(1,Number(pagina)||1),pageSize=Math.min(100,Math.max(10,Number(limite)||50));
   itens=itens.slice((page-1)*pageSize,page*pageSize);
-  return {regra:{diasPorFolga:DIAS_POR_FOLGA,minutosSaida:MINUTOS_SAIDA,minutosRetorno:MINUTOS_RETORNO,origem:"cerca_base_e_macros",
+  return {regra:{diasPorFolga:null,descansoDiarioHoras:11,descansoSemanalComDiarioHoras:35,normaColetivaConfirmada:false,minutosSaida:MINUTOS_SAIDA,minutosRetorno:MINUTOS_RETORNO,origem:"cerca_base_e_macros",
     cercaBase:geofence,dataInicioApuracao:DATA_INICIO_APURACAO},resumo,pagina:page,limite:pageSize,total,itens};
 }
 
