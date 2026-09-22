@@ -12,7 +12,18 @@ test("calcula ciclo entre saida e retorno confirmados pela cerca", () => {
   assert.equal(cycles[0].saidaEm, "2026-09-01T09:01:00.000Z");
   assert.equal(cycles[0].retornoEm, "2026-09-03T10:01:00.000Z");
   assert.equal(cycles[0].diasTrabalhados, 2);
+  assert.equal(cycles[0].diasFora, 2);
   assert.equal(cycles[0].macrosConfirmacao, 1);
+});
+
+test('ciclo aberto termina na última observação, sem inventar tempo até agora',()=>{
+ const [cycle]=buildBaseCycles([
+  {na_base:true,inicio:'2026-09-01T07:00:00Z',fim:'2026-09-01T08:00:00Z'},
+  {na_base:false,inicio:'2026-09-01T08:01:00Z',fim:'2026-09-02T08:01:00Z'},
+ ],[],new Date('2026-09-14T12:00:00Z'));
+ assert.equal(cycle.horasFora,24);
+ assert.equal(cycle.retornoEm,null);
+ assert.equal(cycle.telemetriaAte,'2026-09-02T08:01:00.000Z');
 });
 
 test("ignora oscilacao curta de GPS e nao inventa saida antes de observar a base", () => {

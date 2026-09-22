@@ -12,6 +12,9 @@ import {
 import { getLancamentosFinanceiros } from "../services/financeiroLancamentosService.js";
 import { getFinanceiroPorPlaca } from "../services/financeiroPlacaService.js";
 import { getAnaliseClientes } from "../services/analiseClientesService.js";
+import { getClienteCarteira } from "../services/clienteCarteiraService.js";
+import { getEmbarquesClientes } from "../services/embarquesClientesService.js";
+import { getClienteMargem } from "../services/clienteMargemService.js";
 import { getRentabilidadeClientes } from "../services/rentabilidadeClientesService.js";
 import {
   getEvolucaoCustos,
@@ -39,6 +42,14 @@ import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalCo
 import { getAlertasOperacionaisMensagem } from "../services/alertasOperacionaisMensagemService.js";
 
 export const financeiroRouter = Router();
+
+financeiroRouter.get("/financeiro/embarques-clientes", async (req, res, next) => {
+  try {
+    res.json(await getEmbarquesClientes(req.query));
+  } catch (error) {
+    next(error);
+  }
+});
 
 financeiroRouter.get("/financeiro/fluxo-caixa", async (req, res, next) => {
   try {
@@ -233,6 +244,10 @@ financeiroRouter.get("/financeiro/dre-empresarial/lancamento-detalhe", async (re
   }
 });
 
+financeiroRouter.get("/financeiro/analise-clientes/carteira", async (req, res, next) => {
+  try { res.json(await getClienteCarteira(req.query)); } catch (error) { next(error); }
+});
+
 financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
   try {
     const data = await getAnaliseClientes({
@@ -251,6 +266,10 @@ financeiroRouter.get("/financeiro/analise-clientes", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+financeiroRouter.get("/clientes/rentabilidade/analise", async (req, res, next) => {
+  try { res.json(await getClienteMargem(req.query)); } catch (error) { next(error); }
 });
 
 financeiroRouter.get("/clientes/rentabilidade", async (req, res, next) => {

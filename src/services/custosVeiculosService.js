@@ -1,4 +1,5 @@
 import { clientPool } from "../db/clientPool.js";
+import { carregarKmTelemetriaMensal } from "./kmAbastecimento.js";
 import { abastecimentoFinanceiroMatchSql } from "./abastecimentoFinanceiroSql.js";
 import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
 
@@ -1921,5 +1922,7 @@ export async function getEvolucaoCustos(filters = {}) {
   const prior = previousPeriod(period);
   const where = buildWhere(filters,2);
   const rows = await queryCostRows(`${baseCostCte()} SELECT * FROM custos_status ${where.clause} ${where.clause ? "AND" : "WHERE"} data::date BETWEEN $1::date AND $2::date ORDER BY data DESC,id`,[prior.startDate,period.endDate,...where.values]);
-  return {period, prior, launches:rows.map(mapLaunch)};
+  const placas=[...new Set(rows.map(row=>normalizePlate(row.placa_resolvida)).filter(placa=>/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)))];
+  const distance=await carregarKmTelemetriaMensal(placas,period).catch(()=>({available:false,monthly:[]}));
+  return {period, prior, launches:rows.map(mapLaunch),distance};
 }

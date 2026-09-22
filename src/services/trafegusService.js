@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "./http.js";
+import { collectPages } from "./pagedResults.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +52,7 @@ class TrafegusSession {
 
   async request(pathname, options = {}, redirects = 5) {
     const config = trafegusConfig();
-    const response = await fetch(`${config.webUrl}${pathname}`, {
+    const response = await fetchWithTimeout(`${config.webUrl}${pathname}`, {
       ...options,
       redirect: "manual",
       headers: {
@@ -102,10 +104,10 @@ class TrafegusSession {
     if (!response.ok || html.includes(LOGIN_FORM_MARKER)) throw new Error("Login recusado pelo Trafegus");
   }
 
-  async dataTable(pathname, { length = 50, search = "", orderColumn = 1, flags, retry = true } = {}) {
+  async dataTable(pathname, { length = 50, start = 0, search = "", orderColumn = 1, flags, retry = true } = {}) {
     const body = new URLSearchParams({
       draw: "1",
-      start: "0",
+      start: String(start),
       length: String(length),
       "search[value]": search,
       "search[regex]": "false",
@@ -121,7 +123,7 @@ class TrafegusSession {
     const text = await response.text();
     if ((response.status === 401 || response.status === 403 || text.includes(LOGIN_FORM_MARKER)) && retry) {
       await this.login();
-      return this.dataTable(pathname, { length, search, orderColumn, flags, retry: false });
+      return this.dataTable(pathname, { length, start, search, orderColumn, flags, retry: false });
     }
     if (!response.ok) throw new Error(`Trafegus ${pathname}: HTTP ${response.status}`);
     const payload = JSON.parse(text);
@@ -192,15 +194,21 @@ function normalizeChange(row) {
   };
 }
 
-export async function getTrafegusDashboard({ force = false } = {}) {
+let dashboardPending = null;
+export async function getTrafegusDashboard(options = {}) {
+  if (dashboardPending) return dashboardPending;
+  dashboardPending = loadTrafegusDashboard(options);
+  try { return await dashboardPending; } finally { dashboardPending = null; }
+}
+async function loadTrafegusDashboard({ force = false } = {}) {
   if (!force && cache && Date.now() - cache.cachedAt < CACHE_TTL_MS) return cache.payload;
   const startedAt = Date.now();
   const [smsPage, changesPage] = await Promise.all([
-    session.dataTable("/solicitacaomonitoramento/getjsondata", {
-      length: 100,
+    collectPages(page => session.dataTable("/solicitacaomonitoramento/getjsondata", {
+      ...page,
       orderColumn: 1,
       flags: { status: ["1"] },
-    }),
+    })),
     session.dataTable("/relatorioalteracaorotasviagem/getjsondata", {
       length: 50,
       orderColumn: 0,
@@ -213,6 +221,7 @@ export async function getTrafegusDashboard({ force = false } = {}) {
     ok: true,
     atualizadoEm: new Date().toISOString(),
     duracaoMs: Date.now() - startedAt,
+    incompleto: smsPage.total > smsPage.rows.length,
     resumo: {
       totalSms: smsPage.total,
       exibindoSms: sms.length,
@@ -240,21 +249,23 @@ function trafegusDate(value) {
 export async function getTrafegusSmsHistory({ placa, inicio, fim, length = 1000, force = false } = {}) {
   const normalizedPlate = String(placa || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
   const cacheKey = `${normalizedPlate}|${inicio || ""}|${fim || ""}|${length}`;
+  for (const [key, entry] of historyCache) if (Date.now() - entry.at >= 60_000) historyCache.delete(key);
   const cached = historyCache.get(cacheKey);
   if (!force && cached && Date.now() - cached.at < 60_000) return cached.value;
   const start = inicio ? new Date(`${inicio}T00:00:00-03:00`) : new Date(0);
   const end = fim ? new Date(`${fim}T23:59:59.999-03:00`) : new Date();
-  const page = await session.dataTable("/solicitacaomonitoramento/getjsondata", {
-    length: Math.min(2000, Math.max(1, Number(length) || 1000)),
+  const page = await collectPages(paging => session.dataTable("/solicitacaomonitoramento/getjsondata", {
+    ...paging,
     search: normalizedPlate,
     orderColumn: 1,
-  });
+  }), { maxRows: Math.min(2000, Math.max(1, Number(length) || 1000)) });
   const rows = page.rows.map(normalizeSm).filter((sm) => {
     if (normalizedPlate && String(sm.placa).replace(/[^A-Z0-9]/gi, "").toUpperCase() !== normalizedPlate) return false;
     const eventAt = trafegusDate(sm.inicio || sm.previsaoInicio || sm.fim || sm.previsaoFim);
     return eventAt && eventAt >= start && eventAt <= end;
   }).sort((a, b) => (trafegusDate(a.inicio || a.previsaoInicio) || 0) - (trafegusDate(b.inicio || b.previsaoInicio) || 0));
-  const value = { totalEncontrado: page.total, inicio: start.toISOString(), fim: end.toISOString(), placa: normalizedPlate, rows };
+  const value = { totalEncontrado: page.total, inicio: start.toISOString(), fim: end.toISOString(), placa: normalizedPlate, rows, incompleto: page.total > page.rows.length };
+  if (!historyCache.has(cacheKey) && historyCache.size >= 100) historyCache.delete(historyCache.keys().next().value);
   historyCache.set(cacheKey, { at: Date.now(), value });
   return value;
 }
@@ -299,7 +310,7 @@ export async function getTrafegusGoogleRoute(smId) {
   const rawSm = rawSmsById.get(id);
   if (!rawSm) throw new Error("SM em viagem não encontrada");
 
-  const response = await fetch(`https://elite.trafegus.com.br:2083/api/proxy-api/guia-viagem?cod_viagem=${encodeURIComponent(id)}`);
+  const response = await fetchWithTimeout(`https://elite.trafegus.com.br:2083/api/proxy-api/guia-viagem?cod_viagem=${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error(`Guia de Viagem: HTTP ${response.status}`);
   const payload = await response.json();
   const guide = payload?.data;

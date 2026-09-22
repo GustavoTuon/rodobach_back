@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { consolidateClientBranches, filterClientsForView } from "../src/services/analiseClientesService.js";
+import { consolidateClientBranches, filterClientsForView, classifyClient } from "../src/services/analiseClientesService.js";
+
+test('ativo tem limite de 30 dias e nao aceita data desconhecida', () => {
+  const rows = [30, 31, 60, null].map((days, codigo) => ({ codigo, totalPeriodo: 100, diasSemFaturar: days }));
+  assert.deepEqual(filterClientsForView(rows, {status:'ativo'}).map(c => c.codigo), [0]);
+});
+
+test('ticket baixo nao permite inferir potencial comercial', () => {
+  assert.equal(classifyClient(100, 0, 15, 100, 10000, 100000).status, 'ativo');
+  assert.equal(classifyClient(100, 0, 31, 100, 10000, 100000).status, 'atencao');
+});
 
 test("consolida filiais pelo CNPJ raiz sem duplicar os valores", () => {
   const rows = [

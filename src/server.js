@@ -11,8 +11,10 @@ import { pool } from "./db/pool.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRoutePermission } from "./middleware/permissions.js";
 import { requireAdmin } from "./middleware/requireAdmin.js";
+import { enforceReadOnly } from "./middleware/readOnly.js";
+import { errorHandler } from "./middleware/errorHandler.js";
 import { auditMutation } from "./services/auditService.js";
-import { logger } from "./logger.js";
+import { logger, loggerOptions } from "./logger.js";
 import { authRouter } from "./routes/auth.js";
 import { financeiroRouter } from "./routes/financeiro.js";
 import { freteRouter } from "./routes/frete.js";
@@ -35,19 +37,23 @@ import { consultaCteRouter } from "./routes/consultaCte.js";
 import { canhotosRouter } from "./routes/canhotos.js";
 import { multasFrotaRouter } from "./routes/multasFrota.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
-import { startMaintenanceAlertScheduler } from "./services/manutencaoAlertaService.js";
 
 export const app = express();
 
 app.disable("x-powered-by");
-app.use(pinoHttp({ logger, genReqId: (req) => req.headers["x-request-id"] || randomUUID() }));
+app.use(pinoHttp({ logger, serializers: loggerOptions.serializers, genReqId: () => randomUUID() }));
 app.use(helmet({ contentSecurityPolicy: false }));
+// Includes authentication, downloads and error responses.
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
     const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-    if (isLocalhost || config.frontendOrigins.includes(origin)) {
+    if ((!config.isProduction && isLocalhost) || config.frontendOrigins.includes(origin)) {
       return callback(null, true);
     }
     callback(new Error(`Origin not allowed: ${origin}`));
@@ -76,11 +82,12 @@ app.get("/api/health", async (_req, res) => {
     const { rows } = await pool.query("SELECT NOW() AS now");
     res.json({ ok: true, database: true, now: rows[0].now });
   } catch (error) {
-    res.status(503).json({ ok: false, database: false, ...(config.isProduction ? {} : { error: error.message }) });
+    logger.warn({ code: error.code }, "Falha no health check do banco");
+    res.status(503).json({ ok: false, database: false });
   }
 });
 
-app.get("/api/health/viagens", async (_req, res) => {
+app.get("/api/health/viagens", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const { rows: dbTime } = await pool.query("SELECT NOW() AS now");
     const { rows: tables } = await pool.query(`
@@ -108,8 +115,18 @@ app.use("/api", authRouter);
 
 // ── Rotas protegidas (JWT obrigatório a partir daqui) ─────────────────────────
 app.use("/api", requireAuth);
-app.use("/api", requireRoutePermission);
 app.use("/api", auditMutation);
+app.use("/api", requireRoutePermission);
+app.use("/api", enforceReadOnly);
+app.use("/api", rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  keyGenerator: req => String(req.user.id),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  skip: req => !["GET", "HEAD"].includes(req.method),
+  message: { error: "Muitas consultas. Aguarde um minuto antes de tentar novamente." },
+}));
 
 app.post("/api/admin/migrate", requireAdmin, async (_req, res, next) => {
   try {
@@ -146,20 +163,13 @@ app.use((req, res) => {
   res.status(404).json({ error: `Rota nao encontrada: ${req.method} ${req.path}` });
 });
 
-app.use((error, req, res, _next) => {
-  req.log?.error({ err: error }, "Erro nao tratado");
-  res.status(500).json({
-    error: "Erro interno no servidor.",
-    ...(config.isProduction ? {} : { detail: error.message }),
-  });
-});
+app.use(errorHandler);
 
 export function startServer() {
-  return app.listen(config.port, () => {
+  return app.listen(config.port, config.host, () => {
     logger.info({ port: config.port }, "Rodobach API iniciada");
-    if (config.runSchedulers) {
+    if (config.runSchedulers && !config.readOnly) {
       startEmptyVehicleAlertScheduler();
-      startMaintenanceAlertScheduler();
     }
   });
 }

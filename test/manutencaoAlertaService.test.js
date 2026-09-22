@@ -11,12 +11,27 @@ const item = {
   mensagem: "O veículo atingiu o marco programado. Verifique e programe a manutenção.",
 };
 
+test("certificado vencido não anuncia vencimento próximo", () => {
+  const message = buildMaintenanceAlertMessage({...item, tipo_controle: "data", data_proximo_envio: "2026-09-20", mensagem: "O certificado está próximo do vencimento."}, null, {type: "vencido", remaining: -1}, 617731);
+  assert.match(message, /certificado está vencido/);
+  assert.doesNotMatch(message, /próximo do vencimento/);
+});
+
 test("alerta antecipado informa que o marco está próximo", () => {
   const message = buildMaintenanceAlertMessage(item, null, { type: "antecipado", remaining: 192 }, 419808);
 
   assert.match(message, /Faltam 192 km/);
   assert.match(message, /O veículo está próximo do marco programado/);
   assert.doesNotMatch(message, /O veículo atingiu o marco programado/);
+});
+
+test("alerta baseado no abastecimento informa data e não afirma quilometragem atual", () => {
+  const message = buildMaintenanceAlertMessage({...item, km_fonte: "abastecimento", km_data: "2026-09-19", telemetria_descartada: true}, null, {type: "vencido", remaining: -59}, 305059);
+  assert.match(message, /Último KM registrado:\* 305.059 km/);
+  assert.match(message, /Abastecimento — 19\/09\/2026/);
+  assert.match(message, /não inclui o percurso posterior/);
+  assert.match(message, /Telemetria divergente desconsiderada/);
+  assert.doesNotMatch(message, /KM atual|�|\?\?/);
 });
 
 test("alerta vencido mantém a informação de marco atingido", () => {

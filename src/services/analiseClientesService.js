@@ -124,7 +124,7 @@ export function filterClientsForView(mapped, { status, inativoMin, inativoMax, i
   const hasInactiveMax = Number.isFinite(inactiveMax);
   const includeWithoutBilling = ["1", "true", "sim", "yes"].includes(String(incluirSemFaturamento || "").toLowerCase());
 
-  if (status === "ativo") return mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar <= 60);
+  if (status === "ativo") return mapped.filter(c => c.totalPeriodo > 0 && c.diasSemFaturar != null && c.diasSemFaturar <= 30);
   if (status === "sem-faturamento") {
     return mapped.filter(c => {
       const dias = num(c.diasSemFaturar);
@@ -170,13 +170,11 @@ function resolvePeriod(period, startDate, endDate) {
   }
 }
 
-function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos, ticketMedio, totalGeral) {
+export function classifyClient(totalPeriodo, totalAnterior, diasSemFaturar, lancamentos, ticketMedio, totalGeral) {
   const threshold = totalGeral > 0 ? totalGeral * 0.08 : 0;
-  const ticketCliente = lancamentos > 0 ? totalPeriodo / lancamentos : 0;
 
   if (diasSemFaturar <= 30 && totalPeriodo > 0) {
     if (totalPeriodo >= threshold) return { status: "estrategico", acao: "manter-relacionamento" };
-    if (lancamentos >= 2 && ticketCliente < ticketMedio * 0.35) return { status: "potencial", acao: "potencial" };
     return { status: "ativo", acao: "manter-relacionamento" };
   }
   if (diasSemFaturar > 30 && diasSemFaturar <= 90) {
@@ -453,7 +451,7 @@ export async function getAnaliseClientes({ period, startDate, endDate, empresa, 
   const totalAnoAnterior = allClients.reduce((s, c) => s + num(c.total_ano_anterior), 0);
   const documentosAnoAnterior = allClients.reduce((s, c) => s + num(c.documentos_ano_anterior), 0);
   const clientesAtivos = withBilling.length;
-  const ticketMedio = clientesAtivos > 0 ? totalFaturado / clientesAtivos : 0;
+  const ticketMedio = clientesAtivos > 0 ? withBilling.reduce((sum, c) => sum + num(c.total_periodo), 0) / clientesAtivos : 0;
   const topCliente = withBilling.length > 0 ? withBilling[0] : null;
 
   // ── Map clients with business rules ──────────────────────────────────────

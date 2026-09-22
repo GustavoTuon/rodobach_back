@@ -4,8 +4,32 @@ import { getOciosidadeFrota, loadDocuments } from "../services/ociosidadeFrotaSe
 import { saveConfirmation, removeConfirmation, suggestStops, validateConfirmation, documentKey } from "../services/conferenciaDocumentos.js";
 import { listEmptyVehicleAlerts, runEmptyVehicleAlerts } from "../services/statusCargaAlertaService.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import {getPainelTv} from '../services/painelTvService.js';
+import {validateCargoConfirmation,saveCargoConfirmation,cargoConfirmationHistory,cancelCargoConfirmation,correctionState} from '../services/painelCargaConfirmacoes.js';
 
 export const statusCargaRouter = Router();
+statusCargaRouter.get('/frota/painel-tv',async(_req,res,next)=>{try{res.json(await getPainelTv());}catch(error){next(error);}});
+statusCargaRouter.get('/frota/painel-tv/confirmacoes',requireAdmin,async(req,res,next)=>{
+  try {
+    const rows=await cargoConfirmationHistory(String(req.query.placa||'').toUpperCase());
+    const data=await getPainelTv();
+    const item=data.itens.find(item=>item.placa===String(req.query.placa||'').toUpperCase());
+    res.json({registros:rows.map((row,index)=>({...row,estado:index>0&&!row.cancelado_em?'Substituída':correctionState(row,item)}))});
+  } catch(error){next(error);}
+});
+statusCargaRouter.post('/frota/painel-tv/confirmacoes',requireAdmin,async(req,res,next)=>{
+  try {
+    const input=validateCargoConfirmation(req.body);
+    const data=await getPainelTv({force:true});
+    const item=data.itens.find(item=>item.placa===input.placa);
+    if(!item)return res.status(400).json({error:'Veículo não encontrado no painel.'});
+    if(item.contextoCarga!==input.contexto)return res.status(409).json({error:'A operação mudou. Atualize o painel e confira novamente.'});
+    res.status(201).json({registro:await saveCargoConfirmation(input,req.user)});
+  } catch(error){next(error);}
+});
+statusCargaRouter.delete('/frota/painel-tv/confirmacoes/:id',requireAdmin,async(req,res,next)=>{
+  try {await cancelCargoConfirmation(req.params.id,req.user);res.json({ok:true});}catch(error){next(error);}
+});
 
 statusCargaRouter.get("/frota/ociosidade/paradas", async (req, res, next) => {
   try { res.json(await suggestStops(req.query)); } catch (e) { next(e); }

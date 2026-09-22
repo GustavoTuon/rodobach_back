@@ -16,7 +16,8 @@ export async function getCustoRastreabilidade(id) {
     // pagar ID: empresa, série, duplicata, parcela, fornecedor, centro, conta.
     const parcela=fornecedor, supplier=rest[0];
     if(!supplier) throw Object.assign(new Error('Identificador incompleto.'),{status:400});
-    const {rows}=await clientPool.query(`SELECT documentopag documento,valorduplicatapag valor_parcela,valorabertopag aberto,observacaopag historico
+    const {rows}=await clientPool.query(`SELECT documentopag documento,valorduplicatapag valor_parcela,valorabertopag aberto,observacaopag historico,
+      dataemissaopag::date::text emissao,datavencimentopag::date::text vencimento,seriepag serie,duplicatapag duplicata,parcelapag parcela
       FROM financeiro.pagar WHERE empresapag::text=$1 AND seriepag::text=$2 AND duplicatapag::text=$3 AND parcelapag::text=$4 AND fornecedorpag::text=$5`,[empresa,serie,codigo,parcela,supplier]);
     if(!rows.length)throw Object.assign(new Error('Lançamento não encontrado.'),{status:404});
     result.financeiro=rows[0];result.referencia=`Duplicata ${serie}/${codigo} · parcela ${parcela}`;
@@ -27,6 +28,18 @@ export async function getCustoRastreabilidade(id) {
     notes=linked.map(n=>({key:[empresa,n.serie,n.codigo,supplier],vinculo:'Vínculo pela fatura no ERP'}));
     if(!notes.length)notes=[{key:[empresa,serie,codigo,supplier],vinculo:'Correspondência de empresa, série, número e fornecedor; vínculo financeiro não confirmado'}];
     result.aviso='O campo documento pode estar vazio mesmo com duplicata cadastrada. Os itens abaixo são da nota completa e podem incluir outros veículos e parcelas. Não foram atribuídos automaticamente ao rateio selecionado.';
+  } else if(source==='despesa-viagem') {
+    const {rows}=await clientPool.query(`SELECT c.codigocvd viagem,c.sequenciacvd sequencia,c.datacvd AS data,c.valorcvd valor_custo,
+      c.veiculocvd placa,c.observacaocvd historico,c.notafiscalcvd nota,c.documentocvd documento,
+      c.financeirocvd financeiro_gerado,c.seriecvd serie_financeira,c.duplicatacvd duplicata,
+      c.chaveduplicatapagarcvd chave_financeira,c.vistaprazocvd modalidade,
+      d.nomecpv descricao
+      FROM logistica.controleviagensdespesas c LEFT JOIN LATERAL
+      (SELECT nomecpv FROM logistica.despesasviagem WHERE codigocpv=c.despesaviagemcvd ORDER BY (empresacpv=c.empresacvd) DESC NULLS LAST LIMIT 1) d ON true
+      WHERE c.empresacvd::text=$1 AND c.codigocvd::text=$2 AND c.sequenciacvd::text=$3`,[empresa,serie,codigo]);
+    if(!rows.length)throw Object.assign(new Error('Despesa não encontrada.'),{status:404});
+    result.lancamento=rows[0];result.referencia=`Viagem ${serie} · despesa ${codigo}`;
+    result.aviso='Despesa registrada na viagem. Sem vínculo financeiro, não é possível confirmar se também está incluída em uma fatura do fornecedor.';
   } else if(source==='nf-entrada') {
     notes=[{key:[empresa,serie,codigo,fornecedor],vinculo:'Nota de origem do lançamento'}];
   } else if(source==='os-produto'||source==='os-servico') {
