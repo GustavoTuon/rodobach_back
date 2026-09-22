@@ -3,6 +3,7 @@ import test from "node:test";
 import { latestValidFuelOdometer, resolveMaintenanceOdometer, loadMaintenanceOdometers } from "../src/services/maintenanceOdometer.js";
 import { clientPool } from "../src/db/clientPool.js";
 import { getVeiculosPool } from "../src/db/pool-veiculos.js";
+import { config } from "../src/config.js";
 
 test("new valid fuel readings update the reference without following a lower tracker", () => {
   const telemetry = {odometro: 230327, data_hora: "2026-09-21T15:00:00Z"};
@@ -32,6 +33,9 @@ test("uses corrected telemetry only when newer and compatible", () => {
 });
 
 test("shared loader re-reads fuel and retrieves positive telemetry rather than zero positions", async t => {
+  const originalHost = config.veiculosDb.host;
+  config.veiculosDb.host = "127.0.0.1";
+  t.after(() => { config.veiculosDb.host = originalHost; });
   let fuelKm = 305059;
   const erpMock = t.mock.method(clientPool, "query", async () => ({rows: [{placa: "RYP7D29", km: fuelKm, data_ref: "2026-09-19"}]}));
   t.mock.method(getVeiculosPool(), "query", async sql => {
