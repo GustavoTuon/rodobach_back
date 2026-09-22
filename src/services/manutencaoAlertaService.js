@@ -165,10 +165,9 @@ export async function runMaintenanceAlerts({ dryRun = true, planIds = null, only
       currentKmByPlate.set(normalizePlate(item.placa), currentKm);
       const event = alertType(item, currentKm);
       if (!event || (onlyOverdue && event.type !== "vencido")) continue;
-      if (dailyDate) event.reference = `${event.reference}|dia:${dailyDate}`;
       const message = buildMaintenanceAlertMessage({...item, ...reading}, status, event, currentKm);
       for (const number of phones(recipient || item.numeros)) {
-        const exists = await pool.query(`SELECT 1 FROM ${ENVIOS()} WHERE automacao_id=$1 AND referencia=$2 AND tipo_alerta=$3 AND numero=$4`, [item.id, event.reference, event.type, number]);
+        const exists = await pool.query(`SELECT 1 FROM ${ENVIOS()} WHERE automacao_id=$1 AND split_part(referencia, '|dia:', 1)=split_part($2::text, '|dia:', 1) AND tipo_alerta=$3 AND numero=$4`, [item.id, event.reference, event.type, number]);
         if (exists.rowCount || await maintenanceAttemptExists(pool, {origin: "plano", recordId: item.id, reference: event.reference, type: event.type, number})) continue;
         const candidate = { automacaoId: item.id, titulo: item.titulo, kmAtual: currentKm, placa: item.placa, numero: number, tipo: event.type, referencia: event.reference, mensagem: message };
         candidates.push(candidate);
@@ -194,12 +193,11 @@ export async function runMaintenanceAlerts({ dryRun = true, planIds = null, only
         const currentKm = currentKmByPlate.get(parent);
         const event = componentAlertType(item, currentKm);
         if (!event || (onlyOverdue && event.type !== "vencido")) continue;
-        if (dailyDate) event.reference = `${event.reference}|dia:${dailyDate}`;
         const related = componentAutomations.filter(automation => normalizePlate(automation.placa) === parent);
         const numbers = recipient ? phones(recipient) : [...new Set(related.flatMap(automation => phones(automation.numeros)))];
         const message = buildComponentAlertMessage({...item, ...odometers.get(parent)}, event, currentKm);
         for (const number of numbers) {
-          const exists = await pool.query(`SELECT 1 FROM ${COMPONENT_ENVIOS()} WHERE registro_id=$1 AND referencia=$2 AND tipo_alerta=$3 AND numero=$4`, [item.id, event.reference, event.type, number]);
+          const exists = await pool.query(`SELECT 1 FROM ${COMPONENT_ENVIOS()} WHERE registro_id=$1 AND split_part(referencia, '|dia:', 1)=split_part($2::text, '|dia:', 1) AND tipo_alerta=$3 AND numero=$4`, [item.id, event.reference, event.type, number]);
           if (exists.rowCount || await maintenanceAttemptExists(pool, {origin: "componente_posicao", recordId: item.id, reference: event.reference, type: event.type, number})) continue;
           const candidate = { origem: "componente_posicao", registroId: item.id, placa: parent, numero: number, tipo: event.type, referencia: event.reference, mensagem: message };
           candidates.push(candidate);
