@@ -29,7 +29,8 @@ export function maintenanceSendError(error) {
 
 export async function maintenanceAttemptExists(pool, {origin, recordId, reference, type, number}) {
   const previous = await pool.query(`SELECT id FROM ${tableName('manutencao_auditoria')}
-    WHERE evento='envio' AND origem=$1 AND registro_id=$2 AND referencia=$3 AND tipo_alerta=$4 AND numero=$5
+    WHERE evento='envio' AND origem=$1 AND registro_id=$2
+      AND split_part(referencia, '|dia:', 1)=split_part($3::text, '|dia:', 1) AND tipo_alerta=$4 AND numero=$5
       AND status IN ('iniciado','aceito','inconclusivo') LIMIT 1`,
   [origin, recordId, reference, type, number]);
   return previous.rowCount > 0;

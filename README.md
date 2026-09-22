@@ -11,6 +11,12 @@ diariamente às 08:00 em `America/Sao_Paulo`, com o diretório de trabalho na ra
 do backend. O script verifica se o fluxo antigo de manutenção no n8n está inativo
 antes de enviar. Não execute junto com o worker de manutenção de dez minutos.
 
+A consulta é diária, mas o mesmo alerta não é reenviado a cada dia: o histórico
+é consultado por plano/componente, marco, tipo (próximo ou vencido) e destinatário.
+Registros antigos com sufixo de data também impedem repetição. Um novo marco ou
+a passagem de próximo para vencido permite um novo aviso. Tentativas inconclusivas
+ficam bloqueadas para conferência; falhas definitivas podem ser tentadas novamente.
+
 O agendamento do Windows, contatos no banco e valores de `.env` são configurações
 do ambiente e não são instalados pelo Git. No Windows, o script
 `scripts/maintenance-daily.ps1` pode ser usado pelo Agendador de Tarefas.
