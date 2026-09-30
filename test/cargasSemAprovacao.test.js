@@ -9,6 +9,9 @@ function setup(t, status='reprovada') {
   const calls=[];
   const query=async(sql,params=[])=>{
     calls.push({sql,params});
+    if(sql.includes('SELECT c.id FROM') && params[0]?.length === 0)return {rows:[],rowCount:0};
+    if(sql.includes('SELECT carga_id FROM'))return {rows:[],rowCount:0};
+    if(sql.includes('COUNT(*)::int AS total'))return {rows:[{total:0,com_cte:0,entregues:0}],rowCount:1};
     if(sql.includes('SELECT viagem_id'))return {rows:[],rowCount:0};
     return {rows:[{id:1,status:'aguardando_cte',status_aprovacao:status,documentos:[],paradas:[],cargas:[]}],rowCount:1};
   };
@@ -44,8 +47,73 @@ test('vincula CT-e sem aprovação e mantém transição operacional',async t=>{
  await request(app).put('/cargas-viagens-v2/cargas/1/documentos').send({documentos:[{tipo:'CT-e',numero:'123'}]}).expect(200);
  assert.ok(calls.some(c=>c.sql.includes('SET status=$2')&&c.params[1]==='em_transito'));
 });
-test('validação obrigatória de carga continua ativa',async t=>{
+test('salva mais de um CT-e na mesma carga',async t=>{
  const {app,calls}=setup(t);
- await request(app).post('/cargas-viagens-v2/cargas').send({}).expect(400);
+ await request(app).put('/cargas-viagens-v2/cargas/1/documentos').send({documentos:[
+  {tipo:'CT-e',numero:'100',chave:'chave100'},
+  {tipo:'CT-e',numero:'200',chave:'chave200'},
+  {tipo:'NF-e',numero:'50',chave:'nf50'},
+ ]}).expect(200);
+ const docs=calls.filter(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('tipo_documento'));
+ assert.deepEqual(docs.map(c=>c.params[2]),['100','200','50']);
+ assert.ok(calls.some(c=>c.sql==='COMMIT'));
+});
+test('cadastra carga sem informações comerciais e usa valores padrão',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).post('/cargas-viagens-v2/cargas').send({}).expect(201);
+ const insert=calls.find(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('status_aprovacao'));
+ assert.equal(insert.params[1],'');
+ assert.equal(insert.params[5],'');
+ assert.equal(insert.params[11],0);
+ assert.ok(calls.some(c=>c.sql==='COMMIT'));
+});
+
+test('edita carga com campos comerciais vazios',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).put('/cargas-viagens-v2/cargas/1').send({cliente:'Cliente conhecido'}).expect(200);
+ assert.ok(calls.some(c=>c.sql==='COMMIT'));
+});
+
+test('cadastra viagem sem placa, motorista, valor ou cargas',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).post('/cargas-viagens-v2/viagens').send({}).expect(201);
+ assert.ok(calls.some(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('numero_viagem')));
+ assert.ok(!calls.some(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('(viagem_id,carga_id)')));
+});
+
+test('edita viagem incompleta preservando identificador quando vazio',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).put('/cargas-viagens-v2/viagens/1').send({numero:'',data:'',placa:'',cargaIds:[]}).expect(200);
+ assert.ok(calls.some(c=>c.sql.includes('SET data=$2,placa_veiculo=$3')&&!c.sql.includes('numero_viagem=')));
+ assert.ok(calls.some(c=>c.sql==='COMMIT'));
+});
+
+test('continua impedindo vínculo de carga indisponível',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).post('/cargas-viagens-v2/viagens').send({cargaIds:[1,2]}).expect(409);
+ assert.ok(calls.some(c=>c.sql==='ROLLBACK'));
+});
+
+test('reserva número automático e usa o mesmo ao salvar ignorando número digitado',async t=>{
+ const {app,calls}=setup(t);
+ const {body}=await request(app).post('/cargas-viagens-v2/viagens/numero').expect(200);
+ assert.match(body.numero,/^V-\d{4}-0001$/);
+ await request(app).post('/cargas-viagens-v2/viagens').send({reservaNumero:body.reservaNumero,numero:'MANUAL'}).expect(201);
+ const insert=calls.find(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('numero_viagem'));
+ assert.equal(insert.params[1],body.numero);
+ assert.equal(calls.filter(c=>c.sql.includes('nextval')).length,1);
+});
+
+test('rejeita reserva adulterada antes de gravar a viagem',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).post('/cargas-viagens-v2/viagens').send({reservaNumero:'invalida'}).expect(400);
  assert.ok(!calls.some(c=>c.sql.includes('INSERT')));
+});
+
+test('ignora tentativa de alterar identificador na edição',async t=>{
+ const {app,calls}=setup(t);
+ await request(app).put('/cargas-viagens-v2/viagens/1').send({numero:'MANUAL'}).expect(200);
+ const update=calls.find(c=>c.sql.includes('SET data=$2,placa_veiculo=$3'));
+ assert.ok(update);
+ assert.ok(!update.params.includes('MANUAL'));
 });
