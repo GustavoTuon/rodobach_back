@@ -6,6 +6,7 @@ import {
   importClientesWorkbook,
   sendOpportunitiesToN8n,
   sendClientOpportunityToN8n,
+  sendSelectedOpportunitiesToN8n,
 } from "../services/oportunidadesRetornoService.js";
 
 const router = Router();
@@ -31,7 +32,7 @@ router.get("/oportunidades-retorno/modelo.xlsx", async (_req, res, next) => {
 
 router.post("/oportunidades-retorno/importar", async (req, res, next) => {
   try {
-    res.json(await importClientesWorkbook(req.body?.arquivoBase64, { replace: req.body?.substituir !== false }));
+    res.json(await importClientesWorkbook(req.body?.arquivoBase64, { replace: req.body?.substituir === true }));
   } catch (error) {
     next(error);
   }
@@ -39,7 +40,7 @@ router.post("/oportunidades-retorno/importar", async (req, res, next) => {
 
 router.post("/oportunidades-retorno/analisar", async (req, res, next) => {
   try {
-    res.json(await analyzeSmOpportunities(req.body?.smId, req.body?.raioKm));
+    res.json(await analyzeSmOpportunities(req.body?.smId, req.body?.raioKm, req.body?.fonte));
   } catch (error) {
     next(error);
   }
@@ -62,3 +63,11 @@ router.post("/oportunidades-retorno/enviar-cliente", async (req, res, next) => {
 });
 
 export { router as oportunidadesRetornoRouter };
+
+router.post("/oportunidades-retorno/enviar-selecionados", async (req, res, next) => {
+  try {
+    res.json(await sendSelectedOpportunitiesToN8n(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+});

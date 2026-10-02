@@ -5,7 +5,7 @@ import request from 'supertest';
 import {pool} from '../src/db/pool.js';
 import {cargasViagensV2Router} from '../src/routes/cargasViagensV2.js';
 
-function setup(t, status='reprovada') {
+function setup(t, status='reprovada', operationalStatus='aguardando_cte') {
   const calls=[];
   const query=async(sql,params=[])=>{
     calls.push({sql,params});
@@ -13,7 +13,7 @@ function setup(t, status='reprovada') {
     if(sql.includes('SELECT carga_id FROM'))return {rows:[],rowCount:0};
     if(sql.includes('COUNT(*)::int AS total'))return {rows:[{total:0,com_cte:0,entregues:0}],rowCount:1};
     if(sql.includes('SELECT viagem_id'))return {rows:[],rowCount:0};
-    return {rows:[{id:1,status:'aguardando_cte',status_aprovacao:status,documentos:[],paradas:[],cargas:[]}],rowCount:1};
+    return {rows:[{id:1,status:operationalStatus,status_aprovacao:status,documentos:[],paradas:[],cargas:[]}],rowCount:1};
   };
   t.mock.method(pool,'connect',async()=>({query,release(){}}));
   t.mock.method(pool,'query',query);
@@ -21,6 +21,17 @@ function setup(t, status='reprovada') {
   return {app,calls};
 }
 const input={cliente:'Cliente',clienteFinal:'Entrega',tomadorServico:'Tomador',origem:'Origem',ufOrigem:'SC',destino:'Destino',ufDestino:'SP',valorCliente:500};
+
+test('desvincula o último CT-e sem excluir carga ou viagem e preserva a entrega', async t => {
+ const {app,calls}=setup(t,'aprovada','entregue');
+ await request(app).put('/cargas-viagens-v2/cargas/1/documentos').send({documentos:[]}).expect(200);
+ const deletes=calls.filter(c=>c.sql.startsWith('DELETE'));
+ assert.equal(deletes.length,1);
+ assert.ok(deletes[0].sql.includes('carga_documentos_v2'));
+ assert.deepEqual(deletes[0].params,['1']);
+ assert.ok(calls.some(c=>c.sql.includes('SET status=$2') && c.params[1]==='entregue'));
+ assert.ok(calls.some(c=>c.sql==='COMMIT'));
+});
 test('aprovar e reprovar estão desativados sem alterar banco',async t=>{
  const {app,calls}=setup(t);
  for(const acao of ['aprovar','reprovar','enviar'])await request(app).post('/cargas-viagens-v2/cargas/1/aprovacao').send({acao}).expect(410);
