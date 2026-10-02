@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
-import { tableName } from "../config.js";
+import jwt from "jsonwebtoken";
+import { config, tableName } from "../config.js";
 
 export const cargasViagensV2Router = Router();
 
@@ -724,10 +725,6 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
   const client = await pool.connect();
   try {
     const input = req.body || {};
-    if (!text(input.cliente) || !text(input.clienteFinal) || !text(input.tomadorServico)
-      || !text(input.origem) || !text(input.ufOrigem) || !text(input.destino) || !text(input.ufDestino)) {
-      return res.status(400).json({ error: "Informe cliente inicial, cliente final, tomador do servico, origem e destino." });
-    }
     const user = auditUser(req.user);
     await client.query("BEGIN");
     const { rows } = await client.query(
@@ -756,10 +753,6 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
   const client = await pool.connect();
   try {
     const input = req.body || {};
-    if (!text(input.cliente) || !text(input.clienteFinal) || !text(input.tomadorServico)
-      || !text(input.origem) || !text(input.ufOrigem) || !text(input.destino) || !text(input.ufDestino)) {
-      return res.status(400).json({ error: "Informe cliente inicial, cliente final, tomador do servico, origem e destino." });
-    }
     const user = auditUser(req.user);
     await client.query("BEGIN");
     const { rowCount } = await client.query(
@@ -814,7 +807,9 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
     if (text(req.query.status)) { values.push(text(req.query.status)); where.push(`v.situacao=$${values.length}`); }
     if (text(req.query.q)) {
       values.push(`%${text(req.query.q)}%`);
-      where.push(`CONCAT_WS(' ',v.numero_viagem,v.placa_veiculo,v.motorista) ILIKE $${values.length}`);
+      where.push(`(CONCAT_WS(' ',v.numero_viagem,v.placa_veiculo,v.motorista) ILIKE $${values.length}
+        OR EXISTS (SELECT 1 FROM ${VINCULOS()} qvc JOIN ${DOCUMENTOS()} qd ON qd.carga_id=qvc.carga_id
+          WHERE qvc.viagem_id=v.id AND CONCAT_WS(' ',qd.numero_documento,qd.chave_documento) ILIKE $${values.length}))`);
     }
     if (text(req.query.vendedor)) {
       values.push(`%${text(req.query.vendedor)}%`);
@@ -874,15 +869,33 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens/:id", async (req, res, nex
   } catch (error) { next(error); }
 });
 
+const tripNumber = id => `V-${new Date().getFullYear()}-${String(id).padStart(4, "0")}`;
+
+cargasViagensV2Router.post("/cargas-viagens-v2/viagens/numero", async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT nextval(pg_get_serial_sequence('${VIAGENS().replaceAll('"', '')}','id')) AS id`);
+    const reservedId = Number(rows[0].id);
+    const numero = tripNumber(reservedId);
+    const reservaNumero = jwt.sign({ reservedId, numero, userId: auditUser(req.user).id }, config.jwtSecret,
+      { audience: "viagem-numero", expiresIn: "7d" });
+    res.json({ numero, reservaNumero });
+  } catch (error) { next(error); }
+});
+
 cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) => {
   const client = await pool.connect();
   try {
     const input = req.body || {};
     const cargaIds = [...new Set((Array.isArray(input.cargaIds) ? input.cargaIds : []).map(Number).filter(Number.isInteger))];
-    if (!text(input.placa) || !cargaIds.length) return res.status(400).json({ error: "Selecione o veiculo e pelo menos uma carga." });
     const frota = String(input.tipoPropriedade || "").trim().toUpperCase() === "FROTA";
-    if (!frota && !text(input.motorista)) return res.status(400).json({ error: "Informe o motorista do veiculo terceiro." });
     const user = auditUser(req.user);
+    let reservation;
+    if (input.reservaNumero) {
+      try {
+        reservation = jwt.verify(input.reservaNumero, config.jwtSecret, { audience: "viagem-numero", algorithms: ["HS256"] });
+        if (reservation.userId !== user.id || !Number.isSafeInteger(reservation.reservedId) || reservation.reservedId <= 0) throw new Error("Invalid reservation");
+      } catch { return res.status(400).json({ error: "O número reservado expirou ou é inválido. Reabra o cadastro da viagem." }); }
+    }
     await client.query("BEGIN");
     const available = await client.query(
       `SELECT c.id FROM ${CARGAS()} c LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id WHERE c.id=ANY($1::bigint[]) AND vc.carga_id IS NULL FOR UPDATE OF c`,
@@ -892,9 +905,9 @@ cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) 
       await client.query("ROLLBACK");
       return res.status(409).json({ error: "Uma ou mais cargas ja foram programadas. Atualize a lista e tente novamente." });
     }
-    const sequence = await client.query(`SELECT nextval(pg_get_serial_sequence('${VIAGENS().replaceAll('"', '')}','id')) AS id`);
-    const id = Number(sequence.rows[0].id);
-    const numero = text(input.numero, `V-${new Date().getFullYear()}-${String(id).padStart(4, "0")}`);
+    const sequence = reservation ? null : await client.query(`SELECT nextval(pg_get_serial_sequence('${VIAGENS().replaceAll('"', '')}','id')) AS id`);
+    const id = reservation?.reservedId || Number(sequence.rows[0].id);
+    const numero = reservation?.numero || tripNumber(id);
     const docs = input.docs || {};
     await client.query(
       `INSERT INTO ${VIAGENS()} (id,numero_viagem,data,placa_veiculo,tipo_propriedade,motorista,km_viagem,numero_motorista,cnh_motorista,antt_veiculo,conta_deposito,chave_pix,valor_motorista,doc_placas,doc_antt,doc_conta_deposito,doc_chave_pix,doc_cnh_motorista,doc_consulta_motorista,doc_comprovante_residencia,doc_numero_motorista,rota_maps_url,observacoes,situacao,criado_por_id,criado_por_login,atualizado_por_id,atualizado_por_login)
@@ -923,9 +936,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     const input = req.body || {};
     const viagemId = Number(req.params.id);
     const cargaIds = [...new Set((Array.isArray(input.cargaIds) ? input.cargaIds : []).map(Number).filter(Number.isInteger))];
-    if (!text(input.placa) || !cargaIds.length) return res.status(400).json({ error: "Selecione o veiculo e pelo menos uma carga." });
     const frota = String(input.tipoPropriedade || "").trim().toUpperCase() === "FROTA";
-    if (!frota && !text(input.motorista)) return res.status(400).json({ error: "Informe o motorista do veiculo terceiro." });
     const user = auditUser(req.user);
     const docs = input.docs || {};
     await client.query("BEGIN");
@@ -949,13 +960,13 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     const previousIds = previous.rows.map((row) => Number(row.carga_id));
     const removedIds = previousIds.filter((id) => !cargaIds.includes(id));
     await client.query(
-      `UPDATE ${VIAGENS()} SET numero_viagem=$2,data=$3,placa_veiculo=$4,tipo_propriedade=$5,motorista=$6,
-       km_viagem=$7,numero_motorista=$8,cnh_motorista=$9,antt_veiculo=$10,conta_deposito=$11,chave_pix=$12,
-       valor_motorista=$13,doc_placas=$14,doc_antt=$15,doc_conta_deposito=$16,doc_chave_pix=$17,
-       doc_cnh_motorista=$18,doc_consulta_motorista=$19,doc_comprovante_residencia=$20,doc_numero_motorista=$21,
-       rota_maps_url=$22,observacoes=$23,atualizado_por_id=$24,atualizado_por_login=$25,atualizado_em=NOW()
+      `UPDATE ${VIAGENS()} SET data=$2,placa_veiculo=$3,tipo_propriedade=$4,motorista=$5,
+       km_viagem=$6,numero_motorista=$7,cnh_motorista=$8,antt_veiculo=$9,conta_deposito=$10,chave_pix=$11,
+       valor_motorista=$12,doc_placas=$13,doc_antt=$14,doc_conta_deposito=$15,doc_chave_pix=$16,
+       doc_cnh_motorista=$17,doc_consulta_motorista=$18,doc_comprovante_residencia=$19,doc_numero_motorista=$20,
+       rota_maps_url=$21,observacoes=$22,atualizado_por_id=$23,atualizado_por_login=$24,atualizado_em=NOW()
        WHERE id=$1`,
-      [viagemId, text(input.numero), date(input.data), text(input.placa), text(input.tipoPropriedade), text(input.motorista),
+      [viagemId, date(input.data), text(input.placa), text(input.tipoPropriedade), text(input.motorista),
         number(input.km, null), text(input.numeroMotorista), text(input.cnh), text(input.antt), text(input.contaDeposito),
         text(input.chavePix), frota ? 0 : number(input.valorMotorista), Boolean(docs.placas), Boolean(docs.antt),
         Boolean(docs.contaDeposito), Boolean(docs.chavePix), Boolean(docs.cnh), Boolean(docs.consultaMotorista),

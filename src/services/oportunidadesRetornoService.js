@@ -1,4 +1,6 @@
 import ExcelJS from "exceljs";
+import { parseClientesWorkbook, importedContactKey, mergeContactValues } from "./retornoWorkbook.js";
+export { parseClientesWorkbook } from "./retornoWorkbook.js";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
 import { config, tableName } from "../config.js";
@@ -8,6 +10,17 @@ import { getStatusCargaFrota } from "./statusCargaService.js";
 const CLIENTES_TABLE = tableName("oportunidades_retorno_clientes");
 const N8N_WEBHOOK_PATH = "rodobach-oportunidades-retorno";
 const cityCoordinatesCache = new Map();
+let fleetSnapshot;
+let fleetSnapshotExpiresAt = 0;
+
+async function getReturnFleet() {
+  if (!fleetSnapshot || Date.now() >= fleetSnapshotExpiresAt) {
+    fleetSnapshotExpiresAt = Date.now() + 30000;
+    fleetSnapshot = Promise.all([getTrafegusDashboard(), getStatusCargaFrota({ dias: 180 })]);
+    fleetSnapshot.catch(() => { fleetSnapshot = null; });
+  }
+  return fleetSnapshot;
+}
 
 function sendingEnabled() {
   return String(process.env.N8N_OPORTUNIDADES_RETORNO_ENVIO_HABILITADO || "").toLowerCase() === "true";
@@ -23,51 +36,10 @@ function text(value) {
 }
 
 function number(value) {
+  if (value === null || value === undefined || text(value) === "") return null;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   const parsed = Number(text(value).replace(",", "."));
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function header(value) {
-  return text(value)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]/gi, "")
-    .toLowerCase();
-}
-
-const COLUMN_ALIASES = {
-  nome: ["nome", "cliente", "razaosocial", "empresa"],
-  cidade: ["cidade", "municipio"],
-  uf: ["uf", "estado"],
-  endereco: ["endereco", "logradouro", "localizacao"],
-  latitude: ["latitude", "lat"],
-  longitude: ["longitude", "lng", "lon"],
-  contato: ["contato", "nomecontato", "responsavel"],
-  telefone: ["telefone", "celular", "whatsapp"],
-  tipoCarga: ["tipocarga", "carga", "produto", "segmento"],
-  observacao: ["observacao", "observacoes", "obs"],
-};
-
-function mappedValue(row, aliases) {
-  const entries = Object.entries(row);
-  const found = entries.find(([key]) => aliases.includes(header(key)));
-  return found ? found[1] : "";
-}
-
-function normalizeImportedRow(row) {
-  return {
-    nome: text(mappedValue(row, COLUMN_ALIASES.nome)),
-    cidade: text(mappedValue(row, COLUMN_ALIASES.cidade)),
-    uf: text(mappedValue(row, COLUMN_ALIASES.uf)).slice(0, 2).toUpperCase(),
-    endereco: text(mappedValue(row, COLUMN_ALIASES.endereco)),
-    latitude: number(mappedValue(row, COLUMN_ALIASES.latitude)),
-    longitude: number(mappedValue(row, COLUMN_ALIASES.longitude)),
-    contato: text(mappedValue(row, COLUMN_ALIASES.contato)),
-    telefone: text(mappedValue(row, COLUMN_ALIASES.telefone)),
-    tipoCarga: text(mappedValue(row, COLUMN_ALIASES.tipoCarga)),
-    observacao: text(mappedValue(row, COLUMN_ALIASES.observacao)),
-  };
 }
 
 function haversineKm(a, b) {
@@ -81,7 +53,8 @@ function haversineKm(a, b) {
 }
 
 async function geocodeCity(city, uf) {
-  const key = `${text(city).toUpperCase()}/${text(uf).toUpperCase()}`;
+  if (!text(city) || !text(uf)) return null;
+  const key = `${text(city).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase()}/${text(uf).toUpperCase()}`;
   if (cityCoordinatesCache.has(key)) return await cityCoordinatesCache.get(key);
   const pending = (async () => {
     try {
@@ -94,6 +67,7 @@ async function geocodeCity(city, uf) {
     });
     const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${query}`, {
       headers: { "user-agent": "Rodobach/1.0 oportunidades-retorno" },
+      signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
@@ -109,7 +83,7 @@ async function geocodeCity(city, uf) {
         RN: "RIO GRANDE DO NORTE", RS: "RIO GRANDE DO SUL", RO: "RONDONIA", RR: "RORAIMA",
         SC: "SANTA CATARINA", SP: "SAO PAULO", SE: "SERGIPE", TO: "TOCANTINS",
       }[normalizedUf] || normalizedUf)
-    ) || payload.results?.[0];
+    );
     const result = match && Number.isFinite(Number(match.latitude)) && Number.isFinite(Number(match.longitude))
       ? { latitude: Number(match.latitude), longitude: Number(match.longitude) }
       : null;
@@ -159,8 +133,16 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
         con.cidadecoletacon AS cidade_codigo,
         con.dataemissaocon::date AS data,
         UPPER(NULLIF(TRIM(con.veiculocon::text), '')) AS placa,
+        NULLIF(TRIM(natureza.nomenat), '') AS material,
         COALESCE(NULLIF(con.totalcon, 0), con.valorfretecon, 0)::numeric AS receita
       FROM logistica.conhecimentos con
+      LEFT JOIN LATERAL (
+        SELECT n.nomenat
+        FROM logistica.naturezascargas n
+        WHERE n.codigonat = con.naturezacargacon
+        ORDER BY (n.empresanat = con.empresacon) DESC, (n.empresanat = 1) DESC, n.empresanat
+        LIMIT 1
+      ) natureza ON true
       WHERE con.statuscon = 2
         AND con.dataemissaocon::date >= DATE '2023-01-01'
         AND con.cidadecoletacon IS NOT NULL
@@ -177,6 +159,7 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
       COUNT(*)::int AS quantidade_fretes,
       SUM(h.receita)::numeric AS faturamento,
       MAX(h.data)::date AS ultimo_frete,
+      ARRAY_AGG(DISTINCT h.material ORDER BY h.material) FILTER (WHERE h.material IS NOT NULL) AS materiais,
       ARRAY_AGG(DISTINCT h.placa ORDER BY h.placa) FILTER (WHERE h.placa IS NOT NULL) AS placas
     FROM historico h
     JOIN localidades.cidades cid ON cid.codigocid = h.cidade_codigo
@@ -216,6 +199,7 @@ async function listBilledClientsNear(destination, destinationUf, radiusKm, limit
       faturamento: Number(row.faturamento) || 0,
       ultimoFrete: row.ultimo_frete,
       placas: Array.isArray(row.placas) ? row.placas : [],
+      materiais: Array.isArray(row.materiais) ? row.materiais : [],
       mapsUrl: `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}`,
       fonte: "Histórico de CT-es desde 2023",
     };
@@ -253,49 +237,56 @@ export async function createClientesTemplate() {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
-export async function importClientesWorkbook(base64, { replace = true } = {}) {
-  const buffer = Buffer.from(text(base64).replace(/^data:.*?;base64,/, ""), "base64");
-  if (!buffer.length) throw new Error("Arquivo de importacao vazio.");
-  if (buffer.length > 5 * 1024 * 1024) throw new Error("A planilha excede o limite de 5 MB.");
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
-  const sheet = workbook.worksheets[0];
-  if (!sheet) throw new Error("A planilha nao possui abas validas.");
-  if (sheet.rowCount > 10000) throw new Error("A planilha excede o limite de 10.000 linhas.");
-  const headers = sheet.getRow(1).values.slice(1).map((value) => String(value || ""));
-  const imported = [];
-  sheet.eachRow((row, rowNumber) => {
-    if (rowNumber === 1) return;
-    const item = {};
-    headers.forEach((header, index) => { item[header] = row.getCell(index + 1).text; });
-    imported.push(normalizeImportedRow(item));
-  });
-  const valid = imported.filter((row) => row.nome && row.cidade && row.uf);
-  const invalid = imported.length - valid.length;
-  const withoutCoordinates = valid.filter((row) => row.latitude === null || row.longitude === null).length;
-
+export async function importClientesWorkbook(base64, { replace = false } = {}) {
+  const parsed = await parseClientesWorkbook(base64);
+  const withPhone = parsed.valid.filter((row) => /\d/.test(row.telefone));
+  const withoutPhone = parsed.valid.length - withPhone.length;
+  if (!withPhone.length) throw new Error("Nenhum contato com número de telefone para importar.");
   const client = await pool.connect();
+  let inserted = 0;
+  let updated = 0;
+  let consolidated = 0;
   try {
     await client.query("BEGIN");
-    if (replace) await client.query(`UPDATE ${CLIENTES_TABLE} SET ativo = FALSE, atualizado_em = NOW() WHERE ativo = TRUE`);
-    for (const row of valid) {
-      await client.query(`
-        INSERT INTO ${CLIENTES_TABLE}
-          (nome, cidade, uf, endereco, latitude, longitude, contato, telefone, tipo_carga, observacao)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      `, [
-        row.nome, row.cidade, row.uf, row.endereco, row.latitude, row.longitude,
-        row.contato, row.telefone, row.tipoCarga, row.observacao,
-      ]);
+    await client.query(`LOCK TABLE ${CLIENTES_TABLE} IN SHARE ROW EXCLUSIVE MODE`);
+    const { rows } = await client.query(`SELECT * FROM ${CLIENTES_TABLE} WHERE ativo = TRUE ORDER BY id`);
+    const existing = new Map();
+    for (const row of rows) {
+      const key = importedContactKey(row);
+      const previous = existing.get(key);
+      if (previous) {
+        previous.tipo_carga = mergeContactValues(previous.tipo_carga, row.tipo_carga);
+        previous.observacao = mergeContactValues(previous.observacao, row.observacao);
+        await client.query(`UPDATE ${CLIENTES_TABLE} SET tipo_carga=$2, observacao=$3, atualizado_em=NOW() WHERE id=$1`, [previous.id, previous.tipo_carga, previous.observacao]);
+        await client.query(`UPDATE ${CLIENTES_TABLE} SET ativo=FALSE, atualizado_em=NOW() WHERE id=$1`, [row.id]);
+        consolidated++;
+      } else existing.set(key, row);
+    }
+    if (replace) await client.query(`UPDATE ${CLIENTES_TABLE} SET ativo=FALSE, atualizado_em=NOW() WHERE ativo=TRUE`);
+    for (const row of withPhone) {
+      const previous = existing.get(importedContactKey(row));
+      if (previous) {
+        const material = mergeContactValues(previous.tipo_carga, row.tipoCarga);
+        const observation = mergeContactValues(previous.observacao, row.observacao);
+        await client.query(`UPDATE ${CLIENTES_TABLE}
+          SET tipo_carga=$2, observacao=$3, ativo=TRUE, atualizado_em=NOW() WHERE id=$1`,
+        [previous.id, material, observation]);
+        updated++;
+      } else {
+        await client.query(`INSERT INTO ${CLIENTES_TABLE}
+          (nome,cidade,uf,endereco,latitude,longitude,contato,telefone,tipo_carga,observacao)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [row.nome,row.cidade,row.uf,row.endereco,row.latitude,row.longitude,row.contato,row.telefone,row.tipoCarga,row.observacao]);
+        inserted++;
+      }
     }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
-  } finally {
-    client.release();
-  }
-  return { ok: true, importados: valid.length, ignorados: invalid, semCoordenadas: withoutCoordinates };
+  } finally { client.release(); }
+  return { ok: true, importados: withPhone.length, semTelefoneIgnorados: withoutPhone, novos: inserted, atualizados: updated, duplicadosConsolidados: parsed.duplicates + consolidated,
+    ignorados: parsed.invalid, semCoordenadas: parsed.withoutCoordinates, aba: parsed.aba, abas: parsed.abas, pendencias: parsed.pendencias };
 }
 
 export async function listClientesRetorno() {
@@ -317,16 +308,16 @@ export async function listClientesRetorno() {
     contato: row.contato,
     telefone: row.telefone,
     tipoCarga: row.tipo_carga,
+    materiais: String(row.tipo_carga || "").split(" | ").filter(Boolean),
     observacao: row.observacao,
     importadoEm: row.importado_em,
   }));
 }
 
 export async function getOportunidadesOverview() {
-  const [clientes, trafegus, frota] = await Promise.all([
+  const [clientes, [trafegus, frota]] = await Promise.all([
     listClientesRetorno(),
-    getTrafegusDashboard(),
-    getStatusCargaFrota({ dias: 180 }),
+    getReturnFleet(),
   ]);
   const placasComSm = new Set((trafegus.sms || []).map((item) => text(item.placa).replace(/[^a-z0-9]/gi, "").toUpperCase()));
   const veiculosTelemetria = (frota.rows || [])
@@ -384,12 +375,12 @@ function buildMessage({ sm, destino, raioKm, clientes }) {
   return lines.join("\n");
 }
 
-export async function analyzeSmOpportunities(smId, rawRadius = 200) {
+export async function analyzeSmOpportunities(smId, rawRadius = 200, fonte = "sistema") {
+  if (!["sistema", "planilha"].includes(fonte)) throw new Error("Fonte de oportunidades inválida.");
   const radiusKm = Math.min(Math.max(number(rawRadius) || 200, 1), 1000);
   const selection = text(smId);
   const overview = await getOportunidadesOverview();
   const telemetryPlate = selection.startsWith("tel:") ? selection.slice(4).replace(/[^a-z0-9]/gi, "").toUpperCase() : "";
-  let route = null;
   let sm;
   let destination;
   if (telemetryPlate) {
@@ -403,7 +394,7 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
     sm = { id: null, placa: vehicle.placa, motorista: "", origem: "telemetria" };
   } else {
     const numericSmId = selection.startsWith("sm:") ? selection.slice(3) : selection;
-    route = await getTrafegusGoogleRoute(numericSmId);
+    const route = await getTrafegusGoogleRoute(numericSmId);
     destination = route.destino;
     sm = overview.sms.find((item) => String(item.id) === String(numericSmId)) || {
       id: route.sm,
@@ -414,10 +405,27 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
   if (!destination || !Number.isFinite(destination.latitude) || !Number.isFinite(destination.longitude)) {
     throw new Error("O veiculo nao possui coordenadas validas para a analise.");
   }
-  const nearby = overview.clientes
+  const located = fonte === "planilha" ? await mapWithConcurrency(overview.clientes, 6, async (client) => {
+    const coordinates = Number.isFinite(client.latitude) && Number.isFinite(client.longitude)
+      ? client : await geocodeCity(client.cidade, client.uf);
+    return coordinates ? { ...client, latitude: coordinates.latitude, longitude: coordinates.longitude } : client;
+  }) : [];
+  // Persist resolved cities so later searches and process restarts avoid external geocoding.
+  const newlyLocated = located.filter((client, index) =>
+    Number.isFinite(client.latitude) && Number.isFinite(client.longitude)
+    && (!Number.isFinite(overview.clientes[index].latitude) || !Number.isFinite(overview.clientes[index].longitude))
+  ).map(({ id, latitude, longitude }) => ({ id: String(id), latitude, longitude }));
+  if (newlyLocated.length) await pool.query(`
+    UPDATE ${CLIENTES_TABLE} AS c SET latitude=p.latitude, longitude=p.longitude
+    FROM jsonb_to_recordset($1::jsonb) AS p(id text, latitude numeric, longitude numeric)
+    WHERE c.id=p.id::bigint AND (c.latitude IS NULL OR c.longitude IS NULL)
+  `, [JSON.stringify(newlyLocated)]);
+  const nearby = located
     .filter((client) => Number.isFinite(client.latitude) && Number.isFinite(client.longitude))
     .map((client) => ({
       ...client,
+      id: `planilha:${client.id}`,
+      fonte: "planilha",
       distanciaKm: haversineKm(destination, client),
       mapsUrl: `https://www.google.com/maps/search/?api=1&query=${client.latitude},${client.longitude}`,
     }))
@@ -426,7 +434,7 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
   const destinationUf = telemetryPlate
     ? text(overview.veiculosTelemetria.find((item) => item.placa === telemetryPlate)?.localizacao?.uf).toUpperCase()
     : text(destination.descricao).toUpperCase().match(/\/([A-Z]{2})(?:\W|$)/)?.[1] || "";
-  const potenciais = await listBilledClientsNear(destination, destinationUf, radiusKm, 100);
+  const potenciais = fonte === "planilha" ? nearby : await listBilledClientsNear(destination, destinationUf, radiusKm, 100);
   const potenciaisComMensagem = potenciais.map((cliente) => ({
     ...cliente,
     mensagemContato: buildClientAvailabilityMessage({ sm, destino: destination, cliente }),
@@ -435,6 +443,8 @@ export async function analyzeSmOpportunities(smId, rawRadius = 200) {
     sm,
     destino: destination,
     raioKm: radiusKm,
+    fonte,
+    semLocalizacao: located.filter((client) => !Number.isFinite(client.latitude) || !Number.isFinite(client.longitude)).length,
     clientes: nearby,
     potenciais: potenciaisComMensagem,
     mensagem: buildMessage({ sm, destino: destination, raioKm: radiusKm, clientes: potenciaisComMensagem }),
@@ -447,10 +457,10 @@ export async function sendClientOpportunityToN8n(payload) {
   if (!sendingEnabled()) throw new Error("Envio bloqueado: o modulo esta em modo de validacao.");
   const webhookUrl = opportunitiesWebhookUrl();
   if (!webhookUrl) throw new Error("Webhook n8n de oportunidades ainda nao configurado.");
-  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm);
+  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm, payload.fonte);
   const cliente = analysis.potenciais.find((item) => String(item.id) === String(payload.clienteId));
   if (!cliente) throw new Error("Cliente nao encontrado nesta analise.");
-  const destinatario = text(payload.destinatario || cliente.telefone).replace(/\D/g, "");
+  const destinatario = normalizeOpportunityPhone(payload.destinatario || cliente.telefone);
   if (!destinatario) throw new Error("O cliente nao possui telefone. Informe um numero para envio.");
   const mensagem = text(payload.mensagem) || cliente.mensagemContato;
   const response = await fetch(webhookUrl, {
@@ -472,6 +482,55 @@ export async function sendClientOpportunityToN8n(payload) {
   return { ok: true, status: response.status, cliente: cliente.nome, destinatario };
 }
 
+export function normalizeOpportunityPhone(value) {
+  const digits = text(value).replace(/\D/g, "");
+  const normalized = digits.length === 10 || digits.length === 11 ? `55${digits}` : digits;
+  return /^55[1-9]\d{9,10}$/.test(normalized) ? normalized : "";
+}
+
+export async function sendSelectedOpportunitiesToN8n(payload) {
+  if (!sendingEnabled()) throw new Error("Envio bloqueado: o modulo esta em modo de validacao.");
+  const webhookUrl = opportunitiesWebhookUrl();
+  if (!webhookUrl) throw new Error("Webhook n8n de oportunidades ainda nao configurado.");
+  if (!text(payload.mensagem)) throw new Error("Informe a mensagem para os contatos selecionados.");
+  if (!Array.isArray(payload.clienteIds) || !payload.clienteIds.length || payload.clienteIds.length > 100) {
+    throw new Error("Selecione entre 1 e 100 contatos.");
+  }
+  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm, payload.fonte);
+  const ids = [...new Set(payload.clienteIds.map(String))];
+  const clients = ids.map((id) => analysis.potenciais.find((client) => String(client.id) === id));
+  if (clients.some((client) => !client)) throw new Error("Um contato não está mais disponível nesta análise. Analise novamente.");
+  return dispatchSelectedOpportunityMessages(clients, analysis, webhookUrl, payload.mensagem);
+}
+
+export async function dispatchSelectedOpportunityMessages(clients, analysis, webhookUrl, mensagem) {
+  const results = [];
+  const phones = new Set();
+  await mapWithConcurrency(clients, 5, async (cliente) => {
+    const destinatario = normalizeOpportunityPhone(cliente.telefone);
+    if (!destinatario || phones.has(destinatario)) {
+      results.push({ id: cliente.id, status: "ignorado", motivo: destinatario ? "Telefone repetido" : "Telefone inválido ou ausente" });
+      return;
+    }
+    phones.add(destinatario);
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(20000),
+        body: JSON.stringify({ evento: "oportunidade_retorno_cliente", geradoEm: new Date().toISOString(), destinatario,
+          mensagem: text(mensagem), sm: analysis.sm, destino: analysis.destino, raioKm: analysis.raioKm, cliente }),
+      });
+      await response.text();
+      if (!response.ok) throw new Error(`Webhook respondeu HTTP ${response.status}`);
+      results.push({ id: cliente.id, status: "enviado" });
+    } catch (error) {
+      results.push({ id: cliente.id, status: "falha", motivo: error.message });
+    }
+  });
+  return { resultados: results };
+}
+
 export async function sendOpportunitiesToN8n(payload) {
   if (!sendingEnabled()) {
     throw new Error("Envio bloqueado: o modulo esta em modo de validacao.");
@@ -481,7 +540,7 @@ export async function sendOpportunitiesToN8n(payload) {
   if (!text(payload.destinatario || process.env.N8N_OPORTUNIDADES_RETORNO_DESTINATARIO)) {
     throw new Error("Informe o numero que deve receber a mensagem.");
   }
-  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm);
+  const analysis = await analyzeSmOpportunities(payload.smId, payload.raioKm, payload.fonte);
   const body = {
     evento: "oportunidades_retorno",
     geradoEm: new Date().toISOString(),

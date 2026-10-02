@@ -44,7 +44,48 @@ function quotationPeriod(months) {
   return { startDate: start.toISOString().slice(0, 10), endDate, months: amount };
 }
 
-async function getQuotationHistory({ startDate, endDate, ufOrigem, ufDestino, municipioOrigem, municipioDestino, placa, material, vendedor }) {
+const QUOTE_COLUMNS = { data: 'data', origem: 'origem', destino: 'destino', clienteInicial: 'cliente_inicial', clienteFinal: 'cliente_final', material: 'material', peso: 'peso', placa: 'placa', km: 'km', valor: 'valor', valorMotorista: 'valor_motorista', valorTonelada: 'valor_tonelada', ufOrigem: 'uf_origem', ufDestino: 'uf_destino' };
+const NUMERIC_QUOTE_FIELDS = new Set(['peso', 'km', 'valor', 'valorMotorista', 'valorTonelada']);
+const ENRICHED_QUOTE_FIELDS = new Set(['clienteInicial', 'clienteFinal', 'km', 'valorTonelada']);
+const quoteValueSql = field => NUMERIC_QUOTE_FIELDS.has(field) ? `COALESCE(ROUND(${QUOTE_COLUMNS[field]}::numeric, 2)::text, '')` : `COALESCE(${QUOTE_COLUMNS[field]}::text, '')`;
+
+export function quotationPaging(input = {}) {
+  const page = Math.max(1, Math.min(100000, Number.parseInt(input.page, 10) || 1));
+  const pageSize = Math.max(10, Math.min(100, Number.parseInt(input.pageSize, 10) || 25));
+  const sort = Object.hasOwn(QUOTE_COLUMNS, input.sort?.field) ? input.sort.field : 'data';
+  const direction = input.sort?.direction === 'asc' ? 'ASC' : 'DESC';
+  const filters = Object.fromEntries(Object.keys(QUOTE_COLUMNS)
+    .filter(key => Array.isArray(input.filters?.[key]) || (typeof input.filters?.[key] === 'string' && input.filters[key].trim()))
+    .map(key => [key, Array.isArray(input.filters[key]) ? [...new Set(input.filters[key].filter(value => typeof value === 'string'))] : input.filters[key].trim().slice(0, 120)]));
+  return { page, pageSize, sort, direction, filters };
+}
+
+async function getQuotationHistory({ startDate, endDate, ufOrigem, ufDestino, municipioOrigem, municipioDestino, placa, material, vendedor, paging, optionsField, optionsSearch = "", optionsPage = 1 }) {
+  const values = [startDate, endDate, ufOrigem, ufDestino, placa, material, vendedor, municipioOrigem, municipioDestino];
+  const baseConditions = [];
+  const conditions = Object.entries(paging.filters).filter(([field, value]) => Array.isArray(value) || (field !== 'ufOrigem' && field !== 'ufDestino')).map(([field, value]) => {
+    let condition;
+    if (Array.isArray(value)) {
+      values.push(value);
+      condition = `${quoteValueSql(field)} = ANY($${values.length}::text[])`;
+    } else {
+      values.push(`%${normalize(value).replace(/[\\%_]/g, char => '\\' + char)}%`);
+      condition = `TRANSLATE(UPPER(COALESCE(${QUOTE_COLUMNS[field]}::text,'')), 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ', 'AAAAAEEEEIIIIOOOOOUUUUC') LIKE $${values.length}`;
+    }
+    if (ENRICHED_QUOTE_FIELDS.has(field)) return condition;
+    baseConditions.push(condition);
+    return null;
+  }).filter(Boolean);
+  if (optionsField && optionsSearch) {
+    values.push('%' + normalize(optionsSearch).replace(/[\\%_]/g, char => '\\' + char) + '%');
+    (ENRICHED_QUOTE_FIELDS.has(optionsField) ? conditions : baseConditions).push(`TRANSLATE(UPPER(${quoteValueSql(optionsField)}), 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ', 'AAAAAEEEEIIIIOOOOOUUUUC') LIKE $${values.length}`);
+  }
+  values.push(optionsField ? 201 : paging.pageSize + 1, optionsField ? (optionsPage - 1) * 200 : (paging.page - 1) * paging.pageSize);
+  const limit = `$${values.length - 1}`, offset = `$${values.length}`;
+  // Apply route/material filters and pagination before the expensive per-row lookups.
+  const earlyPage = !optionsField && !conditions.length && !vendedor && !ENRICHED_QUOTE_FIELDS.has(paging.sort);
+  const baseOptions = optionsField && !ENRICHED_QUOTE_FIELDS.has(optionsField) && !conditions.length && !vendedor;
+  const needsField = field => !optionsField || optionsField === field || Object.hasOwn(paging.filters, field);
   const { rows } = await clientPool.query(`
     WITH base AS (
       SELECT
@@ -55,6 +96,8 @@ async function getQuotationHistory({ startDate, endDate, ufOrigem, ufDestino, mu
         COALESCE(con.viagemcon, con.numeroviagemcon, con.cargacontroleviagemcon) AS viagem,
         COALESCE(NULLIF(TRIM(con.veiculocon::text), ''), '') AS placa,
         CONCAT_WS('/', origem.nomecid, TRIM(origem_uf.abreviaturaest)) AS origem,
+        TRIM(origem_uf.abreviaturaest) AS uf_origem,
+        TRIM(destino_uf.abreviaturaest) AS uf_destino,
         CONCAT_WS('/', destino.nomecid, TRIM(destino_uf.abreviaturaest)) AS destino,
         COALESCE(NULLIF(TRIM(natureza.nomenat), ''), NULLIF(con.tipocargacon::text, ''), 'Nao informado') AS material,
         COALESCE(con.pesocon, 0)::numeric AS peso,
@@ -76,42 +119,43 @@ async function getQuotationHistory({ startDate, endDate, ufOrigem, ufDestino, mu
       ) natureza ON true
       WHERE con.dataemissaocon::date BETWEEN $1::date AND $2::date
         AND (con.statuscon = 2 OR UPPER(TRIM(con.seriecon)) IN ('O', 'OC') OR NULLIF(TRIM(con.chaveorcamentocon), '') IS NOT NULL)
-        AND UPPER(TRIM(origem_uf.abreviaturaest))=$3
-        AND UPPER(TRIM(destino_uf.abreviaturaest))=$4
+        AND ($3::text='' OR UPPER(TRIM(origem_uf.abreviaturaest))=$3)
+        AND ($4::text='' OR UPPER(TRIM(destino_uf.abreviaturaest))=$4)
         AND COALESCE(NULLIF(con.totalcon, 0), NULLIF(con.valorfretecon, 0), 0) > 1
         AND ($5::text='' OR REGEXP_REPLACE(UPPER(COALESCE(con.veiculocon::text, '')), '[^A-Z0-9]', '', 'g') ILIKE '%' || $5 || '%')
         AND ($6::text='' OR CONCAT_WS(' ', natureza.nomenat, con.naturezacargacon, con.tipocargacon, con.observacaonfcon) ILIKE '%' || $6 || '%')
         AND ($8::text='' OR TRANSLATE(UPPER(origem.nomecid), 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ', 'AAAAAEEEEIIIIOOOOOUUUUC') ILIKE '%' || $8 || '%')
         AND ($9::text='' OR TRANSLATE(UPPER(destino.nomecid), 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ', 'AAAAAEEEEIIIIOOOOOUUUUC') ILIKE '%' || $9 || '%')
+    ), page_base AS (
+      SELECT * FROM base ${baseConditions.length ? `WHERE ${baseConditions.join(' AND ')} ` : ''}${earlyPage ? `ORDER BY ${QUOTE_COLUMNS[paging.sort]} ${paging.direction}, id ${paging.direction} LIMIT ${limit} OFFSET ${offset}` : ''}
     ), enriched AS (
       SELECT
         b.id, b.data,
-        b.placa, b.origem, b.destino, b.material, b.peso, b.valor_motorista,
+        b.placa, b.origem, b.destino, b.uf_origem, b.uf_destino, b.material, b.peso, b.valor_motorista,
         COALESCE(NULLIF(cliente_inicial.fantasiacli, ''), NULLIF(cliente_inicial.nomecli, ''), 'Nao informado') AS cliente_inicial,
         COALESCE(NULLIF(cliente_final.fantasiacli, ''), NULLIF(cliente_final.nomecli, ''), 'Nao informado') AS cliente_final,
         COALESCE(NULLIF(TRIM(comercial.nome), ''), NULLIF(TRIM(b.representantecon::text), ''), 'Nao informado') AS vendedor,
         b.valor,
-        COALESCE(viagem.km, 0)::numeric AS km,
-        COUNT(*) OVER()::int AS quantidade_total,
-        AVG(b.valor) OVER()::numeric AS media_total,
-        MIN(b.valor) OVER()::numeric AS menor_total,
-        MAX(b.valor) OVER()::numeric AS maior_total
-      FROM base b
-      LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli=b.cliente_inicial_codigo ORDER BY (empresacli=b.empresacon) DESC LIMIT 1) cliente_inicial ON true
-      LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli=b.cliente_final_codigo ORDER BY (empresacli=b.empresacon) DESC LIMIT 1) cliente_final ON true
+        CASE WHEN b.peso > 0 THEN b.valor * 1000 / b.peso ELSE NULL END AS valor_tonelada,
+        COALESCE(viagem.km, 0)::numeric AS km
+      FROM page_base b
+      LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli=b.cliente_inicial_codigo ORDER BY (empresacli=b.empresacon) DESC LIMIT 1) cliente_inicial ON ${needsField('clienteInicial')}
+      LEFT JOIN LATERAL (SELECT nomecli, fantasiacli FROM gerais.clientes WHERE codigocli=b.cliente_final_codigo ORDER BY (empresacli=b.empresacon) DESC LIMIT 1) cliente_final ON ${needsField('clienteFinal')}
       LEFT JOIN LATERAL (
         SELECT COALESCE(NULLIF(TRIM(p.nomepes), ''), NULLIF(TRIM(p.fantasiapes), ''), r.codigorep::text) AS nome
         FROM logistica.representantes r LEFT JOIN gerais.pessoas p ON p.codigorepresentantepes=r.codigorep
         WHERE r.codigorep=b.representantecon LIMIT 1
-      ) comercial ON true
+      ) comercial ON ${!optionsField || Boolean(vendedor)}
       LEFT JOIN LATERAL (
         SELECT COALESCE(NULLIF(cvg.kmdiferencacvg, 0), NULLIF(COALESCE(cvg.kmchegadacvg, 0)-COALESCE(cvg.kmsaidacvg, 0), 0), 0)::numeric AS km
         FROM logistica.controleviagens cvg WHERE cvg.codigocvg=b.viagem LIMIT 1
-      ) viagem ON true
+      ) viagem ON ${needsField('km')}
       WHERE ($7::text='' OR COALESCE(comercial.nome, '') ILIKE '%' || $7 || '%')
     )
-    SELECT * FROM enriched ORDER BY data DESC, id DESC LIMIT 500
-  `, [startDate, endDate, ufOrigem, ufDestino, placa, material, vendedor, municipioOrigem, municipioDestino]);
+    SELECT ${optionsField ? `DISTINCT ${quoteValueSql(optionsField)} AS value` : '*'} FROM ${baseOptions ? 'page_base' : 'enriched'} ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+    ORDER BY ${optionsField ? 'value ASC' : `${QUOTE_COLUMNS[paging.sort]} ${paging.direction}, id ${paging.direction}`}
+    LIMIT ${limit} OFFSET ${earlyPage ? '0' : offset}
+  `, values);
   return rows;
 }
 
@@ -206,35 +250,48 @@ precoCargaErpV2Router.post("/cargas-viagens-v2/gestao/preco", async (req, res, n
 // motoristas ou nomes de outros clientes; retorna apenas o historico de fretes.
 precoCargaErpV2Router.post("/cargas-viagens-v2/gestao/cotacao", async (req, res, next) => {
   try {
-    const input = req.body || {};
-    const ufOrigem = normalize(input.ufOrigem).slice(0, 2);
-    const ufDestino = normalize(input.ufDestino).slice(0, 2);
+    const input = { ...(req.body || {}), filters: { ...(req.body?.filters || {}) } };
+    const optionsField = input.optionsField;
+    if (optionsField && !Object.hasOwn(QUOTE_COLUMNS, optionsField)) return res.status(400).json({ error: "Coluna inválida." });
+    if (optionsField) delete input.filters[optionsField];
+    const optionsSearch = String(input.optionsSearch || "").trim().slice(0, 120);
+    const optionsPage = Math.max(1, Math.min(10000, Number.parseInt(input.optionsPage, 10) || 1));
+    const ufOrigem = normalize(Array.isArray(input.filters?.ufOrigem) ? input.ufOrigem : input.filters?.ufOrigem ?? input.ufOrigem).slice(0, 2);
+    const ufDestino = normalize(Array.isArray(input.filters?.ufDestino) ? input.ufDestino : input.filters?.ufDestino ?? input.ufDestino).slice(0, 2);
     const placa = normalize(input.placa).replace(/[^A-Z0-9]/g, "");
     const material = normalize(input.material);
     const vendedor = normalize(input.vendedor);
     const municipioOrigem = normalize(input.municipioOrigem);
     const municipioDestino = normalize(input.municipioDestino);
-    if (!/^[A-Z]{2}$/.test(ufOrigem) || !/^[A-Z]{2}$/.test(ufDestino)) {
-      return res.status(400).json({ error: "Informe as UFs de origem e destino." });
+    if ((ufOrigem && !/^[A-Z]{2}$/.test(ufOrigem)) || (ufDestino && !/^[A-Z]{2}$/.test(ufDestino))) {
+      return res.status(400).json({ error: "Informe UFs válidas." });
     }
     const period = quotationPeriod(input.meses);
-    const key = `cotacao:${ufOrigem}:${municipioOrigem}:${ufDestino}:${municipioDestino}:${placa}:${material}:${vendedor}:${period.months}`;
+    const paging = quotationPaging(input);
+    const key = JSON.stringify([paging, optionsField, optionsSearch, optionsPage]) + `cotacao:${ufOrigem}:${municipioOrigem}:${ufDestino}:${municipioDestino}:${placa}:${material}:${vendedor}:${period.months}`;
     const cached = cache.get(key);
     if (cached && Date.now() - cached.at < CACHE_MS) return res.json(cached.data);
 
-    const rows = await getQuotationHistory({
+    const fetched = await getQuotationHistory({
       startDate: period.startDate, endDate: period.endDate,
-      ufOrigem, ufDestino, municipioOrigem, municipioDestino, placa, material, vendedor,
+      ufOrigem, ufDestino, municipioOrigem, municipioDestino, placa, material, vendedor, paging, optionsField, optionsSearch, optionsPage,
     });
-    const totals = rows[0] || {};
+    if (optionsField) {
+      const data = { options: fetched.slice(0, 200).map(row => row.value), hasMore: fetched.length > 200 };
+      if (cache.size > 300) cache.delete(cache.keys().next().value);
+      cache.set(key, { at: Date.now(), data });
+      return res.json(data);
+    }
+    const rows = fetched.slice(0, paging.pageSize);
     const data = {
       filtros: { ufOrigem, ufDestino, municipioOrigem, municipioDestino, placa, material, vendedor, meses: period.months },
       periodo: { inicio: period.startDate, fim: period.endDate },
+      page: paging.page, pageSize: paging.pageSize, hasMore: fetched.length > paging.pageSize,
       resumo: {
-        quantidade: Number(totals.quantidade_total || 0),
-        media: round(totals.media_total),
-        menor: round(totals.menor_total),
-        maior: round(totals.maior_total),
+        quantidade: rows.length,
+        media: round(average(rows, row => num(row.valor))),
+        menor: rows.length ? Math.min(...rows.map(row => num(row.valor))) : 0,
+        maior: rows.length ? Math.max(...rows.map(row => num(row.valor))) : 0,
         ultimaData: rows[0]?.data || null,
       },
       fretes: rows.map((row) => ({
@@ -251,9 +308,11 @@ precoCargaErpV2Router.post("/cargas-viagens-v2/gestao/cotacao", async (req, res,
         peso: round(row.peso),
         valorMotorista: round(row.valor_motorista),
         valor: round(row.valor),
+        valorTonelada: num(row.peso) > 0 ? round(num(row.valor) * 1000 / num(row.peso)) : null,
       })),
       aviso: "Valores historicos para referencia comercial. A cotacao final deve considerar peso, material, pedagios e condicoes atuais.",
     };
+    if (cache.size >= 200) cache.delete(cache.keys().next().value);
     cache.set(key, { at: Date.now(), data });
     res.json(data);
   } catch (error) { next(error); }

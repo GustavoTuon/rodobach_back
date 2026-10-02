@@ -15,7 +15,7 @@ const DEFAULTS = {
   inssPercent: 11,                    // INSS descontado do motorista = 11% da base
   sestPercent: 1.5,                   // SEST = 1,5% da base
   senatPercent: 1,                    // SENAT = 1% da base
-  patronalInssPercent: 2.698,         // custo patronal TAC = 2,698% do valor motorista
+  patronalInssPercent: 4,             // parâmetro da planilha: 4% do RPA bruto
 };
 
 function round(v) {
@@ -23,25 +23,29 @@ function round(v) {
 }
 
 function readNum(value, fallback = 0) {
+  if (value === null || value === undefined || String(value).trim() === "") return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function calcRpaCharges(driverValue) {
-  const inssBase    = driverValue * (DEFAULTS.inssBasePercent / 100);
-  const inss        = inssBase * (DEFAULTS.inssPercent / 100);
-  const sest        = inssBase * (DEFAULTS.sestPercent / 100);
-  const senat       = inssBase * (DEFAULTS.senatPercent / 100);
-  const totalDesc   = inss + sest + senat;
-  const patronal    = driverValue * (DEFAULTS.patronalInssPercent / 100);
+export function calcRpaCharges(driverValue) {
+  // O valor negociado é líquido para o motorista. A empresa assume o RPA.
+  const retention = DEFAULTS.inssBasePercent / 100 *
+    (DEFAULTS.inssPercent + DEFAULTS.sestPercent + DEFAULTS.senatPercent) / 100;
+  const bruto = driverValue / (1 - retention);
+  const inssBase = bruto * DEFAULTS.inssBasePercent / 100;
+  const patronal = bruto * DEFAULTS.patronalInssPercent / 100;
   return {
-    inssBase:        round(inssBase),
-    inss:            round(inss),
-    sest:            round(sest),
-    senat:           round(senat),
-    totalDescontos:  round(totalDesc),
-    valorLiquidoMot: round(driverValue - totalDesc),
-    patronalInss:    round(patronal),
+    inssBase: round(inssBase),
+    inss: round(inssBase * DEFAULTS.inssPercent / 100),
+    sest: round(inssBase * DEFAULTS.sestPercent / 100),
+    senat: round(inssBase * DEFAULTS.senatPercent / 100),
+    totalDescontos: round(bruto - driverValue),
+    valorLiquidoMot: round(driverValue),
+    valorBruto: round(bruto),
+    patronalInss: round(patronal),
+    custoTaxas: round(bruto - driverValue + patronal),
+    custoMotorista: round(bruto + patronal),
   };
 }
 
@@ -181,6 +185,7 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
     const margemNum  = readNum(margem, 30);
     const icmsNum    = readNum(icms,   DEFAULTS.icmsPercent);
     const notaNum    = readNum(valorNota);
+    if (margemNum < 0 || margemNum >= 100 || icmsNum < 0 || icmsNum > 100) return res.status(400).json({ error: "O percentual bruto deve ser de 0 a menos de 100%; ICMS deve ser de 0 a 100%." });
 
     // 2. Valor base motorista (tabela ANTT)
     const deslocamento  = round(kmNum * Number(tarifaRow.km_valor));
@@ -199,14 +204,14 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
     const patronalCusto = rpa?.patronalInss ?? 0;
 
     // 5. Custo operacional (empresa paga)
-    const encargosAdicionais = seguroCarga + seguroRC + pedagioNum + patronalCusto;
+    const encargosAdicionais = seguroCarga + seguroRC + pedagioNum + (rpa?.custoTaxas ?? 0);
     const custoOperacional   = round(valorMot + encargosAdicionais);
 
-    // 6. Valor cliente (net_margin: motorista+encargos é (1 - ICMS% - margem%) do cliente)
-    const divisor      = 1 - icmsNum / 100 - margemNum / 100;
-    const valorCliente = divisor > 0 ? round(custoOperacional / divisor) : 0;
+    // 6. Percentual bruto da planilha. Impostos e demais custos reduzem o lucro líquido.
+    const divisor      = 1 - margemNum / 100;
+    const valorCliente = divisor > 0 ? round(valorMot / divisor) : 0;
     const icmsValor    = round(valorCliente * icmsNum / 100);
-    const lucro        = round(valorCliente * margemNum / 100);
+    const lucro        = round(valorCliente - custoOperacional - icmsValor);
     const margemReal   = valorCliente > 0 ? round((lucro / valorCliente) * 100) : 0;
 
     // 7. Simulação de negociação
@@ -215,17 +220,17 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
     const cliNeg = String(valorClienteNegociado).trim();
 
     if (motNeg !== "" || cliNeg !== "") {
-      const motSimNum = readNum(motNeg, valorMot);
+      const motSimNum = motNeg === "" ? valorMot : readNum(motNeg, valorMot);
       const rpaSim = operacao === "tac" ? calcRpaCharges(motSimNum) : null;
       const patronalSimCusto = rpaSim?.patronalInss ?? 0;
-      const encSimAdic = seguroCarga + seguroRC + pedagioNum + patronalSimCusto;
+      const encSimAdic = seguroCarga + seguroRC + pedagioNum + (rpaSim?.custoTaxas ?? 0);
       const custSimOp  = round(motSimNum + encSimAdic);
       let cliSimNum;
 
       if (cliNeg !== "") {
         cliSimNum = readNum(cliNeg);
       } else {
-        cliSimNum = divisor > 0 ? round(custSimOp / divisor) : 0;
+        cliSimNum = divisor > 0 ? round(motSimNum / divisor) : 0;
       }
 
       const icmsSimVal = round(cliSimNum * icmsNum / 100);
@@ -240,6 +245,7 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
         margemPercent:   margemSim,
         encargosAdicionais: round(encSimAdic),
         custoOperacional:   custSimOp,
+        custoTotal: round(custSimOp + icmsSimVal),
         rpa:             rpaSim,
         patronalInss:    patronalSimCusto,
       };
@@ -277,6 +283,7 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
         valorMotorista: valorMot,
         valorCliente,
         icmsValor,
+        custoTotal: round(custoOperacional + icmsValor),
         lucro,
         margemPercent: margemReal,
       },
