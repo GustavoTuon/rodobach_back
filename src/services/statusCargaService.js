@@ -18,6 +18,9 @@ const PLACAS_STATUS_CARGA = [
 
 const DEFAULT_UNLOAD_GRACE_HOURS = 2;
 
+// Continua na frota operacional; o tipo no ERP foi alterado para corrigir um lancamento.
+const PLACAS_FROTA_OPERACIONAL = ["RYP7D29"];
+
 function unloadGraceHours() {
   const value = Number(process.env.STATUS_CARGA_DESCARGA_HORAS || DEFAULT_UNLOAD_GRACE_HOURS);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_UNLOAD_GRACE_HOURS;
@@ -526,8 +529,11 @@ export async function getStatusCargaFrota(filters = {}) {
     ? PLACAS_STATUS_CARGA.filter((item) => item === placa)
     : [...PLACAS_STATUS_CARGA];
 
-  const vehicleParams = [targetPlates];
-  const vehicleWhere = ["COALESCE(v.situacaovei::text, '') <> 'I'", "v.tipopropriedadevei::text = 'P'"];
+  const vehicleParams = [targetPlates, PLACAS_FROTA_OPERACIONAL];
+  const propriedadeOperacional = `CASE
+    WHEN regexp_replace(upper(v.placavei::text), '[^A-Z0-9]', '', 'g') = ANY($2::text[]) THEN 'P'
+    ELSE v.tipopropriedadevei::text END`;
+  const vehicleWhere = ["COALESCE(v.situacaovei::text, '') <> 'I'", `(${propriedadeOperacional}) = 'P'`];
   vehicleWhere.push(`regexp_replace(upper(v.placavei::text), '[^A-Z0-9]', '', 'g') = ANY($1::text[])`);
 
   const trafegusDashboard = await getTrafegusDashboard().catch((error) => ({
@@ -542,14 +548,14 @@ export async function getStatusCargaFrota(filters = {}) {
       FROM frotas.veiculos WHERE tipopropriedadevei::text='T'
       AND regexp_replace(upper(placavei::text),'[^A-Z0-9]','','g')=ANY($1::text[])`,[candidates]);
     targetPlates.push(...thirdParty.map(r=>r.placa).filter(p=>!targetPlates.includes(p)));
-    vehicleWhere[1]="v.tipopropriedadevei::text IN ('P','T')";
+    vehicleWhere[1]=`(${propriedadeOperacional}) IN ('P','T')`;
   }
 
   const [vehicleResult, docsResult, pefResult, locations] = await Promise.all([
     clientPool.query(`
       SELECT DISTINCT ON (UPPER(TRIM(v.placavei::text)))
         UPPER(TRIM(v.placavei::text)) AS placa,
-        v.tipopropriedadevei::text AS propriedade,
+        ${propriedadeOperacional} AS propriedade,
         v.nomevei AS veiculo,
         COALESCE(NULLIF(v.modelovei, ''), NULLIF(v.marcamodelorenavamvei, ''), 'Nao informado') AS modelo,
         v.anomodelovei AS ano_modelo,

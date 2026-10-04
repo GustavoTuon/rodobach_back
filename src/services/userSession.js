@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { config } from "../config.js";
+import { EXTRA_SCREEN_PERMISSIONS } from "./screenPermissions.js";
 
 export function sessionVersion(user) {
   return createHmac("sha256", config.jwtSecret).update(String(user.senha)).update("|").update(String(user.atualizado_em instanceof Date ? user.atualizado_em.toISOString() : user.atualizado_em || "")).digest("hex");
@@ -7,6 +8,7 @@ export function sessionVersion(user) {
 
 export function publicUser(user) {
   const permissions = {
+      ...Object.fromEntries(EXTRA_SCREEN_PERMISSIONS.map(item => [item.id, user[item.column] === true])),
       diretoria: user.perm_diretoria,
       simulador: user.perm_simulador,
       viagens: user.perm_viagens,

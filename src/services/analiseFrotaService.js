@@ -1,4 +1,5 @@
-import { avaliarOdometros, carregarKmTelemetria } from './kmAbastecimento.js';
+import { avaliarOdometros } from './kmAbastecimento.js';
+import {readDailyOdometers,summarizeDailyOdometers} from './dailyOdometer.js';
 import { clientPool } from "../db/clientPool.js";
 import { getCustosVeiculos } from "./custosVeiculosService.js";
 import { getDreEmpresarial } from "./dreEmpresarialService.js";
@@ -251,26 +252,27 @@ export async function getAbastecimento(filters = {}) {
   const precoMedio = money(s.preco_medio);
   const precoAnterior = money(previous.rows[0]?.preco_medio);
   let falhaTelemetria = false;
-  const kmTracker = await carregarKmTelemetria(byVehicle.rows.map(r => r.placa), period).catch(() => {
+  const historicoKm = await readDailyOdometers(byVehicle.rows.map(r => r.placa), period).catch(() => {
     falhaTelemetria = true;
-    return new Map();
+    return [];
   });
   const rankingRows = byVehicle.rows.map(row => {
-    const tracker = kmTracker.get(row.placa);
+    const daily=summarizeDailyOdometers(historicoKm.filter(r=>r.placa===row.placa),period);
+    const tracker = daily.completo ? daily : null;
     const erp = avaliarOdometros(rows.rows.filter(r => r.placa === row.placa).map(r => ({data:r.data, km:r.odometro})), period.startDate, period.endDate, false);
-    const leitura = tracker || erp;
+    const leitura = tracker;
     const distancia = leitura ? money(leitura.km) : null;
     return { placa:row.placa, modelo:row.modelo, litros:money(row.litros), total:money(row.total),
-      km:distancia, media:distancia !== null && num(row.litros)>0 ? money(distancia/row.litros) : null,
-      reaisKm:distancia>0 ? money(row.total/distancia) : null,
-      origemConsumo:tracker ? 'telemetria' : erp ? 'erp' : 'indisponivel',
-      leitura, kmTelemetria:tracker ? distancia : 0 };
+      km:distancia, media:!filters.fornecedor && distancia !== null && num(row.litros)>0 ? money(distancia/row.litros) : null,
+      reaisKm:!filters.fornecedor && distancia>0 ? money(row.total/distancia) : null,
+      origemConsumo:tracker ? 'telemetria' : daily.diasValidos ? 'parcial' : 'indisponivel',
+      leitura, cobertura:daily, leituraErp:erp, kmTelemetria:tracker ? distancia : 0 };
   });
   const validos = rankingRows.filter(r => r.km !== null);
   const km = money(validos.reduce((sum,r)=>sum+r.km,0));
   const litrosComKm = validos.reduce((sum,r)=>sum+r.litros,0);
   const valorComKm = validos.reduce((sum,r)=>sum+r.total,0);
-  const mediaFrota = litrosComKm>0 ? money(km/litrosComKm) : null;
+  const mediaFrota = !filters.fornecedor && litrosComKm>0 ? money(km/litrosComKm) : null;
   const postoRows = bySupplier.rows.map((row) => ({
     codigo: row.fornecedor_codigo,
     fornecedor: row.fornecedor,
@@ -333,9 +335,13 @@ export async function getAbastecimento(filters = {}) {
       precoMedio,
       precoMedioPonderado: money(precoMedioPostos),
       km,
-      reaisKm: km > 0 ? money(valorComKm / km) : null,
+      reaisKm: !filters.fornecedor && km > 0 ? money(valorComKm / km) : null,
       fontesKm: { telemetria:rankingRows.filter(r=>r.origemConsumo==="telemetria").length, erp:rankingRows.filter(r=>r.origemConsumo==="erp").length, indisponivel:rankingRows.length-validos.length },
       falhaTelemetria,
+      kmObservado:rankingRows.reduce((s,r)=>s+r.cobertura.kmObservado,0),
+      diasComLeitura:rankingRows.reduce((s,r)=>s+r.cobertura.diasValidos,0),
+      diasEsperados:rankingRows.reduce((s,r)=>s+r.cobertura.diasEsperados,0),
+      filtroPostoAtivo:Boolean(filters.fornecedor),
       mediaFrota,
       mediaTelemetria: telemetria.summary.mediaConsumoKmL,
       kmTelemetria: telemetria.summary.distanciaKm,
@@ -348,6 +354,7 @@ export async function getAbastecimento(filters = {}) {
       precoReferencia: money(precoReferencia),
     },
     telemetria,
+    historicoKm,
     ranking: rankingRows,
     modelos: byModel.rows.map((row) => ({ modelo: row.modelo, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),
     marcas: byBrand.rows.map((row) => ({ marca: row.marca, media: money(row.media), total: money(row.total), veiculos: num(row.veiculos) })),

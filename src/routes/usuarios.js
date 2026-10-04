@@ -4,6 +4,7 @@ import { tableName } from "../config.js";
 import { pool } from "../db/pool.js";
 import { createUserSchema, updateUserSchema, validateBody } from "../middleware/validate.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { EXTRA_PERMISSION_COLUMNS } from "../services/screenPermissions.js";
 
 export const usuariosRouter = express.Router();
 
@@ -16,7 +17,7 @@ const COLS_RETORNO = `
   perm_status_carga, perm_pneus, perm_multas_frota, perm_settings, perm_manutencao, perm_automacoes_n8n,
   perm_folgas_motoristas, perm_trafegus, perm_oportunidades_retorno, perm_consulta_nfe,
   perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens,
-  criado_em
+  ${EXTRA_PERMISSION_COLUMNS.join(", ")}, criado_em
 `;
 
 // GET /api/usuarios
@@ -64,8 +65,8 @@ usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), a
          perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
          perm_status_carga, perm_pneus, perm_multas_frota, perm_settings, perm_manutencao, perm_automacoes_n8n,
          perm_folgas_motoristas, perm_trafegus, perm_oportunidades_retorno, perm_consulta_nfe,
-         perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+         perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens, ${EXTRA_PERMISSION_COLUMNS.join(", ")})
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,${EXTRA_PERMISSION_COLUMNS.map((_,index) => `$${34+index}`).join(",")})
        RETURNING ${COLS_RETORNO}`,
       [
         String(login).trim().toLowerCase(), hash, email || null, numero || null,
@@ -87,6 +88,7 @@ usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), a
         Boolean(perm_manutencao_posicoes),
         Boolean(perm_controle_canhotos),
         Boolean(perm_aprovar_viagens),
+        ...EXTRA_PERMISSION_COLUMNS.map(column => req.body[column] === true),
       ]
     );
 
@@ -106,6 +108,7 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema)
     const body = req.body;
 
     const FIELDS = [
+      ...EXTRA_PERMISSION_COLUMNS,
       "email", "numero", "admin", "ativo",
       "perm_diretoria", "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_analise_frota",
       "perm_abastecimentos", "perm_precos_combustivel",
@@ -117,6 +120,7 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema)
       "perm_manutencao_posicoes", "perm_controle_canhotos", "perm_aprovar_viagens",
     ];
     const BOOL_FIELDS = new Set([
+      ...EXTRA_PERMISSION_COLUMNS,
       "admin", "ativo",
       "perm_diretoria", "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_analise_frota",
       "perm_abastecimentos", "perm_precos_combustivel",

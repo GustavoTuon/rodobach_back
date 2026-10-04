@@ -25,6 +25,8 @@ import { cargasViagensV2Router } from "./routes/cargasViagensV2.js";
 import { precoCargaErpV2Router } from "./routes/precoCargaErpV2.js";
 import { pneusRouter } from "./routes/pneus.js";
 import { manutencaoRouter } from "./routes/manutencao.js";
+import { manutencaoPlantaoRouter } from "./routes/manutencaoPlantao.js";
+import { consultaViagensRouter } from "./routes/consultaViagens.js";
 import { whatsappRouter } from "./routes/whatsapp.js";
 import { conducaoRouter } from "./routes/conducao.js";
 import { automacoesRouter } from "./routes/automacoes.js";
@@ -37,6 +39,7 @@ import { consultaCteRouter } from "./routes/consultaCte.js";
 import { canhotosRouter } from "./routes/canhotos.js";
 import { multasFrotaRouter } from "./routes/multasFrota.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
+import { startDailyOdometerCollector } from "./services/dailyOdometer.js";
 
 export const app = express();
 
@@ -146,6 +149,8 @@ app.use("/api", precoCargaErpV2Router);
 app.use("/api", usuariosRouter);
 app.use("/api", pneusRouter);
 app.use("/api", manutencaoRouter);
+app.use("/api", manutencaoPlantaoRouter);
+app.use("/api", consultaViagensRouter);
 app.use("/api", whatsappRouter);
 app.use("/api", conducaoRouter);
 app.use("/api", automacoesRouter);
@@ -168,6 +173,7 @@ app.use(errorHandler);
 export function startServer() {
   return app.listen(config.port, config.host, () => {
     logger.info({ port: config.port }, "Rodobach API iniciada");
+    if (!config.readOnly && process.env.KM_DIARIO_ENABLED !== 'false') startDailyOdometerCollector();
     if (config.runSchedulers && !config.readOnly) {
       startEmptyVehicleAlertScheduler();
     }
