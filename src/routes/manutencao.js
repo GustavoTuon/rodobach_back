@@ -6,8 +6,25 @@ import { clientPool } from "../db/clientPool.js";
 import { pool } from "../db/pool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { loadMaintenanceOdometers } from "../services/maintenanceOdometer.js";
+import { ADDITIONAL_MAINTENANCE_PLATES, mergeMaintenanceVehicles } from "../services/maintenanceVehicles.js";
 
 export const manutencaoRouter = express.Router();
+
+manutencaoRouter.get("/manutencao/fornecedores", async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    const { rows } = await clientPool.query(`
+      SELECT empresafor AS empresa, codigofor AS codigo,
+        COALESCE(NULLIF(TRIM(fantasiafor), ''), TRIM(nomefor)) AS nome
+      FROM gerais.fornecedores
+      WHERE NULLIF(TRIM(COALESCE(NULLIF(TRIM(fantasiafor), ''), nomefor)), '') IS NOT NULL
+        AND ($1 = '' OR nomefor ILIKE $2 OR fantasiafor ILIKE $2 OR codigofor::text = $1)
+      ORDER BY nome, empresafor, codigofor
+      LIMIT 30
+    `, [q, `%${q.replace(/[\\%_]/g, "\\$&")}%`]);
+    res.json({ fornecedores: rows });
+  } catch (error) { next(error); }
+});
 
 const TABLE = () => tableName("automacao_mensagem_manutencao");
 const CONTACT_TABLE = () => tableName("manutencao_contatos");
@@ -586,7 +603,18 @@ const QUERY_VEICULOS = `
 manutencaoRouter.get("/manutencao/veiculos", async (_req, res, next) => {
   try {
     const vPool = getVeiculosPool();
-    const { rows } = await vPool.query(QUERY_VEICULOS);
+    const [{ rows: telemetryVehicles }, { rows: erpVehicles }] = await Promise.all([
+      vPool.query(QUERY_VEICULOS),
+      clientPool.query(`
+        SELECT DISTINCT ON (placavei) placavei AS placa
+        FROM frotas.veiculos
+        WHERE regexp_replace(upper(placavei::text), '[^A-Z0-9]', '', 'g') = ANY($1::text[])
+          AND tipopropriedadevei::text = 'P'
+          AND COALESCE(situacaovei::text, '') <> 'I'
+        ORDER BY placavei, empresavei
+      `, [ADDITIONAL_MAINTENANCE_PLATES]),
+    ]);
+    const rows = mergeMaintenanceVehicles(telemetryVehicles, erpVehicles);
     const placas = rows.map((row) => row.placa);
     const [detalhes, historicosSistema, historicosManuais, planosAutorizados, afericoesTacografo, odometrosErp, engates] = await Promise.all([
       loadDetalhesVeiculos(placas),

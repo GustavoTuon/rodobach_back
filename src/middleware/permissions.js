@@ -7,6 +7,9 @@ const ROUTE_PERMISSIONS = [
   [/^\/frota\/multas(?:\/|$)/, "multas-frota"],
   [/^\/manutencao\/componentes-posicao(?:\/|$)/, ["manutencao-posicoes", "manutencao"]],
   [/^\/manutencao(?:\/|$)/, "manutencao"],
+  [/^\/manutencao-plantao\/conferencia(?:\/|$)/, "conferencia-manutencao"],
+  [/^\/manutencao-plantao\/placas(?:\/|$)/, ["manutencao-plantao", "conferencia-manutencao"]],
+  [/^\/manutencao-plantao(?:\/|$)/, "manutencao-plantao"],
   [/^\/cargas-viagens-v2(?:\/|$)/, "viagens"],
   [/^\/viagens(?:\/|$)/, "viagens"],
   [/^\/motoristas\/folgas(?:\/|$)/, "folgas-motoristas"],
@@ -15,7 +18,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/motoristas\/diarias(?:\/|$)/, "simulador"],
   [/^\/localidades\/cidades(?:\/|$)/, ["simulador", "viagens"]],
   [/^\/frota\/status-carga(?:\/|$)/, "status-carga"],
-  [/^\/frota\/painel-tv(?:\/|$)/, "status-carga"],
+  [/^\/frota\/painel-tv(?:\/|$)/, "painel-tv"],
   [/^\/frota\/ociosidade(?:\/|$)/, "status-carga"],
   [/^\/trafegus(?:\/|$)/, "trafegus"],
   [/^\/oportunidades-retorno(?:\/|$)/, "oportunidades-retorno"],
@@ -30,6 +33,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/financeiro\/faturamento-diario(?:\/|$)/, "faturamento-diario"],
   [/^\/financeiro\/faturamento-mensal-comparativo(?:\/|$)/, "comparativo-faturamento"],
   [/^\/financeiro\/lucro-viagens(?:\/|$)/, "lucro-viagens"],
+  [/^\/financeiro\/consulta-viagens(?:\/|$)/, "lucro-viagens"],
   [/^\/financeiro\/resultado-fretes(?:\/|$)/, "lucro-viagens"],
   [/^\/financeiro\/analise-clientes(?:\/|$)/, "clientes"],
   [/^\/clientes\/rentabilidade(?:\/|$)/, "clientes-lucro"],
@@ -62,6 +66,7 @@ export function requireRoutePermission(req, res, next) {
   const sharedReads = {
     "/financeiro/custos-veiculos/filtros": ["custos-veiculos", "abastecimentos", "analise-frota"],
     "/manutencao/veiculos": ["manutencao", "manutencao-posicoes"],
+    "/manutencao/fornecedores": ["manutencao", "manutencao-posicoes", "manutencao-plantao", "conferencia-manutencao"],
   };
   if (["GET", "HEAD"].includes(req.method) && sharedReads[path.replace(/\/$/, "")]) return requirePermission(sharedReads[path.replace(/\/$/, "")])(req, res, next);
   // The executive screen consumes these existing reports, but cannot mutate them.

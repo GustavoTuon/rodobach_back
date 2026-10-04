@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EXTRA_PERMISSION_COLUMNS } from "../services/screenPermissions.js";
 
 export const loginSchema = z.object({
   login: z.string().trim().min(1).max(120),
@@ -20,6 +21,7 @@ export function validateBody(schema) {
 }
 
 const userFields = {
+  ...Object.fromEntries(EXTRA_PERMISSION_COLUMNS.map(column => [column, z.boolean()])),
   login: z.string().trim().min(1).max(120),
   senha: z.string().min(8).max(72).refine(value => Buffer.byteLength(value, "utf8") <= 72, "Senha excede 72 bytes."),
   email: z.union([z.email(), z.literal(""), z.null()]),

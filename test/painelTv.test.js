@@ -31,8 +31,8 @@ test('SM ativa não comprova carga; SM vazia tem tempo próprio e conflitos fica
  assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'alta',entregaAt:'2026-09-14T12:00:00Z'},null,now).horasVazio,null);
  assert.equal(tvLoad({estado:'vazio_confirmado',confianca:'baixa'},null,now).codigo,'sem_confirmacao');
 });
-test('painel TV exige a permissão de status de carga',()=>{
- assert.equal(ROUTE_PERMISSIONS.find(([regex])=>regex.test('/frota/painel-tv'))?.[1],'status-carga');
+test('painel TV exige sua permissão individual',()=>{
+ assert.equal(ROUTE_PERMISSIONS.find(([regex])=>regex.test('/frota/painel-tv'))?.[1],'painel-tv');
 });
 
 test('destino usa operação ativa e previsão de fim é exclusiva da SM',()=>{
