@@ -44,8 +44,16 @@ export function tripIndicators(trip) {
   componentes.push({conta:'Demais ajustes do acerto (líquidos)',valor:money(custo-componentes.reduce((s,r)=>s+r.valor,0))});
   return {disponivel:true,receita,custo,lucro,margem:receita>0?money(lucro/receita*100):null,componentes};
 }
-export async function getTripIndicators(trip) {
-  const viagem=tripIndicators(trip),start=trip.saida?.slice(0,10),end=trip.chegada?.slice(0,10);
+export function vehiclePeriod(trip, mes) {
+  if (mes) {
+    if (!/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(mes)) throw new Error('Mês inválido.');
+    const [year, month] = mes.split('-').map(Number);
+    return {start:mes+'-01',end:new Date(Date.UTC(year,month,0)).toISOString().slice(0,10)};
+  }
+  return {start:trip.saida?.slice(0,10),end:trip.chegada?.slice(0,10)};
+}
+export async function getTripIndicators(trip, {mes} = {}) {
+  const viagem=tripIndicators(trip),{start,end}=vehiclePeriod(trip,mes);
   if(!start||!end||end<start||!trip.placa?.trim())return {viagem,veiculo:{disponivel:false,mensagem:'Informe placa e período válidos para analisar o veículo.'}};
   const first=start.slice(0,7)+'-01';
   const endDate=new Date(`${end}T00:00:00Z`);

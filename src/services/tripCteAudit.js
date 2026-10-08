@@ -5,16 +5,18 @@ export function classifyTripCtes(rows, trip) {
     const links = row.vinculos || [];
     const current = links.some(v => Number(v.empresa) === Number(trip.empresa) && Number(v.numero) === Number(trip.numero));
     const others = links.filter(v => Number(v.empresa) !== Number(trip.empresa) || Number(v.numero) !== Number(trip.numero));
-    const situacao = current && !row.noPeriodo ? 'fora_periodo'
-      : others.length ? (current ? 'duplicado' : 'outra_viagem')
+    const normalize = value => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const wrongPlate = row.placa && normalize(row.placa) !== normalize(trip.placa);
+    const situacao = others.length ? (current ? 'duplicado' : 'outra_viagem')
+      : current && wrongPlate ? 'placa_divergente'
         : current ? 'vinculado' : 'sem_vinculo';
     return { ...row, situacao };
   });
-  const priority = {sem_vinculo:0,outra_viagem:1,duplicado:2,fora_periodo:3,vinculado:4};
+  const priority = {sem_vinculo:0,outra_viagem:1,duplicado:2,placa_divergente:3,vinculado:4};
   documentos.sort((a,b)=>priority[a.situacao]-priority[b.situacao]);
   const count = predicate => documentos.filter(predicate).length;
   return { disponivel: true, inicio: trip.saida?.slice(0,10), fim: trip.chegada?.slice(0,10), documentos,
-    emitidos: count(v => v.noPeriodo), vinculados: count(v => v.noPeriodo && v.situacao === 'vinculado'),
+    emitidos: count(v => v.noPeriodo), vinculados: count(v => v.situacao === 'vinculado'),
     semVinculo: count(v => v.situacao === 'sem_vinculo'),
     divergencias: count(v => !['vinculado','sem_vinculo'].includes(v.situacao)),
     pendencias: count(v => v.situacao !== 'vinculado') };

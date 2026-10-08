@@ -1,3 +1,4 @@
+import {getTripManifestos} from '../services/tripManifestos.js';
 import express from "express";
 import { z } from "zod";
 import { clientPool } from "../db/clientPool.js";
@@ -46,10 +47,12 @@ consultaViagensRouter.get('/financeiro/consulta-viagens',async(req,res,next)=>{
 consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero/indicadores',async(req,res,next)=>{
   const empresa=Number(req.params.empresa),numero=Number(req.params.numero);
   if(!Number.isSafeInteger(empresa)||empresa<1||!Number.isSafeInteger(numero)||numero<1)return res.status(400).json({error:'Viagem inválida.'});
+  const period=z.object({mes:z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional()}).safeParse(req.query);
+  if(!period.success)return res.status(400).json({error:'Mês inválido. Selecione o mês do veículo.'});
   try {
     const {rows}=await clientPool.query(`${header} WHERE v.empresacvg=$1 AND v.codigocvg=$2`,[empresa,numero]);
     if(!rows[0])return res.status(404).json({error:'Viagem não encontrada.'});
-    res.json(await getTripIndicators(rows[0]));
+    res.json(await getTripIndicators(rows[0],period.data));
   }catch(error){next(error);}
 });
 consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero',async(req,res,next)=>{
@@ -85,6 +88,9 @@ consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero',async(
       console.error('Falha na conferência de CT-es da viagem:', error.code || 'consulta');
       conferencia = {disponivel:false,mensagem:'Não foi possível conferir os CT-es. Tente carregar a viagem novamente.'};
     }
-    res.json({viagem:rows[0],fretes:fretes.rows,despesas:despesas.rows,abastecimentos:abastecimentos.rows,conferencia});
+    let manifestos = [], manifestosDisponiveis = true;
+    try { manifestos = await getTripManifestos(rows[0]); }
+    catch (error) { manifestosDisponiveis = false; console.error('Falha ao consultar manifestos:', error.code || 'consulta'); }
+    res.json({manifestos,manifestosDisponiveis,viagem:rows[0],fretes:fretes.rows,despesas:despesas.rows,abastecimentos:abastecimentos.rows,conferencia});
   }catch(error){next(error);}
 });

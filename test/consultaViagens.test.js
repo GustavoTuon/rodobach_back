@@ -16,16 +16,26 @@ test("valida filtros e parametriza placa e número",()=>{
  const driver=tripFilters({motorista:"Juliana %"});
  assert.deepEqual(driver.params,['Juliana %']);assert.match(driver.where,/mf.empresamot=v.empresacvg/);assert.match(driver.where,/strpos/);
 });
+test("rejeita mês inválido dos indicadores antes de consultar o banco",async t=>{
+ const query=t.mock.method(clientPool,"query",async()=>({rows:[]}));
+ const app=express();app.use(consultaViagensRouter);
+ for(const mes of ['2026-13','2026-00','abc','0000-01']) {
+  const res=await request(app).get('/financeiro/consulta-viagens/1/868/indicadores').query({mes});
+  assert.equal(res.status,400);
+ }
+ assert.equal(query.mock.callCount(),0);
+});
 test("consulta detalhes por empresa e número em todos os vínculos",async t=>{
  const query=t.mock.method(clientPool,"query",async sql=>({rows:sql.includes("FROM logistica.controleviagens v")?[{empresa:2,numero:868}]:[]}));
  const app=express();app.use(consultaViagensRouter);
  const res=await request(app).get('/financeiro/consulta-viagens/2/868');
  assert.equal(res.status,200);assert.equal(res.body.viagem.empresa,2);
- assert.equal(query.mock.callCount(),4);
+ assert.equal(query.mock.callCount(),5);
  for(const call of query.mock.calls)assert.deepEqual(call.arguments[1],[2,868]);
  assert.match(query.mock.calls[1].arguments[0],/f.empresacvf=\$1 AND f.codigocvf=\$2/);
  assert.match(query.mock.calls[2].arguments[0],/d.empresacvd=\$1 AND d.codigocvd=\$2/);
  assert.match(query.mock.calls[3].arguments[0],/v.empresacva=\$1 AND v.codigocva=\$2/);
+ assert.match(query.mock.calls[4].arguments[0],/m.empresaviagemmdf=\$1 AND m.viagemmdf=\$2/);
 });
 test("exige permissão de viagens e trata viagem inexistente",async t=>{
  t.mock.method(clientPool,"query",async()=>({rows:[]}));

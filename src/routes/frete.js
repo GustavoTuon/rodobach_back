@@ -4,6 +4,8 @@ import { tableName } from "../config.js";
 import { mapAnttRows, mapDiaria } from "../mappers.js";
 import { getFreteAnttTerceirosAlertas } from "../services/freteAnttAlertasService.js";
 
+import { getAnttStatus } from "../services/anttMonitor.js";
+
 export const freteRouter = Router();
 
 // ── Constantes de cálculo (espelhadas do backend antigo) ─────────────────────
@@ -55,9 +57,9 @@ freteRouter.get("/frete/antt", async (_req, res, next) => {
     // Tenta tabela nova (antt_tabela) — pivot por tipo_carga
     const { rows } = await pool.query(`
       SELECT DISTINCT ON (eixos, tipo_carga)
-        id, tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga, data_vigencia, versao
+        id, tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga, data_vigencia, versao, fonte
       FROM ${tableName("antt_tabela")}
-      WHERE ativo = true
+      WHERE ativo = true AND operacao='geral' AND data_vigencia <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
       ORDER BY eixos, tipo_carga, data_vigencia DESC, atualizado_em DESC, id DESC
     `);
 
@@ -65,33 +67,14 @@ freteRouter.get("/frete/antt", async (_req, res, next) => {
       return res.json(mapAnttRows(rows));
     }
 
-    // Fallback: tabela antiga (frete_tabela_antt) — colunas flat
-    const { rows: old } = await pool.query(`
-      SELECT id, tipo_veiculo, eixos,
-             normal_custo_deslocamento,  normal_carga_descarga,
-             alto_desempenho_custo_deslocamento, alto_desempenho_carga_descarga
-      FROM "public"."frete_tabela_antt"
-      WHERE ativo = true
-      ORDER BY eixos
-    `);
-
-    const mapped = old.map(r => ({
-      id: r.id,
-      tipoVeiculo: r.tipo_veiculo,
-      eixos: Number(r.eixos),
-      normal: {
-        kmValor:       Number(r.normal_custo_deslocamento),
-        cargaDescarga: Number(r.normal_carga_descarga),
-      },
-      altoDesempenho: {
-        kmValor:       Number(r.alto_desempenho_custo_deslocamento),
-        cargaDescarga: Number(r.alto_desempenho_carga_descarga),
-      },
-    }));
-    res.json(mapped);
+    res.status(503).json({error:"Tabela ANTT vigente indisponível. Tente novamente mais tarde."});
   } catch (error) {
     next(error);
   }
+});
+
+freteRouter.get("/frete/antt/status", async (_req,res,next)=>{
+  try {res.json(await getAnttStatus());} catch(error) {next(error);}
 });
 
 // ── GET /api/motoristas/diarias ───────────────────────────────────────────────
@@ -137,48 +120,15 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
     } = req.body || {};
 
     // 1. Busca tarifa ANTT
-    let tarifaRow;
-    try {
-      const { rows } = await pool.query(`
-        SELECT tipo_veiculo, eixos, tipo_carga, km_valor, carga_descarga
-        FROM ${tableName("antt_tabela")}
-        WHERE ativo = true AND eixos = $1 AND tipo_carga = $2
-        ORDER BY data_vigencia DESC, atualizado_em DESC, id DESC LIMIT 1
-      `, [Number(eixos), tipoCarga]);
-      tarifaRow = rows[0];
-    } catch { /* ignora, tenta tabela antiga */ }
-
-    if (!tarifaRow) {
-      const col = tipoCarga === "normal"
-        ? "normal_custo_deslocamento, normal_carga_descarga"
-        : "alto_desempenho_custo_deslocamento AS km_valor_col, alto_desempenho_carga_descarga AS carga_col";
-
-      const { rows: old } = await pool.query(`
-        SELECT tipo_veiculo, eixos,
-               normal_custo_deslocamento AS km_valor,
-               normal_carga_descarga     AS carga_descarga,
-               alto_desempenho_custo_deslocamento,
-               alto_desempenho_carga_descarga
-        FROM "public"."frete_tabela_antt"
-        WHERE ativo = true AND eixos = $1 LIMIT 1
-      `, [Number(eixos)]);
-
-      if (!old.length) {
-        return res.status(404).json({ error: "Tarifa ANTT não encontrada para o número de eixos informado." });
-      }
-
-      const r = old[0];
-      tarifaRow = {
-        tipo_veiculo:  r.tipo_veiculo,
-        eixos:         r.eixos,
-        km_valor:      tipoCarga === "normal"
-          ? Number(r.normal_custo_deslocamento)
-          : Number(r.alto_desempenho_custo_deslocamento),
-        carga_descarga: tipoCarga === "normal"
-          ? Number(r.normal_carga_descarga)
-          : Number(r.alto_desempenho_carga_descarga),
-      };
-    }
+    const { rows } = await pool.query(`
+      SELECT tipo_veiculo,eixos,tipo_carga,km_valor,carga_descarga,data_vigencia,versao,fonte
+      FROM ${tableName("antt_tabela")}
+      WHERE ativo=true AND operacao='geral' AND eixos=$1 AND tipo_carga=$2
+        AND data_vigencia <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
+      ORDER BY data_vigencia DESC,atualizado_em DESC,id DESC LIMIT 1
+    `,[Number(eixos),tipoCarga]);
+    const tarifaRow=rows[0];
+    if(!tarifaRow) return res.status(503).json({error:"Tabela ANTT vigente indisponível para esta configuração."});
 
     const kmNum      = readNum(km);
     const pedagioNum = readNum(pedagio);
@@ -264,6 +214,10 @@ freteRouter.post("/frete/calcular", async (req, res, next) => {
         icmsPercent: icmsNum,
       },
       tabela: {
+        dataVigencia: tarifaRow.data_vigencia || null,
+        versao: tarifaRow.versao || null,
+        categoria: "Carga geral",
+        fonte: tarifaRow.fonte || null,
         kmValor:       Number(tarifaRow.km_valor),
         cargaDescarga,
         deslocamento,
