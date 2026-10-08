@@ -10,6 +10,7 @@ import { publicUser } from "../src/services/userSession.js";
 import { pool } from "../src/db/pool.js";
 import { clientPool } from "../src/db/clientPool.js";
 import { getVeiculosPool } from "../src/db/pool-veiculos.js";
+import { config } from "../src/config.js";
 
 const driver={id:42,login:"driver",permissions:{"manutencao-plantao":true}};
 const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":true}};
@@ -37,6 +38,9 @@ test("mutação exige versão válida e acesso somente consulta bloqueia altera�
  assert.equal(connect.mock.callCount(),0);
 });
 test("criação valida frota e não aceita autoria enviada pelo navegador",async t=>{
+ const originalVeiculosDb=config.veiculosDb;
+ config.veiculosDb={host:"127.0.0.1",port:5432,database:"rodobach_test",user:"rodobach_test",password:"rodobach_test",ssl:false};
+ t.after(()=>{config.veiculosDb=originalVeiculosDb;});
  t.mock.method(getVeiculosPool(),"query",async()=>({rows:[{placa:"ABC1234"}]}));
  t.mock.method(clientPool,"query",async()=>({rows:[]}));
  const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
