@@ -1,0 +1,17 @@
+-- Carga geral: Tabelas A (normal) e C (alto desempenho).
+-- Fonte: https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026
+-- Preserva as versões anteriores para consulta histórica.
+INSERT INTO antt_tabela (tipo_veiculo,eixos,operacao,tipo_carga,km_valor,carga_descarga,data_vigencia,versao,fonte) VALUES
+('Truck',3,'geral','normal',5.2177,541.86,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Truck',3,'geral','alto_desempenho',4.4341,195.81,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Bitruck',4,'geral','normal',5.9180,588.86,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Bitruck',4,'geral','alto_desempenho',5.0693,213.27,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 5e',5,'geral','normal',6.8284,657.56,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 5e',5,'geral','alto_desempenho',5.8195,228.08,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 6e',6,'geral','normal',7.5347,671.93,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 6e',6,'geral','alto_desempenho',6.4924,231.17,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 7e',7,'geral','normal',8.2727,831.66,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026'),
+('Carreta 7e',7,'geral','alto_desempenho',6.9018,272.80,DATE '2026-09-30','portaria_suroc_22_2026','https://anttlegis.antt.gov.br/action/ActionDatalegis.php?acao=abrirTextoAto&cod_menu=9230&cod_modulo=623&numeroAto=00000022&orgao=SUROC%2FANTT%2FMT&seqAto=000&tipo=POR&valorAno=2026')
+ON CONFLICT (eixos,operacao,tipo_carga,data_vigencia,versao) DO UPDATE SET
+  km_valor=EXCLUDED.km_valor, carga_descarga=EXCLUDED.carga_descarga,
+  fonte=EXCLUDED.fonte, ativo=true, atualizado_em=CURRENT_TIMESTAMP;

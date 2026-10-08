@@ -47,3 +47,28 @@ test('arrival, missing SM or stale documents do not prove discharge', () => {
  assert.equal(tvLoad({operacaoCarga:old},null,now).confirmacaoPendente,true);
  assert.equal(tvLoad({},null,now).label,'—');
 });
+
+const closedManifest={empresa:2,serie:'1',numero:1719,placa:'ABC1234',statusCodigo:7,encerradoEm:'2026-09-22T12:00:00Z',autorizadoEm:'2026-09-19T18:00:00Z'};
+test('baixa de todos os manifestos vinculados encerra carga sem baixa individual do CT-e',()=>{
+ const pending={...doc,placa:'ABC1234',entregaAt:null,manifestos:[closedManifest]};
+ const op=cargoOperationEvidence([pending],now);
+ assert.deepEqual(op.pendentes,[]);assert.equal(op.encerradaPorManifesto,true);
+ const state=tvLoad({operacaoCarga:op},null,now);
+ assert.equal(state.codigo,'vazio');assert.equal(state.horasVazio,3);
+ assert.match(state.fonte,/manifestos/);
+ assert.equal(tvLoad({operacaoCarga:op},{...sm,operacao:'CARREGADO',inicio:'22/09/2026 10:00:00'},now).codigo,'carregado');
+});
+test('manifesto aberto, cancelado, de outra placa, com baixa futura ou anterior à carga não prova encerramento',()=>{
+ for(const changes of [{statusCodigo:5},{statusCodigo:6},{placa:'XYZ9876'},
+   {encerradoEm:'2026-09-23T12:00:00Z'},{encerradoEm:'2026-09-18T12:00:00Z'},{encerradoEm:null}]){
+  const op=cargoOperationEvidence([{...doc,placa:'ABC1234',entregaAt:null,manifestos:[{...closedManifest,...changes}]}],now);
+  assert.equal(tvLoad({operacaoCarga:op},null,now).codigo,'carregado');
+ }
+});
+test('baixa parcial não encerra demais documentos ou manifestos da operação',()=>{
+ const pending={...doc,placa:'ABC1234',entregaAt:null,manifestos:[closedManifest]};
+ for(const docs of [
+  [pending,{...pending,documento:'outro',manifestos:[]}],
+  [{...pending,manifestos:[closedManifest,{...closedManifest,numero:1720,statusCodigo:5,encerradoEm:null}]}]
+ ]) assert.equal(tvLoad({operacaoCarga:cargoOperationEvidence(docs,now)},null,now).codigo,'carregado');
+});

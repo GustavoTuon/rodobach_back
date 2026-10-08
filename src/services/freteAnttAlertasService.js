@@ -206,7 +206,7 @@ async function loadTarifas(tipoCarga) {
     SELECT DISTINCT ON (eixos, tipo_carga)
       eixos, tipo_carga, km_valor, carga_descarga
     FROM ${tableName("antt_tabela")}
-    WHERE ativo = true AND tipo_carga = $1
+    WHERE ativo = true AND operacao='geral' AND data_vigencia <= (now() AT TIME ZONE 'America/Sao_Paulo')::date AND tipo_carga = $1
     ORDER BY eixos, tipo_carga, data_vigencia DESC, atualizado_em DESC, id DESC
   `, [tipoCarga]);
 

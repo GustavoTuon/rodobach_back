@@ -1,3 +1,4 @@
+import {loadCteManifestos, cteIdentity, manifestoCompletion} from './tripManifestos.js';
 import { clientPool } from "../db/clientPool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { quoteIdent } from "../config.js";
@@ -203,13 +204,17 @@ export function cargoOperationEvidence(docs = [], now = new Date()) {
   if (!latest) return null;
   const operation = latest.viagem && latest.empresaOperacao != null
     ? pendingDocumentsInOperation(latest, valid) : [latest];
-  const pending = operation.filter(doc => !doc.entregaAt || !Number.isFinite(+new Date(doc.entregaAt)) || new Date(doc.entregaAt) > now);
-  const completedAt = pending.length ? null : operation.map(doc => doc.entregaAt)
+  const completed = doc => doc.entregaAt && Number.isFinite(+new Date(doc.entregaAt)) && new Date(doc.entregaAt) <= now
+    ? doc.entregaAt : manifestoCompletion(doc, now);
+  const pending = operation.filter(doc => !completed(doc));
+  const completedAt = pending.length ? null : operation.map(completed)
     .sort((a, b) => new Date(b) - new Date(a))[0];
   return {viagem: latest.viagem || null, empresa: latest.empresaOperacao ?? null,
     inicio: latest.saidaAt || latest.emissaoAt, ultimaEmissao: latest.emissaoAt,
     pendentes: [...new Set(pending.map(doc => doc.documento))], entregaFinal: completedAt,
-    agrupamentoConhecido: Boolean(latest.viagem && latest.empresaOperacao != null),
+    manifestos: [...new Map(operation.flatMap(doc => doc.manifestos || []).map(m => [`${m.empresa}:${m.serie}:${m.numero}`,m])).values()],
+    encerradaPorManifesto: !pending.length && operation.some(doc => !doc.entregaAt && manifestoCompletion(doc, now)),
+    agrupamentoConhecido: Boolean(latest.viagem && latest.empresaOperacao != null) || Boolean(!pending.length && operation.every(doc => manifestoCompletion(doc, now))),
     baixasNaoConfirmadas: operation.filter(doc => !doc.entregaAt && doc.entregaInformadaAt && new Date(doc.entregaInformadaAt) <= now).map(doc => doc.documento),
     destino: pending[0]?.destino || null};
 }
@@ -729,6 +734,7 @@ export async function getStatusCargaFrota(filters = {}) {
       .filter(([smPlate]) => smPlate)
   );
 
+  const manifestsByCte = await loadCteManifestos(docsResult.rows.map(row => ({empresa:row.empresacon,serie:row.seriecon,codigo:row.codigocon})));
   const docsByPlate = new Map();
   for (const row of docsResult.rows) {
     const rowPlate = normalizePlate(row.placa);
@@ -757,6 +763,8 @@ export async function getStatusCargaFrota(filters = {}) {
     const eventoReferenciaAt = entregaAt || chegadaViagemAt || entregaViagemAt || saidaAt || emissaoAt;
 
     const doc = {
+      placa: rowPlate,
+      manifestos: manifestsByCte.get(cteIdentity({empresa:row.empresacon,serie:row.seriecon,codigo:row.codigocon})) || [],
       empresaOperacao: row.empresaviagemcon ?? row.empresacon,
       documento: [row.seriecon, row.numeroctecon || row.codigocon].filter(Boolean).join("-"),
       codigoConhecimento: row.codigocon,

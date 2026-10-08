@@ -20,13 +20,15 @@
     "security:check": "node scripts/check-security.mjs",
     "maintenance:preview": "node scripts/maintenance-alerts.mjs --preview",
     "maintenance:send": "node scripts/maintenance-alerts.mjs --send",
-    "worker:maintenance": "node scripts/maintenance-alerts.mjs --worker"
+    "worker:maintenance": "node scripts/maintenance-alerts.mjs --worker",
+    "antt:sync": "node scripts/antt-sync.mjs"
   },
   "overrides": {
     "uuid": "^11.1.1"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",

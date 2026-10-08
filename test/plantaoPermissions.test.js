@@ -10,6 +10,7 @@ import { publicUser } from "../src/services/userSession.js";
 import { pool } from "../src/db/pool.js";
 import { clientPool } from "../src/db/clientPool.js";
 import { getVeiculosPool } from "../src/db/pool-veiculos.js";
+import { config } from "../src/config.js";
 
 const driver={id:42,login:"driver",permissions:{"manutencao-plantao":true}};
 const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":true}};
@@ -29,22 +30,26 @@ test("leitura do motorista aplica autoria no SQL, conferência exige permissão 
  assert.deepEqual(query.mock.calls[0].arguments[1],[42]);
  assert.equal((await request(app(reviewer)).get("/manutencao-plantao/conferencia")).status,200);
 });
-test("conferência grava usuário autenticado e respeita acesso somente consulta",async t=>{
- const query=t.mock.method(pool,"query",async()=>({rows:[{id,valor:"10.00",conferido_em:new Date()}]}));
- const res=await request(app(reviewer)).patch(`/manutencao-plantao/conferencia/${id}`).send({usuario_id:42});
- assert.equal(res.status,200); assert.deepEqual(query.mock.calls[0].arguments[1],[id,43,"reviewer"]);
- assert.equal((await request(app({...reviewer,readOnly:true})).patch(`/manutencao-plantao/conferencia/${id}`)).status,403);
+test("mutação exige versão válida e acesso somente consulta bloqueia alterações",async t=>{
+ const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
+ assert.equal((await request(app(reviewer)).patch(`/manutencao-plantao/conferencia/${id}`).send({usuario_id:42})).status,400);
+ assert.equal((await request(app({...reviewer,readOnly:true})).patch(`/manutencao-plantao/conferencia/${id}`).send({version:1})).status,403);
+ assert.equal((await request(app(driver)).delete(`/manutencao-plantao/lancamentos/${id}`).send({version:1,reason:""})).status,400);
+ assert.equal(connect.mock.callCount(),0);
 });
 test("criação valida frota e não aceita autoria enviada pelo navegador",async t=>{
+ const originalVeiculosDb=config.veiculosDb;
+ config.veiculosDb={host:"127.0.0.1",port:5432,database:"rodobach_test",user:"rodobach_test",password:"rodobach_test",ssl:false};
+ t.after(()=>{config.veiculosDb=originalVeiculosDb;});
  t.mock.method(getVeiculosPool(),"query",async()=>({rows:[{placa:"ABC1234"}]}));
  t.mock.method(clientPool,"query",async()=>({rows:[]}));
- const query=t.mock.method(pool,"query",async(_sql,params)=>({rows:[{id:params[0],placa:params[1],valor:params[2],usuario_id:params[8],usuario_login:params[9]}]}));
+ const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
  const body={plate:"ABC1234",amount:10,service:"Borracharia",supplier:"Oficina sem cadastro"};
  assert.equal((await request(app(driver)).post("/manutencao-plantao/lancamentos").send({...body,authorId:43})).status,400);
  assert.equal((await request(app(driver)).post("/manutencao-plantao/lancamentos").send({...body,plate:"XYZ1234"})).status,400);
- const res=await request(app(driver)).post("/manutencao-plantao/lancamentos").send(body);
- assert.equal(res.status,201);assert.equal(res.body.record.authorId,42);assert.equal(res.body.record.author,"driver");
- assert.equal(query.mock.calls[0].arguments[1][5],"Oficina sem cadastro");
+ assert.equal((await request(app(driver)).post("/manutencao-plantao/lancamentos").send({...body,expenseDate:"2026-02-30"})).status,400);
+ assert.equal((await request(app(driver)).post("/manutencao-plantao/lancamentos").send({...body,expenseDate:"2099-01-01"})).status,400);
+ assert.equal(connect.mock.callCount(),0);
 });
 test("Painel TV é independente e permissões públicas não usam fallback",async()=>{
  const isolated=express();let permissions={"status-carga":true};

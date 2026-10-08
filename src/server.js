@@ -1,3 +1,4 @@
+import { startAnttMonitor } from "./services/anttMonitor.js";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -172,6 +173,7 @@ app.use(errorHandler);
 
 export function startServer() {
   return app.listen(config.port, config.host, () => {
+    startAnttMonitor();
     logger.info({ port: config.port }, "Rodobach API iniciada");
     if (!config.readOnly && process.env.KM_DIARIO_ENABLED !== 'false') startDailyOdometerCollector();
     if (config.runSchedulers && !config.readOnly) {

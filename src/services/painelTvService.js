@@ -1,3 +1,4 @@
+import {loadOpenManifestosByPlate} from './tripManifestos.js';
 import {getStatusCargaFrota} from './statusCargaService.js';
 import {carregarCiclosPorPlaca} from './folgasMotoristasService.js';
 import {getTrafegusDashboard,getTrafegusSmsHistory,getTrafegusPosition,getTrafegusDailyDistance} from './trafegusService.js';
@@ -118,8 +119,8 @@ export function tvLoad(row,sm,now=new Date()){
  if(op?.entregaFinal){
   if(newerSm)return result('sem_confirmacao',`SM ${sm.id} posterior à última descarga; confirmar o novo carregamento.`,{pendente:true});
   const pending=Boolean(started||!op.agrupamentoConhecido);
-  return result('vazio',pending?'Última entrega registrada; confirmar encerramento de toda a carga.'
-   :'Desde a última entrega registrada da viagem.',{desde:op.entregaFinal,pendente:pending});
+  return result('vazio',pending?(op.encerradaPorManifesto?'Manifestos baixados; confirmar encerramento da carga e da SM.':'Última entrega registrada; confirmar encerramento de toda a carga.')
+   :op.encerradaPorManifesto?'Conforme baixa dos manifestos vinculados à carga.':'Desde a última entrega registrada da viagem.',{desde:op.entregaFinal,pendente:pending});
  }
  if(row?.estado==='vazio_confirmado'&&row.entregaAt&&new Date(row.entregaAt)<=now){
   return result('vazio','Última entrega registrada; confirmar situação atual.',{pendente:true});
@@ -161,8 +162,9 @@ export async function getPainelTv({force=false}={}){
   const cargoPromise=getStatusCargaFrota({dias:180,includeThirdPartySms:true});
   const smPromise=cargoPromise.then(()=>getTrafegusDashboard(),()=>getTrafegusDashboard());
   const macroPromise=cargoPromise.then(cargo=>loadCargoMacros(cargo.rows.map(row=>plate(row.placa))));
-  const results=await Promise.allSettled([cargoPromise,carregarCiclosPorPlaca(),smPromise,distanceToday(day),macroPromise,distanceToday(yesterday)]);
-  const [cargo,base,sms,km,macros,kmYesterday]=results.map(r=>r.status==='fulfilled'?r.value:null);
+  const manifestPromise=cargoPromise.then(cargo=>loadOpenManifestosByPlate(cargo.rows.map(row=>row.placa)));
+  const results=await Promise.allSettled([cargoPromise,carregarCiclosPorPlaca(),smPromise,distanceToday(day),macroPromise,distanceToday(yesterday),manifestPromise]);
+  const [cargo,base,sms,km,macros,kmYesterday,openManifestos]=results.map(r=>r.status==='fulfilled'?r.value:null);
   const smAvailable=Boolean(sms&&!sms.indisponivel);
   if(!cargo?.rows?.length)throw new Error('Não foi possível carregar os veículos. Tente atualizar novamente.');
   const now=new Date();
@@ -195,9 +197,9 @@ export async function getPainelTv({force=false}={}){
     }
     catch{entregas={disponivel:false,observacao:'Sequência de entregas indisponível na Elite.'};}
    }
-   return {placa:p,tipoFrota:row.tipoFrota,documentosCarga:row.documentosCarga,entregas,contextoCarga:cargoContext(enriched,sm),rota:tvRoute(row,sm),motorista:String((row.tipoFrota==='terceiro'?sm?.motorista:null)||row.motorista||'').trim()||null,carga:tvLoad(enriched,sm,now),macros:{...macroData,disponivel:Boolean(macros)},sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmOntem:{dia:yesterday,...(dailyYesterday||{km:null,motivo:'Sem leituras suficientes ontem'})},kmHoje:dailyToday||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoFonte:row.localizacao?.fonte||null,posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
+   return {placa:p,manifestos:openManifestos?.get(p) || [],manifestosDisponiveis:Boolean(openManifestos),tipoFrota:row.tipoFrota,documentosCarga:row.documentosCarga,entregas,contextoCarga:cargoContext(enriched,sm),rota:tvRoute(row,sm),motorista:String((row.tipoFrota==='terceiro'?sm?.motorista:null)||row.motorista||'').trim()||null,carga:tvLoad(enriched,sm,now),macros:{...macroData,disponivel:Boolean(macros)},sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmOntem:{dia:yesterday,...(dailyYesterday||{km:null,motivo:'Sem leituras suficientes ontem'})},kmHoje:dailyToday||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoFonte:row.localizacao?.fonte||null,posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
   }))).sort((a,b)=>a.placa.localeCompare(b.placa));
-  const data={dia:day,atualizadoEm:now.toISOString(),itens:items,fontes:{carga:true,base:Boolean(base?.geofence),sm:smAvailable,quilometragem:Boolean(km),quilometragemOntem:Boolean(kmYesterday),macros:Boolean(macros)},avisos:results.map((r,i)=>r.status==='rejected'?['Carga indisponível','Tempo fora indisponível','SM indisponível','Quilometragem indisponível','Macros indisponíveis','Quilometragem de ontem indisponível'][i]:null).filter(Boolean)};
+  const data={dia:day,atualizadoEm:now.toISOString(),itens:items,fontes:{carga:true,base:Boolean(base?.geofence),sm:smAvailable,quilometragem:Boolean(km),quilometragemOntem:Boolean(kmYesterday),macros:Boolean(macros),manifestos:Boolean(openManifestos)},avisos:results.map((r,i)=>r.status==='rejected'?['Carga indisponível','Tempo fora indisponível','SM indisponível','Quilometragem indisponível','Macros indisponíveis','Quilometragem de ontem indisponível','Manifestos em aberto indisponíveis'][i]:null).filter(Boolean)};
   if(sms?.incompleto)data.avisos.push("Consulta parcial de SMs: confira veiculos sem viagem na origem.");
   cached={at:Date.now(),data};return data;
  })();

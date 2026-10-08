@@ -10,6 +10,7 @@ export function mapAnttRows(rows) {
       altoDesempenho: null,
       dataVigencia: row.data_vigencia,
       versao: row.versao,
+      fonte: row.fonte,
     };
 
     const tarifa = {

@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {monthShare,vehicleIndicators,tripIndicators} from '../src/services/tripIndicators.js';
+import {monthShare,vehicleIndicators,tripIndicators,vehiclePeriod} from '../src/services/tripIndicators.js';
+test('usa os dias da viagem por padrão e permite o mês inteiro inclusive bissexto',()=>{
+  const trip={saida:'2026-09-25',chegada:'2026-09-30'};
+  assert.deepEqual(vehiclePeriod(trip),{start:'2026-09-25',end:'2026-09-30'});
+  assert.deepEqual(vehiclePeriod(trip,'2024-02'),{start:'2024-02-01',end:'2024-02-29'});
+  assert.throws(()=>vehiclePeriod(trip,'2026-13'));
+});
+test('mês inteiro inclui receitas fora da viagem e o financiamento integral sem duplicar',()=>{
+  const result=vehicleIndicators([
+    {tipo:'Receita',data:'2026-09-01',valor:5000},
+    {tipo:'Receita',data:'2026-09-25',valor:1000},
+    {tipo:'Despesa',data:'2026-09-25',valor:-400,contaMascara:'4.1.004'},
+    {tipo:'Despesa',data:'2026-09-25',valor:-3000,origem:'pagar',contaMascara:'6.5.001'},
+  ],[{data:'2026-09-10',valor:3000,contaMascara:'6.5.001'}],'2026-09-01','2026-09-30');
+  assert.equal(result.receita,6000);assert.equal(result.custo,3400);assert.equal(result.lucro,2600);assert.equal(result.financiamentos,3000);
+});
 test('rateio inclusivo considera mês curto, bissexto e viagem entre meses',()=>{
   assert.deepEqual(monthShare('2026-09-10','2026-09-25','2026-09-30'),{dias:6,diasMes:30});
   assert.deepEqual(monthShare('2024-02-10','2024-02-28','2024-03-02'),{dias:2,diasMes:29});

@@ -12,8 +12,8 @@ test('separa faltantes, outra empresa, duplicados e documentos fora do período'
     {noPeriodo:false,vinculos:[{empresa:1,numero:22}]},
   ];
   const audit=classifyTripCtes(rows,trip);
-  assert.deepEqual(audit.documentos.map(d=>d.situacao),['sem_vinculo','outra_viagem','duplicado','fora_periodo','vinculado']);
-  assert.equal(audit.emitidos,4);assert.equal(audit.vinculados,1);assert.equal(audit.semVinculo,1);assert.equal(audit.divergencias,3);assert.equal(audit.pendencias,4);
+  assert.deepEqual(audit.documentos.map(d=>d.situacao),['sem_vinculo','outra_viagem','duplicado','vinculado','vinculado']);
+  assert.equal(audit.emitidos,4);assert.equal(audit.vinculados,2);assert.equal(audit.semVinculo,1);assert.equal(audit.divergencias,2);assert.equal(audit.pendencias,3);
 });
 test('não conclui conferência sem placa ou período válido',async t=>{
   const query=t.mock.method(clientPool,'query',async()=>{throw Error('Não deve consultar');});
@@ -31,4 +31,16 @@ test('consulta apenas emitidos com datas inclusivas e identidade completa do CT-
   assert.match(sql,/l.empresa=c.empresacon AND l.serie=c.seriecon AND l.codigo=c.codigocon/);
   assert.match(sql,/l."empresaViagem"=\$1 AND l.viagem=\$2/);
   assert.equal(audit.emitidos,0);assert.equal(audit.pendencias,0);
+});
+
+test('emissão anterior não invalida vínculo; placa errada e duplicidade continuam pendentes',()=>{
+  const audit=classifyTripCtes([
+    {codigo:4302,placa:'ABC1234',noPeriodo:false,vinculos:[{empresa:1,numero:22}]},
+    {codigo:2,placa:'XYZ9876',noPeriodo:false,vinculos:[{empresa:1,numero:22}]},
+    {codigo:3,placa:'ABC1234',noPeriodo:false,vinculos:[{empresa:1,numero:22},{empresa:2,numero:22}]}
+  ],trip);
+  assert.equal(audit.documentos.find(d=>d.codigo===4302).situacao,'vinculado');
+  assert.equal(audit.documentos.find(d=>d.codigo===2).situacao,'placa_divergente');
+  assert.equal(audit.documentos.find(d=>d.codigo===3).situacao,'duplicado');
+  assert.equal(audit.pendencias,2);
 });
