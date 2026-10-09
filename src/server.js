@@ -63,6 +63,7 @@ app.use(cors({
     callback(new Error(`Origin not allowed: ${origin}`));
   },
 }));
+app.use("/api/manutencao-plantao", express.json({ limit: "6mb" }));
 app.use(express.json({ limit: "2mb" }));
 app.use("/api/auth/login", rateLimit({
   windowMs: 15 * 60 * 1000,

@@ -1,0 +1,2 @@
+ALTER TABLE manutencao_plantao ADD COLUMN IF NOT EXISTS pago BOOLEAN;
+ALTER TABLE manutencao_plantao ADD COLUMN IF NOT EXISTS lancado BOOLEAN;
