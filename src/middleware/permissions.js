@@ -1,4 +1,5 @@
 const ROUTE_PERMISSIONS = [
+  [/^\/compras(?:\/|$)/, "compras"],
   [/^\/admin\//, "admin"],
   [/^\/usuarios(?:\/|$)/, "admin"],
   [/^\/automacoes(?:\/|$)/, "automacoes-n8n"],
@@ -19,7 +20,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/localidades\/cidades(?:\/|$)/, ["simulador", "viagens"]],
   [/^\/frota\/status-carga(?:\/|$)/, "status-carga"],
   [/^\/frota\/painel-tv(?:\/|$)/, "painel-tv"],
-  [/^\/frota\/ociosidade(?:\/|$)/, "status-carga"],
+  [/^\/frota\/ociosidade(?:\/|$)/, "ociosidade-frota"],
   [/^\/trafegus(?:\/|$)/, "trafegus"],
   [/^\/oportunidades-retorno(?:\/|$)/, "oportunidades-retorno"],
   [/^\/cte(?:\/|$)/, "consulta-cte"],
@@ -50,9 +51,13 @@ const ROUTE_PERMISSIONS = [
 
 export function requirePermission(permission) {
   return (req, res, next) => {
-    if (req.user?.admin === true) return next();
     const permissions = Array.isArray(permission) ? permission : [permission];
-    if (!permissions.some((key) => key !== "admin" && req.user?.permissions?.[key] === true)) {
+    const explicitPermissions = new Set(["folgas-motoristas", "status-carga", "automacoes-n8n"]);
+    if (!permissions.some((key) =>
+      explicitPermissions.has(key)
+        ? req.user?.permissions?.[key] === true
+        : req.user?.admin === true || (key !== "admin" && req.user?.permissions?.[key] === true)
+    )) {
       return res.status(403).json({ error: "Voce nao possui permissao para esta operacao." });
     }
     next();

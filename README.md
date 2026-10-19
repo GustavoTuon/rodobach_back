@@ -1,5 +1,47 @@
 # Rodobach Backend
 
+## Nota de abastecimento e quilometragem
+
+A migração `060_plantao_dados_nota_telemetria.sql` preserva o combustível e o cliente
+identificados na nota, além da data da leitura de KM. O endpoint de hodômetro do
+portal exige `date` e `time` e consulta a última leitura anterior ou igual ao horário
+da nota, no mesmo dia em America/Sao_Paulo, sem usar o último abastecimento do ERP.
+No cadastro de abastecimentos, a API consulta novamente a telemetria e não confia
+no KM enviado pelo navegador. Edições mantêm a leitura original quando placa, data
+e horário não mudam. Sem leitura anterior nesse dia, retorna 422. As fotos antigas
+de painel e bomba continuam preservadas; novos
+anexos do assistente usam a nota. Os dados do OCR são sugestões revisáveis, com
+cliente/destinatário separado do fornecedor/emitente e litros de ARLA separados.
+
+A migração `061_plantao_fluxo_conferencia.sql` adiciona horário da nota, perfil do
+autor e justificativa sem nota. O perfil vem da sessão autenticada e permanece
+inalterado nas edições; registros antigos ficam com perfil não registrado.
+Cadastro, edição e conferência exigem imagem da nota ou justificativa de pelo
+menos 10 caracteres. Pagamento e conferência são independentes; o portal destaca
+despesas pagas ainda não conferidas. Não há devolução para correção.
+
+Rascunhos são guardados no navegador por usuário, formulário e versão do registro,
+incluindo a imagem anexada. São removidos após salvar ou descartar; falhas de
+armazenamento mostram um aviso. Não são sincronizados entre aparelhos.
+
+## Despesas por perfil de usuário
+
+A migração `059_usuarios_motorista_telemetria.sql` adiciona os perfis Colaborador e
+Motorista ao cadastro de usuários. Contas existentes continuam como Colaborador.
+O administrador vincula cada conta de motorista ao identificador enviado nas
+mensagens da telemetria; o código interno de `rodobach.motoristas` não é equivalente.
+Cada identificador pode pertencer a uma única conta. Não são criadas contas ou
+senhas automaticamente. Motoristas não podem ter acesso de administrador ou
+conferência neste perfil.
+
+A placa acompanha a identificação mais recente na telemetria, desde que o veículo
+ainda tenha esse motorista, sem vínculos simultâneos conflitantes e com identificação
+nos últimos sete dias. Ausência, conflito, dados antigos ou falha na consulta bloqueiam
+novos lançamentos; não liberam outras placas. A API revalida a placa ao criar/editar
+e nas consultas de localização e hodômetro. O histórico próprio continua disponível
+após uma troca de veículo; correções de despesas da placa anterior ficam a cargo
+da conferência. Colaboradores continuam selecionando qualquer placa cadastrada.
+
 ## Controle de custos de plantão
 
 A migração `050_plantao_controle_custos.sql` adiciona data da despesa, número do

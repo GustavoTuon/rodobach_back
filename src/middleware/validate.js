@@ -21,6 +21,8 @@ export function validateBody(schema) {
 }
 
 const userFields = {
+  perfil_despesas: z.enum(["colaborador", "motorista"]),
+  telemetria_motorista_id: z.string().regex(/^[1-9][0-9]{0,18}$/).nullable(),
   ...Object.fromEntries(EXTRA_PERMISSION_COLUMNS.map(column => [column, z.boolean()])),
   login: z.string().trim().min(1).max(120),
   senha: z.string().min(8).max(72).refine(value => Buffer.byteLength(value, "utf8") <= 72, "Senha excede 72 bytes."),

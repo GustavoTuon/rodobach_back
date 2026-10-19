@@ -23,16 +23,38 @@ test('cargo corrections and their history require administrator access', async t
 });
 
 test("all business router declarations have an explicit policy", () => {
+  // Supplier endpoints use invitation tokens or supplier sessions, not employee permissions.
+  const supplierPolicies = new Set([
+    "compras.js:get:/compras-publico/:token",
+    "compras.js:put:/compras-publico/:token",
+    "comprasAccess.js:post:/compras-fornecedor/login",
+    "comprasAccess.js:post:/compras-fornecedor/senha",
+    "comprasAccess.js:get:/compras-fornecedor/cotacoes",
+  ]);
   const dir = new URL("../src/routes/", import.meta.url);
   const missing = [];
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".js") || file === "auth.js") continue;
     const source = fs.readFileSync(new URL(file, dir), "utf8");
     for (const match of source.matchAll(/\b\w+\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/g)) {
+      if (supplierPolicies.has(`${file}:${match[1]}:${match[2]}`)) continue;
       if (match[2].startsWith("/") && !ROUTE_PERMISSIONS.some(([pattern]) => pattern.test(match[2].toLowerCase()))) missing.push(match[2]);
     }
   }
   assert.deepEqual(missing, []);
+});
+
+test("supplier sessions and invitations reject unauthenticated access", async () => {
+  for (const [method, path] of [
+    ["get", "/api/compras-fornecedor/cotacoes"],
+    ["post", "/api/compras-fornecedor/senha"],
+  ]) {
+    assert.equal((await request(app)[method](path)).status, 401);
+  }
+  for (const method of ["get", "put"]) {
+    const response = await request(app)[method]("/api/compras-publico/invalid");
+    assert.ok([400, 401, 403, 404].includes(response.status), `${method}: ${response.status}`);
+  }
 });
 
 test("capitalization and unmapped routes cannot bypass permissions, including mutations", async () => {

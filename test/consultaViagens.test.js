@@ -5,6 +5,17 @@ import request from "supertest";
 import {consultaViagensRouter,tripFilters} from "../src/routes/consultaViagens.js";
 import {clientPool} from "../src/db/clientPool.js";
 import {requireRoutePermission} from "../src/middleware/permissions.js";
+test("lista viagens paginando antes das junções e preserva filtros e total", async t => {
+ const query=t.mock.method(clientPool,"query",async sql=>({rows:sql.includes("count(*)")?[{total:65}]:[{empresa:1,numero:868,placa:"ABC1234"}]}));
+ const app=express();app.use(consultaViagensRouter);
+ const res=await request(app).get('/financeiro/consulta-viagens').query({placa:'ABC1234',page:2});
+ assert.equal(res.status,200);assert.equal(res.body.total,65);assert.equal(res.body.pageSize,30);
+ assert.equal(res.body.itens[0].numero,868);
+ assert.deepEqual(query.mock.calls[1].arguments[1],['%ABC1234%',30]);
+ const sql=query.mock.calls[1].arguments[0];
+ assert.ok(sql.indexOf('LIMIT 30')<sql.indexOf('LEFT JOIN'));
+ assert.ok(!sql.includes('observacaocvg'));
+});
 test("valida filtros e parametriza placa e número",()=>{
  assert.equal(tripFilters({numero:"1 OR 1=1"}),null);
  assert.equal(tripFilters({inicio:"2026-02-30"}),null);

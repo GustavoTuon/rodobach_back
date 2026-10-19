@@ -7,19 +7,26 @@ import { clientPool } from "../db/clientPool.js";
 import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { ADDITIONAL_MAINTENANCE_PLATES, mergeMaintenanceVehicles } from "../services/maintenanceVehicles.js";
 import { requirePermission } from "../middleware/permissions.js";
-import { loadMaintenanceOdometers } from "../services/maintenanceOdometer.js";
+import { expenseTelemetryOdometer } from "../services/expenseTelemetryOdometer.js";
 import { validateBody } from "../middleware/validate.js";
+import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services/expenseDriverAccess.js";
 
 export const manutencaoPlantaoRouter = express.Router();
 const TABLE = () => tableName("manutencao_plantao");
 const LIST_COLUMNS = `id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,
   usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,
-  pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
+  hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
 const canRegister = requirePermission("manutencao-plantao");
-const canReview = requirePermission("conferencia-manutencao");
+const canReview = (req, res, next) => isExpenseDriver(req.user)
+  ? res.status(403).json({error: "O perfil motorista não possui acesso à conferência."})
+  : requirePermission("conferencia-manutencao")(req, res, next);
 const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao"]);
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
+  expenseTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/).nullable().optional(),
+  receiptReason: z.string().trim().max(300).optional(),
+  fuelType: z.string().trim().max(80).optional(),
+  customerName: z.string().trim().max(160).optional(),
   photos: z.object({odometer:photoSchema.optional(),pump:photoSchema.optional(),invoice:photoSchema.optional()}).strict().optional(),
   arlaLiters: z.number().positive().max(9999).nullable().optional(),
   arlaAmount: z.number().positive().max(999999.99).refine(v=>Math.abs(v*100-Math.round(v*100))<0.00001).nullable().optional(),
@@ -42,7 +49,7 @@ const schema = z.object({
   supplierCompany: z.union([z.string().max(30), z.number()]).nullable().optional(),
 }).strict();
 function record(row) {
-  return {source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
+  return {expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
     arlaLiters: row.arla_litros == null ? null : Number(row.arla_litros),
     arlaAmount: row.arla_valor == null ? null : Number(row.arla_valor),
     fuelAmount: row.valor_combustivel == null ? null : Number(row.valor_combustivel),
@@ -64,22 +71,32 @@ export async function plantaoPlates() {
   ]);
   return mergeMaintenanceVehicles(telemetry.rows, extra.rows);
 }
-manutencaoPlantaoRouter.get("/manutencao-plantao/placas", canRead, async (_req, res, next) => {
-  try { res.json({veiculos: await plantaoPlates()}); } catch (error) { next(error); }
+manutencaoPlantaoRouter.get("/manutencao-plantao/placas", canRead, async (req, res, next) => {
+  try {
+    const access = await expenseAccess(req.user);
+    const veiculos = isExpenseDriver(req.user)
+      ? (access.plate ? [{placa: access.plate}] : []) : await plantaoPlates();
+    res.json({veiculos, access});
+  } catch (error) { next(error); }
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/hodometro", canRead, async (req,res,next) => {
   try {
     const plate=req.params.plate.toUpperCase();
+    await requireExpensePlate(req.user, plate);
     if (!/^[A-Z]{3}\d[A-Z0-9]\d{2}$/.test(plate)) return res.status(400).json({error:"Placa inválida."});
     if (!(await plantaoPlates()).some(item=>item.placa===plate)) return res.status(404).json({error:"Veículo não encontrado."});
-    const readings=await loadMaintenanceOdometers([plate]);
-    const reference=readings.get(plate);
-    res.set("Cache-Control","no-store").json({odometer:reference?.km_atual ?? null,source:reference?.km_fonte || "indisponivel",date:reference?.km_data ?? null});
+    const expenseDate = req.query.date || today();
+    if (!z.iso.date().safeParse(expenseDate).success || expenseDate > today()) return res.status(400).json({error:"Data da despesa inválida."});
+    const time = req.query.time;
+    if (!/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(time || "")) return res.status(400).json({error:"Informe o horário da nota."});
+    if (new Date(`${expenseDate}T${time.length === 5 ? time+":00" : time}-03:00`) > new Date()) return res.status(400).json({error:"O horário da despesa não pode estar no futuro."});
+    res.set("Cache-Control","no-store").json(await expenseTelemetryOdometer(plate, expenseDate, time));
   } catch(error) {next(error);}
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/localizacao", canRead, async (req,res,next) => {
   try {
     const plate=req.params.plate.toUpperCase();
+    await requireExpensePlate(req.user, plate);
     if (!/^[A-Z]{3}\d[A-Z0-9]\d{2}$/.test(plate)) return res.status(400).json({error:"Placa inválida."});
     if (!(await plantaoPlates()).some(item=>item.placa===plate)) return res.status(404).json({error:"Veículo não encontrado."});
     const {rows}=await getVeiculosPool().query(`SELECT m.municipio,m.uf,m.rodovia,m.rua,m.data_hora
@@ -106,7 +123,7 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/conferencia", canReview, async 
   try { const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`); res.json({records: rows.map(record)}); }
   catch (error) { next(error); }
 });
-const canManage = req => req.user.admin === true || req.user.permissions?.["conferencia-manutencao"] === true;
+const canManage = req => !isExpenseDriver(req.user) && (req.user.admin === true || req.user.permissions?.["conferencia-manutencao"] === true);
 const today = () => new Date().toLocaleDateString("en-CA", {timeZone:"America/Sao_Paulo"});
 const changeSchema = schema.extend({version: z.number().int().positive()});
 const deleteSchema = z.object({version:z.number().int().positive(), reason:z.string().trim().min(5).max(300)}).strict();
@@ -133,6 +150,7 @@ async function validateRegistration(body) {
 async function mutate(req, res, next, action) {
   if (action !== "create" && !uuidValid(req,res)) return;
   let client;
+  let telemetry = null;
   try {
     const body = req.body;
     if (!canManage(req) && (action === "status" || body.paid !== undefined || body.posted !== undefined || body.paymentDate !== undefined)) {
@@ -142,6 +160,7 @@ async function mutate(req, res, next, action) {
       return res.status(400).json({error:"A data do pagamento não pode estar no futuro."});
     }
     if (["create","edit"].includes(action)) {
+      await requireExpensePlate(req.user, body.plate);
       if (body.paid !== undefined || body.posted !== undefined) return res.status(400).json({error:"Atualize os controles pela conferência."});
       const error = await validateRegistration(body);
       if (error) return res.status(400).json({error});
@@ -161,6 +180,23 @@ async function mutate(req, res, next, action) {
     }
     let after;
     if (["create","edit"].includes(action)) {
+      const invoice = body.photos?.invoice !== undefined ? body.photos.invoice : body.receipt !== undefined ? body.receipt : before?.comprovante_foto;
+      const receiptReason = body.receiptReason === undefined ? before?.justificativa_sem_nota || "" : body.receiptReason;
+      if (!invoice && receiptReason.length < 10) return await reject(400,"Anexe a nota ou informe uma justificativa com pelo menos 10 caracteres.");
+      const expenseTime = body.expenseTime === undefined ? before?.hora_despesa || null : body.expenseTime;
+      const previousDay = before ? record(before).expenseDate : null;
+      const normalizeTime = value => value?.length === 5 ? value+":00" : value || null;
+      if (expenseTime && new Date(`${body.expenseDate}T${normalizeTime(expenseTime)}-03:00`) > new Date()) return await reject(400,"O horário da despesa não pode estar no futuro.");
+      const preserveKm = before && before.placa === body.plate && previousDay === body.expenseDate
+        && normalizeTime(before.hora_despesa) === normalizeTime(expenseTime) && before.hodometro != null;
+      if (!preserveKm && (body.service === "Abastecimento" || body.odometer !== undefined)) {
+        if (!expenseTime && body.service === "Abastecimento") return await reject(400,"Informe o horário da nota para consultar o KM do abastecimento.");
+        if (expenseTime) {
+          telemetry = await expenseTelemetryOdometer(body.plate, body.expenseDate, expenseTime);
+        }
+        body.odometer = telemetry?.odometer ?? null;
+        if (body.service === "Abastecimento" && body.odometer == null) return await reject(422,"Sem leitura de telemetria anterior ao horário da nota neste dia. Confira data e horário.");
+      } else if (preserveKm) body.odometer = Number(before.hodometro);
       const source = before?.origem || body.source || "colaborador";
       if (before && body.source && body.source !== before.origem) return await reject(400,"A origem do lançamento não pode ser alterada.");
       if (source === "motorista" && !["Abastecimento","Manutenção","Outros"].includes(body.service)) return await reject(400,"Selecione um tipo de despesa válido.");
@@ -187,7 +223,7 @@ async function mutate(req, res, next, action) {
         (id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,usuario_id,usuario_login,data_despesa,documento,pago,lancado)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *` : `UPDATE ${TABLE()} SET placa=$2,valor=$3,servico=$4,observacao=$5,fornecedor=$6,fornecedor_codigo=$7,fornecedor_empresa=$8,
         data_despesa=$9,documento=$10,pago=$11,lancado=$12,revisao=revisao+1 WHERE id=$1 RETURNING *`,action === "create" ? values : [...values.slice(0,8),body.expenseDate,body.document,body.paid === undefined ? before.pago : body.paid,body.posted === undefined ? before.lancado : body.posted])).rows[0];
-      after = (await client.query(`UPDATE ${TABLE()} SET origem=$2,litros=$3,hodometro=$4,local_despesa=$5,comprovante_foto=$6,painel_foto=$7,bomba_foto=$8,valor_combustivel=$9,arla_litros=$10,arla_valor=$11 WHERE id=$1 RETURNING *`,[
+      after = (await client.query(`UPDATE ${TABLE()} SET origem=$2,litros=$3,hodometro=$4,local_despesa=$5,comprovante_foto=$6,painel_foto=$7,bomba_foto=$8,valor_combustivel=$9,arla_litros=$10,arla_valor=$11,combustivel_tipo=$12,cliente_nota=$13,hodometro_telemetria_em=$14,hora_despesa=$15,perfil_autor=$16,justificativa_sem_nota=$17 WHERE id=$1 RETURNING *`,[
         after.id,source,body.service === "Abastecimento" ? liters : null,odometer ?? null,
         body.location === undefined ? before?.local_despesa || "" : body.location,
         body.photos?.invoice !== undefined ? body.photos.invoice : body.receipt === undefined ? before?.comprovante_foto || null : body.receipt,
@@ -196,6 +232,12 @@ async function mutate(req, res, next, action) {
         body.service === "Abastecimento" ? fuelAmount ?? null : null,
         body.service === "Abastecimento" ? arlaLiters ?? null : null,
         body.service === "Abastecimento" ? arlaAmount ?? null : null,
+        body.fuelType === undefined ? before?.combustivel_tipo || "" : body.fuelType,
+        body.customerName === undefined ? before?.cliente_nota || "" : body.customerName,
+        telemetry ? telemetry.date : before?.hodometro_telemetria_em || null,
+        expenseTime,
+        before ? before.perfil_autor : req.user.expenseProfile === "motorista" ? "motorista" : "colaborador",
+        invoice ? "" : receiptReason,
       ])).rows[0];
     } else if (action === "status") {
       after = (await client.query(`UPDATE ${TABLE()} SET pago=$2,lancado=$3,data_pagamento=$4,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,body.paymentDate === undefined ? before.pago : Boolean(body.paymentDate),body.posted === undefined ? before.lancado : body.posted,body.paymentDate === undefined ? before.data_pagamento : body.paymentDate])).rows[0];
@@ -203,6 +245,7 @@ async function mutate(req, res, next, action) {
       after = (await client.query(`UPDATE ${TABLE()} SET excluido_em=NOW(),excluido_por=$2,motivo_exclusao=$3,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.login,body.reason])).rows[0];
     } else {
       if (before.conferido_em) {await client.query("COMMIT"); return res.json({record:record(before)});}
+      if (!before.comprovante_foto && (before.justificativa_sem_nota || "").trim().length<10) return await reject(400,"Anexe a nota ou registre a justificativa antes de conferir.");
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login])).rows[0];
     }
     await audit(client,req,action,before,after);

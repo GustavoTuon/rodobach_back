@@ -39,5 +39,5 @@ export function publicUser(user) {
       "automacoes-n8n": user.perm_automacoes_n8n ?? user.perm_manutencao,
     };
 
-  return { id: user.id, login: user.login, email: user.email, numero: user.numero, admin: user.admin === true, permissions, readOnly: config.readOnly || config.readOnlyUsers.includes(String(user.login).toLowerCase()) };
+  return { id: user.id, login: user.login, email: user.email, numero: user.numero, admin: user.admin === true, expenseProfile: user.perfil_despesas || "colaborador", telemetryDriverId: user.telemetria_motorista_id || null, permissions, readOnly: config.readOnly || config.readOnlyUsers.includes(String(user.login).toLowerCase()) };
 }

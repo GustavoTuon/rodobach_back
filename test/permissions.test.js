@@ -9,6 +9,15 @@ function execute(permission, user) {
   return { nextCalled, status };
 }
 test("administrador ignora permissoes individuais", () => assert.equal(execute("pneus", { admin: true }).nextCalled, true));
+test("telas restritas exigem concessão explícita inclusive para administradores", () => {
+  for (const permission of ["folgas-motoristas", "status-carga", "automacoes-n8n"]) {
+    for (const admin of [true, false]) {
+      assert.equal(execute(permission, { admin, permissions: { [permission]: false } }).status, 403);
+      assert.equal(execute(permission, { admin, permissions: {} }).status, 403);
+      assert.equal(execute(permission, { admin, permissions: { [permission]: true } }).nextCalled, true);
+    }
+  }
+});
 test("usuario precisa de permissao explicitamente verdadeira", () => {
   assert.equal(execute("pneus", { permissions: { pneus: true } }).nextCalled, true);
   assert.equal(execute("pneus", { permissions: { pneus: false } }).status, 403);

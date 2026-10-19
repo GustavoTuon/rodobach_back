@@ -4,7 +4,7 @@ export const loggerOptions = {
   level: process.env.LOG_LEVEL || "info",
   serializers: {
     req(req) {
-      return { id: req.id, method: req.method, url: req.url?.split("?")[0] };
+      return { id: req.id, method: req.method, url: req.url?.split("?")[0]?.replace(/(\/compras-publico\/)[^/]+/, "$1[REDACTED]") };
     },
     res(res) {
       return { statusCode: res.statusCode };

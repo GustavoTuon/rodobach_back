@@ -42,6 +42,8 @@ import { multasFrotaRouter } from "./routes/multasFrota.js";
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
 import { startDailyOdometerCollector } from "./services/dailyOdometer.js";
 
+import { comprasRouter, comprasPublicRouter } from './routes/compras.js';
+
 export const app = express();
 
 app.disable("x-powered-by");
@@ -117,6 +119,7 @@ app.get("/api/health/viagens", requireAuth, requireAdmin, async (_req, res) => {
 
 // Autenticação (login não requer token)
 app.use("/api", authRouter);
+app.use("/api", comprasPublicRouter);
 
 // ── Rotas protegidas (JWT obrigatório a partir daqui) ─────────────────────────
 app.use("/api", requireAuth);
@@ -142,6 +145,7 @@ app.post("/api/admin/migrate", requireAdmin, async (_req, res, next) => {
   }
 });
 
+app.use("/api", comprasRouter);
 app.use("/api", freteRouter);
 app.use("/api", localidadesRouter);
 app.use("/api", financeiroRouter);

@@ -5,11 +5,12 @@ import { pool } from "../db/pool.js";
 import { createUserSchema, updateUserSchema, validateBody } from "../middleware/validate.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import { EXTRA_PERMISSION_COLUMNS } from "../services/screenPermissions.js";
+import { telemetryDrivers, driverAssignment } from "../services/expenseDriverAccess.js";
 
 export const usuariosRouter = express.Router();
 
 const COLS_RETORNO = `
-  id, login, email, numero, admin, ativo,
+  id, login, email, numero, admin, ativo, perfil_despesas, telemetria_motorista_id,
   perm_diretoria, perm_simulador, perm_viagens, perm_dre_empresarial, perm_analise_frota,
   perm_abastecimentos, perm_precos_combustivel,
   perm_faturamento_diario, perm_comparativo_faturamento, perm_lucro_viagens,
@@ -19,6 +20,23 @@ const COLS_RETORNO = `
   perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens,
   ${EXTRA_PERMISSION_COLUMNS.join(", ")}, criado_em
 `;
+
+usuariosRouter.get("/usuarios/motoristas-telemetria", requireAdmin, async (_req, res, next) => {
+  try {
+    const rows = await telemetryDrivers();
+    res.json({motoristas: rows.map(row => ({id: row.id, nome: row.nome || `Motorista ${row.id}`,
+      ...driverAssignment(rows.filter(item => item.id === row.id), row.id)}))});
+  } catch (error) { next(error); }
+});
+
+async function validateDriverLink(req, res, next) {
+  try {
+    if (req.body.telemetria_motorista_id && !(await telemetryDrivers(req.body.telemetria_motorista_id)).length) {
+      return res.status(400).json({error: "Selecione um motorista identificado pela telemetria."});
+    }
+    next();
+  } catch (error) { next(error); }
+}
 
 // GET /api/usuarios
 usuariosRouter.get("/usuarios", requireAdmin, async (req, res, next) => {
@@ -33,7 +51,7 @@ usuariosRouter.get("/usuarios", requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/usuarios
-usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), async (req, res, next) => {
+usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), validateDriverLink, async (req, res, next) => {
   try {
     const {
       login, senha, email, numero,
@@ -65,8 +83,8 @@ usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), a
          perm_custos_veiculos, perm_manutencoes_veiculos, perm_clientes, perm_clientes_lucro,
          perm_status_carga, perm_pneus, perm_multas_frota, perm_settings, perm_manutencao, perm_automacoes_n8n,
          perm_folgas_motoristas, perm_trafegus, perm_oportunidades_retorno, perm_consulta_nfe,
-         perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens, ${EXTRA_PERMISSION_COLUMNS.join(", ")})
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,${EXTRA_PERMISSION_COLUMNS.map((_,index) => `$${34+index}`).join(",")})
+         perm_manutencao_posicoes, perm_controle_canhotos, perm_aprovar_viagens, ${EXTRA_PERMISSION_COLUMNS.join(", ")}, perfil_despesas, telemetria_motorista_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,${EXTRA_PERMISSION_COLUMNS.map((_,index) => `$${34+index}`).join(",")},$${34+EXTRA_PERMISSION_COLUMNS.length},$${35+EXTRA_PERMISSION_COLUMNS.length})
        RETURNING ${COLS_RETORNO}`,
       [
         String(login).trim().toLowerCase(), hash, email || null, numero || null,
@@ -89,11 +107,18 @@ usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), a
         Boolean(perm_controle_canhotos),
         Boolean(perm_aprovar_viagens),
         ...EXTRA_PERMISSION_COLUMNS.map(column => req.body[column] === true),
+        req.body.perfil_despesas || "colaborador", req.body.telemetria_motorista_id || null,
       ]
     );
 
     res.status(201).json({ usuario: rows[0] });
   } catch (error) {
+    if (error.constraint === "usuarios_perfil_despesas_check") {
+      return res.status(400).json({error: "Perfil motorista exige um motorista vinculado, sem acesso de administrador ou conferencia."});
+    }
+    if (error.constraint === "usuarios_motorista_telemetria_unique") {
+      return res.status(409).json({error: "Este motorista ja esta vinculado a outro usuario."});
+    }
     if (error.code === "23505") {
       return res.status(409).json({ error: "Login já está em uso." });
     }
@@ -102,13 +127,14 @@ usuariosRouter.post("/usuarios", requireAdmin, validateBody(createUserSchema), a
 });
 
 // PUT /api/usuarios/:id
-usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema), async (req, res, next) => {
+usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema), validateDriverLink, async (req, res, next) => {
   try {
     const { id } = req.params;
     const body = req.body;
 
     const FIELDS = [
       ...EXTRA_PERMISSION_COLUMNS,
+      "perfil_despesas", "telemetria_motorista_id",
       "email", "numero", "admin", "ativo",
       "perm_diretoria", "perm_simulador", "perm_viagens", "perm_dre_empresarial", "perm_analise_frota",
       "perm_abastecimentos", "perm_precos_combustivel",
@@ -170,6 +196,12 @@ usuariosRouter.put("/usuarios/:id", requireAdmin, validateBody(updateUserSchema)
 
     res.json({ usuario: rows[0] });
   } catch (error) {
+    if (error.constraint === "usuarios_perfil_despesas_check") {
+      return res.status(400).json({error: "Perfil motorista exige um motorista vinculado, sem acesso de administrador ou conferencia."});
+    }
+    if (error.constraint === "usuarios_motorista_telemetria_unique") {
+      return res.status(409).json({error: "Este motorista ja esta vinculado a outro usuario."});
+    }
     if (error.code === "23505") {
       return res.status(409).json({ error: "Login já está em uso." });
     }
