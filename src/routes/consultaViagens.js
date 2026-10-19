@@ -39,7 +39,16 @@ consultaViagensRouter.get('/financeiro/consulta-viagens',async(req,res,next)=>{
     const {where,params,page}=filter;
     const [count,rows]=await Promise.all([
       clientPool.query(`SELECT count(*)::int AS total FROM logistica.controleviagens v${where}`,params),
-      clientPool.query(`${header}${where} ORDER BY v.datasaidacvg DESC NULLS LAST,v.empresacvg,v.codigocvg DESC LIMIT 30 OFFSET $${params.length+1}`,[...params,(page-1)*30]),
+      clientPool.query(`SELECT v.empresacvg AS empresa, v.codigocvg AS numero, v.veiculocvg AS placa,
+        v.datasaidacvg::text AS saida, v.datachegadacvg::text AS chegada, v.totalfretescvg AS fretes,
+        COALESCE(m.nomemot,v.motoristacvg::text) AS motorista, COALESCE(s.nomescv,v.statuscvg::text) AS status
+        FROM (SELECT v.empresacvg,v.codigocvg,v.veiculocvg,v.datasaidacvg,v.datachegadacvg,
+          v.totalfretescvg,v.motoristacvg,v.statuscvg FROM logistica.controleviagens v${where}
+          ORDER BY v.datasaidacvg DESC NULLS LAST,v.empresacvg,v.codigocvg DESC
+          LIMIT 30 OFFSET $${params.length+1}) v
+        LEFT JOIN frotas.motoristas m ON m.empresamot=v.empresacvg AND m.codigomot=v.motoristacvg
+        LEFT JOIN logistica.statuscontroleviagens s ON s.codigoscv=v.statuscvg
+        ORDER BY v.datasaidacvg DESC NULLS LAST,v.empresacvg,v.codigocvg DESC`,[...params,(page-1)*30]),
     ]);
     res.json({itens:rows.rows,total:count.rows[0].total,page,pageSize:30});
   }catch(error){next(error);}

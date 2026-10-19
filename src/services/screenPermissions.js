@@ -1,4 +1,6 @@
 export const EXTRA_SCREEN_PERMISSIONS = [
+  { id: "compras", label: "Compras", group: "operacao", legacy: null, column: "perm_compras" },
+  { id: "ociosidade-frota", label: "Ociosidade (teste)", group: "operacao", legacy: "perm_status_carga", column: "perm_ociosidade_frota" },
   {
     "id": "painel-tv",
     "label": "Painel TV",

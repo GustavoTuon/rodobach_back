@@ -11,6 +11,7 @@ import { pool } from "../src/db/pool.js";
 import { clientPool } from "../src/db/clientPool.js";
 import { getVeiculosPool } from "../src/db/pool-veiculos.js";
 import { config } from "../src/config.js";
+import { EXTRA_PERMISSION_COLUMNS } from "../src/services/screenPermissions.js";
 
 const driver={id:42,login:"driver",permissions:{"manutencao-plantao":true}};
 const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":true}};
@@ -70,5 +71,7 @@ test("admin salva e lê as novas permissões; usuário comum não altera permiss
  assert.equal((await request(admin).get("/usuarios")).status,200);
  assert.match(query.mock.calls[1].arguments[0],/perm_conferencia_manutencao/);
  assert.equal((await request(admin).post("/usuarios").send({login:"test-fixture",senha:"password-1234",...body})).status,201);
- const [sql,params]=query.mock.calls[2].arguments;assert.match(sql,/\$36/);assert.equal(params.length,36);assert.deepEqual(params.slice(-3),[false,true,true]);
+ const [sql,params]=query.mock.calls[2].arguments;assert.match(sql,/\$36/);assert.equal(params.length,35+EXTRA_PERMISSION_COLUMNS.length);
+ assert.deepEqual(params.slice(33,33+EXTRA_PERMISSION_COLUMNS.length),EXTRA_PERMISSION_COLUMNS.map(column=>body[column]===true));
+ assert.deepEqual(params.slice(-2),["colaborador",null]);
 });
