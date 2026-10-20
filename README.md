@@ -7,11 +7,13 @@ aos documentos das cargas, sem alterar os vínculos existentes. Aplique-a antes
 de iniciar o backend atualizado e publique o frontend correspondente. Atualize
 as abas abertas para que novas seleções enviem a identificação completa.
 
-A entrega automática da tela Cargas/Viagens V2 exige `dataentregacon` preenchida
-e não futura, considerando o dia em America/Sao_Paulo, para todos os CT-es
-vinculados à carga. `datahoraentregacon` representa previsão nesta integração
-e não conclui uma entrega. Orçamentos sem confirmação de entrega permanecem
-pendentes; não se presume a entrega pelo CT-e de mesmo número.
+A entrega automática da tela Cargas/Viagens V2 exige a baixa/encerramento dos
+manifestos vinculados a todos os CT-es da carga: status 7 (ENCERRADO) e
+`datahoraencerramentomdf` válida, não futura, posterior à emissão do CT-e e à
+autorização do manifesto, com placa correspondente. Manifestos cancelados não
+confirmam entrega; se houver manifesto aberto, a carga permanece em trânsito.
+Datas do CT-e, previsões e encerramento parcial não concluem a entrega.
+Documentos ou orçamentos sem vínculo com manifesto permanecem pendentes.
 
 A identificação usa chave ou empresa/série/número. Vínculos antigos sem esses
 dados só usam o número quando há uma correspondência única (e placa coincidente
@@ -20,7 +22,7 @@ encontrar outro documento. Ambiguidade financeira aparece como “Revisar”.
 Cargas já marcadas como entregues não são reabertas por esta migração:
 precisam de conferência dos documentos antes de qualquer correção histórica.
 
-Validação da migração e das datas em tabelas temporárias, sem alterar dados
+Validação da migração em tabelas temporárias, sem alterar dados
 operacionais: `$env:CARGAS_DOCUMENTS_DB_TEST='1'; node --test test/cargasViagensV2Migration.test.js`.
 
 ## Nota de abastecimento e quilometragem

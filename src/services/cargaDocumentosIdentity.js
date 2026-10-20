@@ -1,6 +1,18 @@
 const clean = value => String(value ?? "").trim();
 const numeric = value => clean(value).replace(/^0+(?=\d)/, "");
 
+export async function cargaDocumentosDelivery(candidates, now = new Date()) {
+  const manifests = await loadCteManifestos(candidates.map(row => ({
+    empresa: row.empresa, serie: row.serie, codigo: Number(row.numero),
+  })));
+  return candidates.map(row => {
+    const manifestos = manifests.get(cteIdentity({
+      empresa: row.empresa, serie: row.serie, codigo: Number(row.numero),
+    })) || [];
+    return { ...row, entregue: Boolean(manifestoCompletion({ ...row, manifestos }, now)) };
+  });
+}
+
 // A known key or ERP identity must never fall back to a different document.
 // Legacy number-only links are usable only when the ERP candidate is unique.
 export function resolveCargaDocumento(document, candidates, { plate = false } = {}) {
@@ -32,3 +44,5 @@ export function deliveredCargaIds(documents, candidates) {
     resolveCargaDocumento(doc, candidates, { plate: true })?.entregue === true,
   )).map(([id]) => Number(id));
 }
+import { loadCteManifestos, cteIdentity, manifestoCompletion } from "./tripManifestos.js";
+

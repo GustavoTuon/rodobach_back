@@ -52,7 +52,7 @@ test("save preserves series/company and legacy documents through the API", async
 
 test("delivery sync locks before reading links and completes only unambiguous fully delivered cargas", async t => {
   const calls = [];
-  const cte = {empresa:"1",serie:"1",numero:"123",chave:"key",placa:"ABC1234"};
+  const cte = {empresa:"1",serie:"1",numero:"123",chave:"key",placa:"ABC1234",emissaoAt:"2026-01-01"};
   const budget = {...cte,serie:"C",chave:""};
   const fake = {
     query: async (sql, params) => {
@@ -68,11 +68,17 @@ test("delivery sync locks before reading links and completes only unambiguous fu
   };
   t.mock.method(pool, "connect", async () => fake);
   t.mock.method(clientPool, "query", async sql => {
-    // The query must use the real delivery date, not the forecast, and reject future dates.
+    if (sql.includes("WITH alvo")) return {rows:[{
+      empresaCte:1,serieCte:"1",codigoCte:123,empresa:1,serie:"1",numero:10,
+      placa:"ABC1234",statusCodigo:7,autorizadoEm:"2026-01-01",encerradoEm:"2026-01-02",
+    },{
+      empresaCte:1,serieCte:"C",codigoCte:123,empresa:1,serie:"1",numero:11,
+      placa:"ABC1234",statusCodigo:5,autorizadoEm:"2026-01-01",encerradoEm:null,
+    }]};
+    // Neither forecast nor delivery dates from the CT-e may conclude a carga.
     assert.doesNotMatch(sql, /datahoraentregacon/);
-    assert.match(sql, /dataentregacon IS NOT NULL AND con\.dataentregacon::date <=/);
-    assert.match(sql, /America\/Sao_Paulo/);
-    return {rows:[{...cte,entregue:true},{...budget,entregue:false}]};
+    assert.doesNotMatch(sql, /dataentregacon/);
+    return {rows:[cte,budget]};
   });
   assert.deepEqual(await syncDeliveredCargasV2(), {updated:1});
   const update = calls.find(call => call.sql.includes("SET status='entregue'"));

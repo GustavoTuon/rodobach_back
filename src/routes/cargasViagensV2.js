@@ -1,4 +1,4 @@
-import { resolveCargaDocumento, deliveredCargaIds } from "../services/cargaDocumentosIdentity.js";
+import { resolveCargaDocumento, deliveredCargaIds, cargaDocumentosDelivery } from "../services/cargaDocumentosIdentity.js";
 import { Router } from "express";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
@@ -523,21 +523,20 @@ export async function syncDeliveredCargasV2() {
       if (pending.rowCount) {
         const keys = [...new Set(pending.rows.map(row => row.chave).filter(Boolean))];
         const numbers = [...new Set(pending.rows.map(row => row.numero).filter(Boolean).map(value => String(Number(value))))];
-        // datahoraentregacon is a forecast in this ERP. Only dataentregacon
-        // is used for completion, and a future date cannot close a carga.
+        // Completion comes exclusively from closed manifests linked to each
+        // ERP document. CT-e dates and forecasts cannot close a carga.
         // Fetch pending documents too, so ambiguity cannot look like delivery.
         const candidates = await clientPool.query(`
           SELECT con.codigocon::text AS numero, NULLIF(TRIM(con.chavectecon),'') AS chave,
             con.empresacon::text AS empresa, con.seriecon::text AS serie,
             UPPER(REGEXP_REPLACE(COALESCE(con.veiculocon::text,''),'[^A-Z0-9]','','g')) AS placa,
-            (con.dataentregacon IS NOT NULL AND con.dataentregacon::date <=
-              (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo')::date) AS entregue
+            con.dataemissaocon AS "emissaoAt"
           FROM logistica.conhecimentos con
           WHERE COALESCE(con.statuscon,0) <> 3
             AND ((CARDINALITY($1::text[]) > 0 AND TRIM(COALESCE(con.chavectecon,'')) = ANY($1::text[]))
               OR (CARDINALITY($2::text[]) > 0 AND con.codigocon::text = ANY($2::text[])))
         `, [keys, numbers]);
-        cargaIds = deliveredCargaIds(pending.rows, candidates.rows);
+        cargaIds = deliveredCargaIds(pending.rows, await cargaDocumentosDelivery(candidates.rows));
         if (cargaIds.length) {
           await client.query(`UPDATE ${CARGAS()} SET status='entregue',atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND status='em_transito'`, [cargaIds]);
           const trips = await client.query(`SELECT DISTINCT viagem_id FROM ${VINCULOS()} WHERE carga_id=ANY($1::bigint[])`, [cargaIds]);
