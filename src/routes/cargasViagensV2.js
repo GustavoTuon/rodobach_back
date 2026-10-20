@@ -1,3 +1,4 @@
+import { resolveCargaDocumento, deliveredCargaIds, cargaDocumentosDelivery } from "../services/cargaDocumentosIdentity.js";
 import { Router } from "express";
 import { pool } from "../db/pool.js";
 import { clientPool } from "../db/clientPool.js";
@@ -106,6 +107,8 @@ function mapDocumento(row) {
     tipo: row.tipo_documento || "CT-e",
     numero: row.numero_documento || "",
     chave: row.chave_documento || "",
+    empresa: row.empresa_documento || "",
+    serie: row.serie_documento || "",
     link: row.link_documento || "",
     observacoes: row.observacoes || "",
   };
@@ -265,6 +268,7 @@ const viagemSelect = () => `
           SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
             'id', d.id, 'tipo', d.tipo_documento, 'numero', d.numero_documento,
             'chave', d.chave_documento, 'link', d.link_documento,
+            'empresa', d.empresa_documento, 'serie', d.serie_documento,
             'observacoes', d.observacoes
           ) ORDER BY d.id) FROM ${DOCUMENTOS()} d WHERE d.carga_id = c.id
         ), '[]'::jsonb)
@@ -280,7 +284,7 @@ async function financialByCteDocuments(cargas = []) {
   const references = cargas.flatMap((carga) => (carga.documentos || []).filter(isCte));
   const keys = [...new Set(references.map((item) => text(item.chave)).filter(Boolean))];
   const numbers = [...new Set(references.map((item) => text(item.numero)).filter(Boolean).map((value) => String(Number(value))))];
-  if (!keys.length && !numbers.length) return { byKey: new Map(), byNumber: new Map() };
+  if (!keys.length && !numbers.length) return [];
 
   const { rows } = await clientPool.query(`
     WITH cte_documentos AS (
@@ -405,9 +409,7 @@ async function financialByCteDocuments(cargas = []) {
     FROM totais
   `, [keys, numbers]);
 
-  const byKey = new Map();
-  const byNumber = new Map();
-  for (const row of rows) {
+  return rows.map(row => {
     const item = {
       status: row.status_financeiro,
       titulos: number(row.titulos),
@@ -421,10 +423,8 @@ async function financialByCteDocuments(cargas = []) {
         valorAberto: roundMoney(parcela.valorAberto),
       })) : [],
     };
-    if (row.chave) byKey.set(String(row.chave).trim(), item);
-    if (row.numero) byNumber.set(String(Number(row.numero)), item);
-  }
-  return { byKey, byNumber };
+    return { empresa: row.empresacon, serie: row.seriecon, numero: row.numero, chave: row.chave, financial: item };
+  });
 }
 
 export async function enrichCargasFinancial(cargas = [], logger = null) {
@@ -432,12 +432,9 @@ export async function enrichCargasFinancial(cargas = [], logger = null) {
     const lookup = await financialByCteDocuments(cargas);
     return cargas.map((carga) => {
       const ctes = (carga.documentos || []).filter(isCte);
-      const statuses = ctes.map((documento) => {
-        const key = text(documento.chave);
-        const numero = text(documento.numero);
-        return (key && lookup.byKey.get(key))
-          || (numero && lookup.byNumber.get(String(Number(numero))))
-          || null;
+      const statuses = ctes.map(documento => {
+        const match = resolveCargaDocumento(documento, lookup);
+        return match?.financial || { ...EMPTY_FINANCIAL, status: "revisar", ctes: 1 };
       });
       return { ...carga, financeiro: aggregateFinancialStatuses(statuses, ctes.length) };
     });
@@ -499,46 +496,53 @@ async function syncViagemStatus(client, viagemId) {
 let deliverySyncPromise = null;
 let lastDeliverySyncAt = 0;
 
-async function syncDeliveredCargasV2() {
+export async function syncDeliveredCargasV2() {
   if (deliverySyncPromise) return deliverySyncPromise;
   if (Date.now() - lastDeliverySyncAt < 60_000) return { updated: 0 };
   deliverySyncPromise = (async () => {
-    const pending = await pool.query(`
-      SELECT c.id AS carga_id, UPPER(REGEXP_REPLACE(COALESCE(v.placa_veiculo,''),'[^A-Z0-9]','','g')) AS placa,
-        NULLIF(TRIM(d.numero_documento),'') AS numero, NULLIF(TRIM(d.chave_documento),'') AS chave
-      FROM ${CARGAS()} c
-      JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
-      JOIN ${VIAGENS()} v ON v.id=vc.viagem_id
-      JOIN ${DOCUMENTOS()} d ON d.carga_id=c.id
-      WHERE c.status='em_transito'
-        AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento,'')),'[^A-Z]','','g')='CTE'
-        AND (NULLIF(TRIM(d.numero_documento),'') IS NOT NULL OR NULLIF(TRIM(d.chave_documento),'') IS NOT NULL)
-    `);
-    if (!pending.rowCount) { lastDeliverySyncAt = Date.now(); return { updated: 0 }; }
-    const keys = [...new Set(pending.rows.map((row) => row.chave).filter(Boolean))];
-    const numbers = [...new Set(pending.rows.map((row) => row.numero).filter(Boolean).map((value) => String(Number(value))))];
-    const delivered = await clientPool.query(`
-      SELECT con.codigocon::text AS numero, NULLIF(TRIM(con.chavectecon),'') AS chave,
-        UPPER(REGEXP_REPLACE(COALESCE(con.veiculocon::text,''),'[^A-Z0-9]','','g')) AS placa
-      FROM logistica.conhecimentos con
-      WHERE COALESCE(con.statuscon,0) <> 3
-        AND (con.datahoraentregacon IS NOT NULL OR con.dataentregacon IS NOT NULL)
-        AND ((CARDINALITY($1::text[]) > 0 AND TRIM(COALESCE(con.chavectecon,'')) = ANY($1::text[]))
-          OR (CARDINALITY($2::text[]) > 0 AND con.codigocon::text = ANY($2::text[])))
-    `, [keys, numbers]);
-    const deliveredKeys = new Set(delivered.rows.map((row) => row.chave).filter(Boolean));
-    const deliveredNumberPlates = new Set(delivered.rows.filter((row) => row.placa).map((row) => `${row.numero}|${row.placa}`));
-    const cargaIds = [...new Set(pending.rows.filter((row) =>
-      (row.chave && deliveredKeys.has(row.chave))
-      || (row.numero && row.placa && deliveredNumberPlates.has(`${String(Number(row.numero))}|${row.placa}`)),
-    ).map((row) => Number(row.carga_id)))];
-    if (!cargaIds.length) { lastDeliverySyncAt = Date.now(); return { updated: 0 }; }
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(`UPDATE ${CARGAS()} SET status='entregue',atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND status='em_transito'`, [cargaIds]);
-      const trips = await client.query(`SELECT DISTINCT viagem_id FROM ${VINCULOS()} WHERE carga_id=ANY($1::bigint[])`, [cargaIds]);
-      for (const row of trips.rows) await syncViagemStatus(client, row.viagem_id);
+      // Document edits lock the same carga row. Hold it until delivery is saved.
+      const locked = await client.query(`SELECT id FROM ${CARGAS()} WHERE status='em_transito' ORDER BY id FOR UPDATE`);
+      // Separate statement gets a fresh snapshot after any concurrent edit.
+      const pending = await client.query(`
+        SELECT c.id AS carga_id, UPPER(REGEXP_REPLACE(COALESCE(v.placa_veiculo,''),'[^A-Z0-9]','','g')) AS placa,
+          NULLIF(TRIM(d.numero_documento),'') AS numero, NULLIF(TRIM(d.chave_documento),'') AS chave,
+          d.empresa_documento AS empresa, d.serie_documento AS serie
+        FROM ${CARGAS()} c
+        JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
+        JOIN ${VIAGENS()} v ON v.id=vc.viagem_id
+        JOIN ${DOCUMENTOS()} d ON d.carga_id=c.id
+        WHERE c.status='em_transito'
+          AND c.id=ANY($1::bigint[])
+          AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento,'')),'[^A-Z]','','g')='CTE'
+        ORDER BY c.id, d.id
+      `, [locked.rows.map(row => row.id)]);
+      let cargaIds = [];
+      if (pending.rowCount) {
+        const keys = [...new Set(pending.rows.map(row => row.chave).filter(Boolean))];
+        const numbers = [...new Set(pending.rows.map(row => row.numero).filter(Boolean).map(value => String(Number(value))))];
+        // Completion comes exclusively from closed manifests linked to each
+        // ERP document. CT-e dates and forecasts cannot close a carga.
+        // Fetch pending documents too, so ambiguity cannot look like delivery.
+        const candidates = await clientPool.query(`
+          SELECT con.codigocon::text AS numero, NULLIF(TRIM(con.chavectecon),'') AS chave,
+            con.empresacon::text AS empresa, con.seriecon::text AS serie,
+            UPPER(REGEXP_REPLACE(COALESCE(con.veiculocon::text,''),'[^A-Z0-9]','','g')) AS placa,
+            con.dataemissaocon AS "emissaoAt"
+          FROM logistica.conhecimentos con
+          WHERE COALESCE(con.statuscon,0) <> 3
+            AND ((CARDINALITY($1::text[]) > 0 AND TRIM(COALESCE(con.chavectecon,'')) = ANY($1::text[]))
+              OR (CARDINALITY($2::text[]) > 0 AND con.codigocon::text = ANY($2::text[])))
+        `, [keys, numbers]);
+        cargaIds = deliveredCargaIds(pending.rows, await cargaDocumentosDelivery(candidates.rows));
+        if (cargaIds.length) {
+          await client.query(`UPDATE ${CARGAS()} SET status='entregue',atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND status='em_transito'`, [cargaIds]);
+          const trips = await client.query(`SELECT DISTINCT viagem_id FROM ${VINCULOS()} WHERE carga_id=ANY($1::bigint[])`, [cargaIds]);
+          for (const row of trips.rows) await syncViagemStatus(client, row.viagem_id);
+        }
+      }
       await client.query("COMMIT");
       lastDeliverySyncAt = Date.now();
       return { updated: cargaIds.length };
@@ -1034,11 +1038,11 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id/documentos", async (req
     await client.query(`DELETE FROM ${DOCUMENTOS()} WHERE carga_id=$1`, [req.params.id]);
     for (const documento of documentos) {
       await client.query(
-        `INSERT INTO ${DOCUMENTOS()} (carga_id,tipo_documento,numero_documento,chave_documento,link_documento,observacoes,criado_por_id,criado_por_login,atualizado_por_id,atualizado_por_login)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$7,$8)`,
+        `INSERT INTO ${DOCUMENTOS()} (carga_id,tipo_documento,numero_documento,chave_documento,link_documento,observacoes,criado_por_id,criado_por_login,atualizado_por_id,atualizado_por_login,empresa_documento,serie_documento)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$7,$8,$9,$10)`,
         [req.params.id, text(documento.tipo || documento.tipoDocumento, "CT-e"), text(documento.numero || documento.numeroDocumento),
           text(documento.chave || documento.chaveDocumento), text(documento.link || documento.linkDocumento),
-          text(documento.observacoes), user.id, user.login],
+          text(documento.observacoes), user.id, user.login, text(documento.empresa), text(documento.serie)],
       );
     }
     const hasCte = documentos.some((documento) => {
