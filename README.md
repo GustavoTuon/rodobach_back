@@ -1,5 +1,28 @@
 # Rodobach Backend
 
+## Identificação de documentos e entregas de cargas
+
+A migração `068_carga_documentos_identidade_erp.sql` acrescenta empresa e série
+aos documentos das cargas, sem alterar os vínculos existentes. Aplique-a antes
+de iniciar o backend atualizado e publique o frontend correspondente. Atualize
+as abas abertas para que novas seleções enviem a identificação completa.
+
+A entrega automática da tela Cargas/Viagens V2 exige `dataentregacon` preenchida
+e não futura, considerando o dia em America/Sao_Paulo, para todos os CT-es
+vinculados à carga. `datahoraentregacon` representa previsão nesta integração
+e não conclui uma entrega. Orçamentos sem confirmação de entrega permanecem
+pendentes; não se presume a entrega pelo CT-e de mesmo número.
+
+A identificação usa chave ou empresa/série/número. Vínculos antigos sem esses
+dados só usam o número quando há uma correspondência única (e placa coincidente
+na entrega automática). Uma chave conhecida nunca recorre ao número para
+encontrar outro documento. Ambiguidade financeira aparece como “Revisar”.
+Cargas já marcadas como entregues não são reabertas por esta migração:
+precisam de conferência dos documentos antes de qualquer correção histórica.
+
+Validação da migração e das datas em tabelas temporárias, sem alterar dados
+operacionais: `$env:CARGAS_DOCUMENTS_DB_TEST='1'; node --test test/cargasViagensV2Migration.test.js`.
+
 ## Nota de abastecimento e quilometragem
 
 A migração `060_plantao_dados_nota_telemetria.sql` preserva o combustível e o cliente
