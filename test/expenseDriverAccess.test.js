@@ -9,6 +9,10 @@ import { manutencaoPlantaoRouter } from "../src/routes/manutencaoPlantao.js";
 import { usuariosRouter } from "../src/routes/usuarios.js";
 import { errorHandler } from "../src/middleware/errorHandler.js";
 import { publicUser } from "../src/services/userSession.js";
+import { config } from "../src/config.js";
+
+// Queries are mocked below; pool construction must not depend on a local .env.
+config.veiculosDb.host = "127.0.0.1";
 
 const driver = {id: 42, login: "driver", expenseProfile: "motorista", telemetryDriverId: "987", permissions: {"manutencao-plantao": true}};
 const row = () => ({id: "987", nome: "Motorista teste", placa: "ABC1234", observado_em: new Date().toISOString(), current_driver_id: "987", ambiguous: false});

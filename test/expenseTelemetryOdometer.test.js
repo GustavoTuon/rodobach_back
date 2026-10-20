@@ -7,6 +7,9 @@ import {clientPool} from "../src/db/clientPool.js";
 import {pool} from "../src/db/pool.js";
 import {expenseTelemetryOdometer} from "../src/services/expenseTelemetryOdometer.js";
 import {manutencaoPlantaoRouter} from "../src/routes/manutencaoPlantao.js";
+import {config} from "../src/config.js";
+// Queries are mocked below; pool construction must not depend on a local .env.
+config.veiculosDb.host = "127.0.0.1";
 test("KM vem apenas da telemetria no dia selecionado, sem consultar abastecimentos",async t=>{
  const query=t.mock.method(getVeiculosPool(),"query",async()=>({rows:[{odometro:123456.7,data_hora:"2026-10-01T15:00:00Z"}]}));
  const erp=t.mock.method(clientPool,"query",async()=>{throw new Error("must not query ERP");});
