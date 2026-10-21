@@ -5,14 +5,14 @@ import request from 'supertest';
 import {pool} from '../src/db/pool.js';
 import {cargasViagensV2Router} from '../src/routes/cargasViagensV2.js';
 
-function setup(t, status='reprovada', operationalStatus='aguardando_cte') {
+function setup(t, status='reprovada', operationalStatus='aguardando_cte', linked=true) {
   const calls=[];
   const query=async(sql,params=[])=>{
     calls.push({sql,params});
     if(sql.includes('SELECT c.id FROM') && params[0]?.length === 0)return {rows:[],rowCount:0};
     if(sql.includes('SELECT carga_id FROM'))return {rows:[],rowCount:0};
     if(sql.includes('COUNT(*)::int AS total'))return {rows:[{total:0,com_cte:0,entregues:0}],rowCount:1};
-    if(sql.includes('SELECT viagem_id'))return {rows:[],rowCount:0};
+    if(sql.includes('SELECT viagem_id'))return {rows:linked ? [{viagem_id:1}] : [],rowCount:linked ? 1 : 0};
     return {rows:[{id:1,status:operationalStatus,status_aprovacao:status,documentos:[],paradas:[],cargas:[]}],rowCount:1};
   };
   t.mock.method(pool,'connect',async()=>({query,release(){}}));
@@ -51,7 +51,7 @@ test('edita carga anteriormente aprovada sem exigir reabertura',async t=>{
 test('programa veículo em carga reprovada pelo fluxo antigo',async t=>{
  const {app,calls}=setup(t);
  await request(app).post('/cargas-viagens-v2/viagens').send({placa:'RXO6C18',tipoPropriedade:'FROTA',cargaIds:[1]}).expect(201);
- assert.ok(calls.some(c=>c.sql.includes("status='aguardando_cte'")));
+ assert.ok(calls.some(c=>c.sql.includes("ELSE 'aguardando_cte' END")));
 });
 test('vincula CT-e sem aprovação e mantém transição operacional',async t=>{
  const {app,calls}=setup(t);

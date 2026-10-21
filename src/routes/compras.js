@@ -53,7 +53,7 @@ comprasRouter.get(
     const params = [`%${q.replace(/[\\%_]/g, "\\$&")}%`];
     const sql =
       req.params.tipo === "produtos"
-        ? `SELECT empresapro::text empresa,codigopro::text codigo,nomepro nome FROM estoque.produtos WHERE nomepro ILIKE $1 OR codigopro::text ILIKE $1 ORDER BY nomepro,empresapro LIMIT 40`
+        ? `SELECT empresapro::text empresa,codigopro::text codigo,nomepro nome,(SELECT abreviaturauni FROM estoque.unidades WHERE empresauni=empresapro AND codigouni=unidadepro) unidade FROM estoque.produtos WHERE nomepro ILIKE $1 OR codigopro::text ILIKE $1 ORDER BY nomepro,empresapro LIMIT 40`
         : req.params.tipo === "fornecedores"
           ? `SELECT empresafor::text empresa,codigofor::text codigo,COALESCE(NULLIF(trim(fantasiafor),''),nomefor) nome FROM gerais.fornecedores WHERE nomefor ILIKE $1 OR fantasiafor ILIKE $1 OR codigofor::text ILIKE $1 ORDER BY nome,empresafor LIMIT 40`
           : fail("Catálogo inválido.");
@@ -355,9 +355,10 @@ comprasRouter.get(
   "/compras/cotacoes/:id/historico",
   route(async (req, res) => {
     const quote = (
-      await pool.query(`SELECT itens FROM ${t("cotacoes")} WHERE id=$1`, [
-        uuid(req.params.id),
-      ])
+      await pool.query(
+        `SELECT itens,criado_em FROM ${t("cotacoes")} WHERE id=$1`,
+        [uuid(req.params.id)],
+      )
     ).rows[0];
     if (!quote) fail("Cotação não encontrada.", 404);
     const products = quote.itens.map((i) => ({
@@ -367,13 +368,15 @@ comprasRouter.get(
     }));
     const { rows } = await clientPool.query(
       `SELECT p.id produto_id,h.* FROM jsonb_to_recordset($1::jsonb) AS p(id text,empresa text,codigo text) CROSS JOIN LATERAL (
-    SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,f.nomefor fornecedor,i.quantidadenep quantidade,i.valorunitarionep valor_unitario
+    SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,f.nomefor fornecedor,n.fornecedornfe fornecedor_codigo,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,u.abreviaturauni unidade,COALESCE(i.totalitemestoquenep,i.totalitemnep) total
     FROM compras.notasfiscaisentradaprodutos i JOIN compras.notasfiscaisentrada n ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep
     LEFT JOIN gerais.fornecedores f ON f.empresafor=n.empresanfe AND f.codigofor=n.fornecedornfe
+    LEFT JOIN estoque.unidades u ON u.empresauni=i.empresanep AND u.codigouni=i.unidadenep
     WHERE i.empresanep::text=p.empresa AND i.produtonep::text=p.codigo
-    ORDER BY COALESCE(n.dataentradanfe,n.dataemissaonfe) DESC NULLS LAST,n.codigonfe DESC LIMIT 10
+      AND COALESCE(n.dataentradanfe,n.dataemissaonfe)::date <= ($2::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date
+    ORDER BY COALESCE(n.dataentradanfe,n.dataemissaonfe) DESC NULLS LAST,n.codigonfe DESC,i.sequencianep DESC LIMIT 3
   ) h`,
-      [JSON.stringify(products)],
+      [JSON.stringify(products), quote.criado_em],
     );
     res.json(rows);
   }),
@@ -390,6 +393,7 @@ comprasRouter.post(
           .regex(/^[a-f0-9]{64}$/)
           .optional(),
         motivo: z.string().trim().max(1000).default(""),
+        quantidadeConfirmada: z.boolean().default(false),
       }),
       req.body,
     );
@@ -423,6 +427,13 @@ comprasRouter.post(
           fail(
             "Escolha uma proposta disponível que atenda toda a quantidade solicitada.",
           );
+        if (
+          candidate.offer.quantidade > product.quantidade &&
+          !b.quantidadeConfirmada
+        )
+          fail(
+            "Confirme com o fornecedor o preço para a quantidade solicitada.",
+          );
         const version = proposalVersion(invite);
         if (version !== b.versaoProposta)
           fail(
@@ -442,6 +453,7 @@ comprasRouter.post(
           versaoProposta: version,
           motivo: b.motivo,
           quantidade: product.quantidade,
+          quantidadeConfirmada: b.quantidadeConfirmada,
           unitario: candidate.price,
           marca: candidate.offer.marca,
           escolhido_por: String(req.user.id),
@@ -537,11 +549,55 @@ comprasRouter.get(
     const empresa = String(req.query.empresa || "").slice(0, 40),
       codigo = String(req.query.codigo || "").slice(0, 40);
     if (!empresa || !codigo) fail("Informe empresa e produto.");
-    const { rows } = await clientPool.query(
-      `SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,n.fornecedornfe fornecedor_codigo,f.nomefor fornecedor,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,COALESCE(i.totalitemestoquenep,i.totalitemnep,0) total FROM compras.notasfiscaisentradaprodutos i JOIN compras.notasfiscaisentrada n ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep LEFT JOIN gerais.fornecedores f ON f.empresafor=n.empresanfe AND f.codigofor=n.fornecedornfe WHERE i.empresanep::text=$1 AND i.produtonep::text=$2 ORDER BY "data" DESC NULLS LAST LIMIT 50`,
-      [empresa, codigo],
+    const paginated = req.query.page !== undefined;
+    const page = Math.max(
+      1,
+      Math.min(100000, Number.parseInt(req.query.page, 10) || 1),
     );
-    res.json(rows);
+    const limit = paginated ? 20 : 50;
+    const filters = parsePurchase(
+      z.object({
+        ate: z.iso.date().optional(),
+        de: z.iso.date().optional(),
+        fornecedor: z.string().max(100).optional(),
+      }),
+      {
+        ate: req.query.ate || undefined,
+        de: req.query.de || undefined,
+        fornecedor: req.query.fornecedor || undefined,
+      },
+    );
+    if (filters.de && filters.ate && filters.de > filters.ate)
+      fail("A data inicial deve ser anterior à data final.");
+    const { rows } = await clientPool.query(
+      `SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,n.fornecedornfe fornecedor_codigo,f.nomefor fornecedor,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,u.abreviaturauni unidade,COALESCE(i.totalitemestoquenep,i.totalitemnep) total
+       FROM compras.notasfiscaisentradaprodutos i
+       JOIN compras.notasfiscaisentrada n ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep
+       LEFT JOIN gerais.fornecedores f ON f.empresafor=n.empresanfe AND f.codigofor=n.fornecedornfe
+       LEFT JOIN estoque.unidades u ON u.empresauni=i.empresanep AND u.codigouni=i.unidadenep
+       WHERE i.empresanep::text=$1 AND i.produtonep::text=$2
+         AND ($3::date IS NULL OR COALESCE(n.dataentradanfe,n.dataemissaonfe)::date <= $3::date)
+         AND ($4::date IS NULL OR COALESCE(n.dataentradanfe,n.dataemissaonfe)::date >= $4::date)
+         AND ($5::text IS NULL OR f.nomefor ILIKE $5 ESCAPE '\\')
+       ORDER BY "data" DESC NULLS LAST,n.codigonfe DESC,n.fornecedornfe,n.serienfe,i.sequencianep DESC
+       LIMIT $6 OFFSET $7`,
+      [
+        empresa,
+        codigo,
+        filters.ate || null,
+        filters.de || null,
+        filters.fornecedor
+          ? `%${filters.fornecedor.replace(/[\\%_]/g, "\\$&")}%`
+          : null,
+        paginated ? limit + 1 : limit,
+        (page - 1) * limit,
+      ],
+    );
+    res.json(
+      paginated
+        ? { rows: rows.slice(0, limit), hasMore: rows.length > limit, page }
+        : rows,
+    );
   }),
 );
 

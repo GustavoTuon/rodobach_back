@@ -3,13 +3,14 @@ import { getStatusCargaFrota } from "../services/statusCargaService.js";
 import { getOciosidadeFrota, loadDocuments } from "../services/ociosidadeFrotaService.js";
 import { saveConfirmation, removeConfirmation, suggestStops, validateConfirmation, documentKey } from "../services/conferenciaDocumentos.js";
 import { listEmptyVehicleAlerts, runEmptyVehicleAlerts } from "../services/statusCargaAlertaService.js";
+import { requirePermission } from "../middleware/permissions.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import {getPainelTv} from '../services/painelTvService.js';
 import {validateCargoConfirmation,saveCargoConfirmation,cargoConfirmationHistory,cancelCargoConfirmation,correctionState} from '../services/painelCargaConfirmacoes.js';
 
 export const statusCargaRouter = Router();
 statusCargaRouter.get('/frota/painel-tv',async(_req,res,next)=>{try{res.json(await getPainelTv());}catch(error){next(error);}});
-statusCargaRouter.get('/frota/painel-tv/confirmacoes',requireAdmin,async(req,res,next)=>{
+statusCargaRouter.get('/frota/painel-tv/confirmacoes',requirePermission('painel-tv'),async(req,res,next)=>{
   try {
     const rows=await cargoConfirmationHistory(String(req.query.placa||'').toUpperCase());
     const data=await getPainelTv();
@@ -17,7 +18,7 @@ statusCargaRouter.get('/frota/painel-tv/confirmacoes',requireAdmin,async(req,res
     res.json({registros:rows.map((row,index)=>({...row,estado:index>0&&!row.cancelado_em?'Substituída':correctionState(row,item)}))});
   } catch(error){next(error);}
 });
-statusCargaRouter.post('/frota/painel-tv/confirmacoes',requireAdmin,async(req,res,next)=>{
+statusCargaRouter.post('/frota/painel-tv/confirmacoes',requirePermission('painel-tv'),async(req,res,next)=>{
   try {
     const input=validateCargoConfirmation(req.body);
     const data=await getPainelTv({force:true});
@@ -27,7 +28,7 @@ statusCargaRouter.post('/frota/painel-tv/confirmacoes',requireAdmin,async(req,re
     res.status(201).json({registro:await saveCargoConfirmation(input,req.user,item)});
   } catch(error){next(error);}
 });
-statusCargaRouter.delete('/frota/painel-tv/confirmacoes/:id',requireAdmin,async(req,res,next)=>{
+statusCargaRouter.delete('/frota/painel-tv/confirmacoes/:id',requirePermission('painel-tv'),async(req,res,next)=>{
   try {await cancelCargoConfirmation(req.params.id,req.user);res.json({ok:true});}catch(error){next(error);}
 });
 

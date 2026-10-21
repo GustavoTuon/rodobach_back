@@ -11,6 +11,7 @@ export function cargoContext(row, sm) {
     sm?.id, sm?.inicio, sm?.fim, sm?.operacao,
     row.operacaoCarga,
     row.macroCargaContexto,
+    ...(row.smEncerrada ? [[row.smEncerrada.smId,row.smEncerrada.codigo,row.smEncerrada.desde,row.smEncerrada.encerradaEm]] : []),
   ])).digest('hex');
 }
 export function validateCargoConfirmation(body, now = new Date()) {

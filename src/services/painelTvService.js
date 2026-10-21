@@ -8,6 +8,7 @@ import {cargoContext,withCargoConfirmations} from './painelCargaConfirmacoes.js'
 import {loadCargoMacros,cargoMacroEvidence} from './painelCargaMacros.js';
 import {loadDeliveryGuide,deliveryProgress} from './painelEntregas.js';
 import {isBaseReturn,emptyReturnEvidence} from './retornoVazio.js';
+import {latestFinishedSm,finishedSmEvidence} from './painelSmEncerrada.js';
 
 const plate=value=>String(value||'').replace(/[^A-Z0-9]/gi,'').toUpperCase();
 const timestamp=value=>{const match=String(value||'').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);return match?`${match[3]}-${match[2]}-${match[1]}T${match[4]||'00'}:${match[5]||'00'}:${match[6]||'00'}-03:00`:value;};
@@ -72,6 +73,7 @@ export function distanceBySource(points,day){
  return {...best,parcial:best.parcial||combined.km==null||latest-new Date(best.fim)>15*60000,metodo:'sequencia_por_fonte',observacao:'Uma sequência validada; outras fontes e trechos não são somados',duplicatasIgnoradas:combined.duplicatasIgnoradas};
 }
 export function tvLoad(row,sm,now=new Date()){
+ if(!sm&&row?.smEncerrada)return row.smEncerrada;
  if(row?.retornoVazio){
   const evidence=row.retornoVazio;
   return {codigo:'vazio',label:'Vazio',desde:evidence.desde,horasVazio:Math.max(0,(now-new Date(evidence.desde))/3600000),confirmacaoPendente:false,fonte:evidence.fonte};
@@ -168,7 +170,10 @@ export async function getPainelTv({force=false}={}){
   const smAvailable=Boolean(sms&&!sms.indisponivel);
   if(!cargo?.rows?.length)throw new Error('Não foi possível carregar os veículos. Tente atualizar novamente.');
   const now=new Date();
-  const items=(await Promise.all(cargo.rows.map(async row=>{
+  // Bound requests to Elite when consulting finished SMs for several vehicles.
+  const itemRows=[];
+  let nextRow=0;
+  const buildItem=async row=>{
    const p=plate(row.placa),cycle=base?.cycles.get(p)?.at(-1),sm=sms?.sms?.filter(s=>plate(s.placa)===p&&!s.fim).sort((a,b)=>String(timestamp(b.inicio||b.previsaoInicio)||'').localeCompare(String(timestamp(a.inicio||a.previsaoInicio)||'')))[0];
    const outside=cycle&&!cycle.retornoEm;
    const localTime=+new Date(row.localizacao?.dataHora||row.localizacao?.data_hora);
@@ -197,8 +202,25 @@ export async function getPainelTv({force=false}={}){
     }
     catch{entregas={disponivel:false,observacao:'Sequência de entregas indisponível na Elite.'};}
    }
-   return {placa:p,manifestos:openManifestos?.get(p) || [],manifestosDisponiveis:Boolean(openManifestos),tipoFrota:row.tipoFrota,documentosCarga:row.documentosCarga,entregas,contextoCarga:cargoContext(enriched,sm),rota:tvRoute(row,sm),motorista:String((row.tipoFrota==='terceiro'?sm?.motorista:null)||row.motorista||'').trim()||null,carga:tvLoad(enriched,sm,now),macros:{...macroData,disponivel:Boolean(macros)},sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmOntem:{dia:yesterday,...(dailyYesterday||{km:null,motivo:'Sem leituras suficientes ontem'})},kmHoje:dailyToday||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoFonte:row.localizacao?.fonte||null,posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
-  }))).sort((a,b)=>a.placa.localeCompare(b.placa));
+   let conferenciaSm=null;
+   if(!sm&&smAvailable&&!sms.incompleto&&macros&&openManifestos&&!macroData.confirmacao&&tvLoad(enriched,sm,now).codigo==='carregado'){
+    try{
+     const history=await getTrafegusSmsHistory({placa:p});
+     const finished=latestFinishedSm(history,p,now);
+     if(finished){
+      const locations=await loadDeliveryGuide(finished.id).catch(()=>null);
+      enriched.smEncerrada=finishedSmEvidence({row,sm:finished,locations,events:macros.get(p)||[],manifestos:openManifestos.get(p)||[],now});
+      if(enriched.smEncerrada)entregas=enriched.smEncerrada.entregas;
+      conferenciaSm={disponivel:Boolean(locations),id:finished.id,fim:timestamp(finished.fim)};
+     }else conferenciaSm={disponivel:!history.incompleto};
+    }catch{conferenciaSm={disponivel:false};}
+   }
+   return {placa:p,conferenciaSm,manifestos:openManifestos?.get(p) || [],manifestosDisponiveis:Boolean(openManifestos),tipoFrota:row.tipoFrota,documentosCarga:row.documentosCarga,entregas,contextoCarga:cargoContext(enriched,sm),rota:tvRoute(row,sm),motorista:String((row.tipoFrota==='terceiro'?sm?.motorista:null)||row.motorista||'').trim()||null,carga:tvLoad(enriched,sm,now),macros:{...macroData,disponivel:Boolean(macros)},sm:{disponivel:smAvailable,id:sm?.id||null,operacao:sm?.operacao||null},base:{situacao:cycle?(outside?'fora':'retornou'):'sem_dados',presenca:base?.presence?.get(p)||null,horasFora:outside?cycle.horasFora:null,saidaEm:cycle?.saidaEm||null,observadoEm:cycle?.telemetriaAte||null},kmOntem:{dia:yesterday,...(dailyYesterday||{km:null,motivo:'Sem leituras suficientes ontem'})},kmHoje:dailyToday||{km:null,motivo:'Sem leituras suficientes hoje'},localizacao:[row.localizacao?.municipio,row.localizacao?.uf].filter(Boolean).join(' / '),posicaoFonte:row.localizacao?.fonte||null,posicaoEm:row.localizacao?.dataHora||row.localizacao?.data_hora||null};
+  };
+  await Promise.all(Array.from({length:Math.min(4,cargo.rows.length)},async()=>{
+   while(nextRow<cargo.rows.length){const row=cargo.rows[nextRow++];itemRows.push(await buildItem(row));}
+  }));
+  const items=itemRows.sort((a,b)=>a.placa.localeCompare(b.placa));
   const data={dia:day,atualizadoEm:now.toISOString(),itens:items,fontes:{carga:true,base:Boolean(base?.geofence),sm:smAvailable,quilometragem:Boolean(km),quilometragemOntem:Boolean(kmYesterday),macros:Boolean(macros),manifestos:Boolean(openManifestos)},avisos:results.map((r,i)=>r.status==='rejected'?['Carga indisponível','Tempo fora indisponível','SM indisponível','Quilometragem indisponível','Macros indisponíveis','Quilometragem de ontem indisponível','Manifestos em aberto indisponíveis'][i]:null).filter(Boolean)};
   if(sms?.incompleto)data.avisos.push("Consulta parcial de SMs: confira veiculos sem viagem na origem.");
   cached={at:Date.now(),data};return data;
