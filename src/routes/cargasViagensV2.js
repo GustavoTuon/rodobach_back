@@ -58,9 +58,9 @@ function isoDate(value) {
 }
 
 function isCte(documento = {}) {
-  return String(documento.tipo || documento.tipo_documento || "")
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "") === "CTE";
+  return ["CTE", "ORCAMENTO"].includes(String(documento.tipo || documento.tipoDocumento || documento.tipo_documento || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase()
+    .replace(/[^A-Z]/g, ""));
 }
 
 function roundMoney(value) {
@@ -323,8 +323,8 @@ async function financialByCteDocuments(cargas = []) {
       FROM cte_documentos cd
       JOIN financeiro.receberconhecimentosvinculados rcv
         ON rcv.empresa = cd.empresacon
-       AND rcv.serieconhecimento = cd.seriecon
-       AND rcv.codigoconhecimento = cd.codigocon
+       AND ((rcv.serieconhecimento = cd.seriecon AND rcv.codigoconhecimento = cd.codigocon)
+         OR (rcv.serieorcamento = cd.seriecon AND rcv.codigoorcamento = cd.codigocon))
       JOIN financeiro.receber rec
         ON rec.empresarec = rcv.empresa
        AND rec.serierec = rcv.serie
@@ -351,6 +351,11 @@ async function financialByCteDocuments(cargas = []) {
       JOIN financeiro.receberconhecimentos rcc
         ON rcc.empresarcc = cd.empresacon
        AND rcc.conhecimentorcc = cd.codigocon
+       AND NOT EXISTS (
+         SELECT 1 FROM logistica.conhecimentos other
+         WHERE other.empresacon=cd.empresacon AND other.codigocon=cd.codigocon
+           AND other.seriecon<>cd.seriecon AND COALESCE(other.statuscon,0)<>3
+       )
       JOIN financeiro.receber rec
         ON rec.empresarec = rcc.empresarcc
        AND rec.serierec = rcc.seriercc
@@ -479,7 +484,7 @@ async function replaceRotas(client, cargaId, paradas = []) {
 
 async function syncViagemStatus(client, viagemId) {
   const current = await client.query(`SELECT situacao FROM ${VIAGENS()} WHERE id=$1`, [viagemId]);
-  if (["entregue", "cancelado"].includes(current.rows[0]?.situacao)) return;
+  if (current.rows[0]?.situacao === "cancelado") return;
   const { rows } = await client.query(
     `SELECT COUNT(*)::int AS total,
        COUNT(*) FILTER (WHERE c.status IN ('em_transito','entregue'))::int AS com_cte,
@@ -504,27 +509,30 @@ export async function syncDeliveredCargasV2() {
     try {
       await client.query("BEGIN");
       // Document edits lock the same carga row. Hold it until delivery is saved.
-      const locked = await client.query(`SELECT id FROM ${CARGAS()} WHERE status='em_transito' ORDER BY id FOR UPDATE`);
+      const locked = await client.query(`SELECT id FROM ${CARGAS()} c WHERE status IN ('em_transito','aguardando_cte','aguardando_viagem')
+        AND EXISTS (SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=c.id
+          AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO'))
+        ORDER BY id FOR UPDATE`);
       // Separate statement gets a fresh snapshot after any concurrent edit.
       const pending = await client.query(`
         SELECT c.id AS carga_id, UPPER(REGEXP_REPLACE(COALESCE(v.placa_veiculo,''),'[^A-Z0-9]','','g')) AS placa,
           NULLIF(TRIM(d.numero_documento),'') AS numero, NULLIF(TRIM(d.chave_documento),'') AS chave,
-          d.empresa_documento AS empresa, d.serie_documento AS serie
+          d.empresa_documento AS empresa, d.serie_documento AS serie, d.tipo_documento AS tipo
         FROM ${CARGAS()} c
-        JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
-        JOIN ${VIAGENS()} v ON v.id=vc.viagem_id
+        LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
+        LEFT JOIN ${VIAGENS()} v ON v.id=vc.viagem_id
         JOIN ${DOCUMENTOS()} d ON d.carga_id=c.id
-        WHERE c.status='em_transito'
+        WHERE c.status IN ('em_transito','aguardando_cte','aguardando_viagem')
           AND c.id=ANY($1::bigint[])
-          AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento,'')),'[^A-Z]','','g')='CTE'
+          AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento,'')),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO')
         ORDER BY c.id, d.id
       `, [locked.rows.map(row => row.id)]);
       let cargaIds = [];
       if (pending.rowCount) {
         const keys = [...new Set(pending.rows.map(row => row.chave).filter(Boolean))];
         const numbers = [...new Set(pending.rows.map(row => row.numero).filter(Boolean).map(value => String(Number(value))))];
-        // Completion comes exclusively from closed manifests linked to each
-        // ERP document. CT-e dates and forecasts cannot close a carga.
+        // Closed manifests or full financial settlement confirm delivery.
+        // Forecast dates and partial payments cannot close a carga.
         // Fetch pending documents too, so ambiguity cannot look like delivery.
         const candidates = await clientPool.query(`
           SELECT con.codigocon::text AS numero, NULLIF(TRIM(con.chavectecon),'') AS chave,
@@ -536,9 +544,16 @@ export async function syncDeliveredCargasV2() {
             AND ((CARDINALITY($1::text[]) > 0 AND TRIM(COALESCE(con.chavectecon,'')) = ANY($1::text[]))
               OR (CARDINALITY($2::text[]) > 0 AND con.codigocon::text = ANY($2::text[])))
         `, [keys, numbers]);
-        cargaIds = deliveredCargaIds(pending.rows, await cargaDocumentosDelivery(candidates.rows));
+        const groups = new Map();
+        for (const doc of pending.rows) {
+          if (!groups.has(doc.carga_id)) groups.set(doc.carga_id, { id: Number(doc.carga_id), documentos: [] });
+          groups.get(doc.carga_id).documentos.push({ ...doc, tipo: doc.tipo || "CT-e" });
+        }
+        const finances = await enrichCargasFinancial([...groups.values()]);
+        const paidIds = finances.filter(carga => carga.financeiro.status === "quitado").map(carga => carga.id);
+        cargaIds = [...new Set([...paidIds, ...deliveredCargaIds(pending.rows, await cargaDocumentosDelivery(candidates.rows))])];
         if (cargaIds.length) {
-          await client.query(`UPDATE ${CARGAS()} SET status='entregue',atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND status='em_transito'`, [cargaIds]);
+          await client.query(`UPDATE ${CARGAS()} SET status='entregue',atualizado_em=NOW() WHERE id=ANY($1::bigint[]) AND status IN ('em_transito','aguardando_cte','aguardando_viagem')`, [cargaIds]);
           const trips = await client.query(`SELECT DISTINCT viagem_id FROM ${VINCULOS()} WHERE carga_id=ANY($1::bigint[])`, [cargaIds]);
           for (const row of trips.rows) await syncViagemStatus(client, row.viagem_id);
         }
@@ -578,7 +593,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
         FROM ${CARGAS()} c
         LEFT JOIN ${VINCULOS()} vc ON vc.carga_id = c.id
         LEFT JOIN ${DOCUMENTOS()} d ON d.carga_id = c.id
-          AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento, '')), '[^A-Z]', '', 'g') = 'CTE'
+          AND REGEXP_REPLACE(UPPER(COALESCE(d.tipo_documento, '')), '[^A-Z]', '', 'g') IN ('CTE','ORAMENTO','ORCAMENTO')
         GROUP BY c.id, c.status, vc.viagem_id
       `),
     ]);
@@ -642,7 +657,9 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
     await syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
-    if (text(req.query.status)) {
+    if (req.query.status === "veiculo_vinculado") {
+      where.push("vc.viagem_id IS NOT NULL");
+    } else if (text(req.query.status)) {
       values.push(text(req.query.status));
       where.push(`c.status=$${values.length}`);
     }
@@ -676,7 +693,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
       where.push(`EXISTS (
         SELECT 1 FROM ${DOCUMENTOS()} fd
         WHERE fd.carga_id = c.id
-          AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') = 'CTE'
+          AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') IN ('CTE','ORAMENTO','ORCAMENTO')
       )`);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -829,7 +846,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
         SELECT 1 FROM ${VINCULOS()} fvc
         JOIN ${DOCUMENTOS()} fd ON fd.carga_id = fvc.carga_id
         WHERE fvc.viagem_id = v.id
-          AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') = 'CTE'
+          AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') IN ('CTE','ORAMENTO','ORCAMENTO')
       )`);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -924,8 +941,14 @@ cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) 
     );
     for (const cargaId of cargaIds) {
       await client.query(`INSERT INTO ${VINCULOS()} (viagem_id,carga_id) VALUES($1,$2)`, [id, cargaId]);
-      await client.query(`UPDATE ${CARGAS()} SET status='aguardando_cte',atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=$1`, [cargaId, user.id, user.login]);
+      await client.query(`UPDATE ${CARGAS()} SET status=CASE
+        WHEN status IN ('entregue','cancelado') THEN status
+        WHEN EXISTS (SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=$1
+          AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO'))
+        THEN 'em_transito' ELSE 'aguardando_cte' END,
+        atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=$1`, [cargaId, user.id, user.login]);
     }
+    await syncViagemStatus(client, id);
     await client.query("COMMIT");
     const saved = await pool.query(`${viagemSelect()} WHERE v.id=$1`, [id]);
     const [item] = await enrichViagensFinancial([mapViagem(saved.rows[0])], req.log);
@@ -981,15 +1004,15 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     for (const cargaId of cargaIds) {
       await client.query(`INSERT INTO ${VINCULOS()} (viagem_id,carga_id) VALUES($1,$2)`, [viagemId, cargaId]);
       await client.query(
-        `UPDATE ${CARGAS()} SET status=CASE WHEN EXISTS (
-          SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=$1 AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g')='CTE'
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status WHEN EXISTS (
+          SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=$1 AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO')
         ) THEN 'em_transito' ELSE 'aguardando_cte' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=$1`,
         [cargaId, user.id, user.login],
       );
     }
     if (removedIds.length) {
       await client.query(
-        `UPDATE ${CARGAS()} SET status='aguardando_viagem',atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW()
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW()
          WHERE id=ANY($1::bigint[])`,
         [removedIds, user.id, user.login],
       );
@@ -1017,7 +1040,7 @@ cargasViagensV2Router.delete("/cargas-viagens-v2/viagens/:id", async (req, res, 
     const cargaIds = links.rows.map((row) => Number(row.carga_id));
     if (cargaIds.length) {
       await client.query(
-        `UPDATE ${CARGAS()} SET status='aguardando_viagem',atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=ANY($1::bigint[])`,
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=ANY($1::bigint[])`,
         [cargaIds, auditUser(req.user).id, auditUser(req.user).login],
       );
     }
@@ -1028,6 +1051,9 @@ cargasViagensV2Router.delete("/cargas-viagens-v2/viagens/:id", async (req, res, 
 });
 
 cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id/documentos", async (req, res, next) => {
+  if (!Array.isArray(req.body?.documentos) || req.body.documentos.some(doc => !doc || typeof doc !== "object" || Array.isArray(doc))) {
+    return res.status(400).json({ error: "Informe uma lista válida de documentos. Nenhum vínculo foi alterado." });
+  }
   const client = await pool.connect();
   try {
     const documentos = Array.isArray(req.body?.documentos) ? req.body.documentos : [];
@@ -1046,15 +1072,14 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id/documentos", async (req
       );
     }
     const hasCte = documentos.some((documento) => {
-      const tipo = String(documento.tipo || documento.tipoDocumento || "").toUpperCase().replace(/[^A-Z]/g, "");
-      return tipo === "CTE" && Boolean(text(documento.numero || documento.numeroDocumento || documento.chave || documento.chaveDocumento));
+      return isCte(documento) && Boolean(text(documento.numero || documento.numeroDocumento || documento.chave || documento.chaveDocumento));
     });
+    const trip = await client.query(`SELECT viagem_id FROM ${VINCULOS()} WHERE carga_id=$1`, [req.params.id]);
     const nextStatus = ["entregue", "cancelado"].includes(carga.rows[0].status)
       ? carga.rows[0].status
-      : hasCte ? "em_transito" : "aguardando_cte";
+      : !trip.rows[0] ? "aguardando_viagem" : hasCte ? "em_transito" : "aguardando_cte";
     await client.query(`UPDATE ${CARGAS()} SET status=$2,atualizado_por_id=$3,atualizado_por_login=$4,atualizado_em=NOW() WHERE id=$1`,
       [req.params.id, nextStatus, user.id, user.login]);
-    const trip = await client.query(`SELECT viagem_id FROM ${VINCULOS()} WHERE carga_id=$1`, [req.params.id]);
     if (trip.rows[0]) await syncViagemStatus(client, trip.rows[0].viagem_id);
     await client.query("COMMIT");
     const saved = await pool.query(`${cargaSelect()} WHERE c.id=$1`, [req.params.id]);

@@ -21,7 +21,10 @@ export function resolveCargaDocumento(document, candidates, { plate = false } = 
   const serie = clean(document.serie);
   const numero = numeric(document.numero);
   let matches;
-  if (key) matches = candidates.filter(row => clean(row.chave) === key);
+  if (key) matches = candidates.filter(row => clean(row.chave) === key
+    && (!empresa || clean(row.empresa) === empresa)
+    && (!serie || clean(row.serie) === serie)
+    && (!numero || numeric(row.numero) === numero));
   else if (empresa && serie && numero) {
     matches = candidates.filter(row => clean(row.empresa) === empresa
       && clean(row.serie) === serie && numeric(row.numero) === numero);

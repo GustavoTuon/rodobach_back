@@ -28,7 +28,7 @@ test("resumo usa quantidade solicitada, desconto e frete uma vez por fornecedor"
   };
   const version = proposalVersion(invite);
   quote.escolhas = {
-    p: { conviteId: "v", versaoProposta: version },
+    p: { conviteId: "v", versaoProposta: version, quantidadeConfirmada: true },
     q: { conviteId: "v", versaoProposta: version },
   };
   const plan = purchasePlan(quote, [invite]);
@@ -65,4 +65,25 @@ test("nova resposta invalida a escolha mesmo mantendo o preço", () => {
   quote.escolhas.p.versaoProposta = proposalVersion(invite);
   quote.status = "cancelada";
   assert.equal(purchasePlan(quote, [invite]).completa, false);
+});
+
+test("quantidade maior exige confirmação para entrar no total", () => {
+  const invite = {
+    id: "v",
+    resposta: {
+      frete: 0,
+      itens: [{ id: "p", disponivel: true, valor: 10, quantidade: 30 }],
+    },
+  };
+  const quote = {
+    status: "aberta",
+    itens: [{ id: "p", quantidade: 10 }],
+    escolhas: {
+      p: { conviteId: "v", versaoProposta: proposalVersion(invite) },
+    },
+  };
+  assert.equal(purchasePlan(quote, [invite]).total, 0);
+  assert.equal(purchasePlan(quote, [invite]).revisar, 1);
+  quote.escolhas.p.quantidadeConfirmada = true;
+  assert.equal(purchasePlan(quote, [invite]).total, 100);
 });

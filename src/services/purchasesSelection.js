@@ -44,7 +44,10 @@ export function purchasePlan(quote, invites) {
     const invite = invites.find((i) => i.id === selected.conviteId);
     const eligible = invite && eligibleOffer(product, invite);
     const valid = Boolean(
-      eligible && selected.versaoProposta === proposalVersion(invite),
+      eligible &&
+      selected.versaoProposta === proposalVersion(invite) &&
+      (eligible.offer.quantidade <= product.quantidade ||
+        selected.quantidadeConfirmada === true),
     );
     selections[product.id] = {
       ...selected,

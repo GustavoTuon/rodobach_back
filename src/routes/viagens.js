@@ -678,6 +678,7 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
       SELECT
         con.empresacon AS empresa,
         con.seriecon AS serie,
+        CASE WHEN UPPER(TRIM(con.seriecon)) IN ('O','OC') OR NULLIF(TRIM(con.chaveorcamentocon),'') IS NOT NULL THEN 'Orçamento' ELSE 'CT-e' END AS tipo,
         con.codigocon AS numero,
         con.dataemissaocon AS emissao,
         NULLIF(TRIM(con.chavectecon), '') AS chave,
@@ -690,18 +691,23 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
       FROM logistica.conhecimentos con
       LEFT JOIN logistica.conhecimentosnotasfiscais nf
         ON nf.empresacnf=con.empresacon AND nf.seriecnf=con.seriecon AND nf.codigocnf=con.codigocon
-      LEFT JOIN gerais.clientes cli ON cli.empresacli=con.empresacon AND cli.codigocli=con.clientecon
+      LEFT JOIN LATERAL (
+        SELECT c.fantasiacli,c.nomecli FROM gerais.clientes c
+        WHERE c.codigocli=con.clientecon
+        ORDER BY (c.empresacli=con.empresacon) DESC,c.empresacli LIMIT 1
+      ) cli ON TRUE
       WHERE COALESCE(con.statuscon, 0) <> 3
-        AND con.codigocon::text = LTRIM($1, '0')
-      GROUP BY con.empresacon,con.seriecon,con.codigocon,con.dataemissaocon,con.chavectecon,con.veiculocon,cli.fantasiacli,cli.nomecli
+        AND (($2::boolean AND TRIM(con.chavectecon)=$1)
+          OR (NOT $2::boolean AND con.codigocon::text = LTRIM($1, '0')))
+      GROUP BY con.empresacon,con.seriecon,con.codigocon,con.dataemissaocon,con.chavectecon,con.chaveorcamentocon,con.veiculocon,cli.fantasiacli,cli.nomecli
       ORDER BY con.dataemissaocon DESC, con.codigocon DESC
       LIMIT 30
     `,
-      [digits],
+      [digits, digits.length === 44],
     );
     res.json(
       rows.map((row) => ({
-        tipo: "CT-e",
+        tipo: row.tipo,
         numero: String(row.numero),
         chave: row.chave || "",
         emissao: row.emissao,
@@ -712,7 +718,7 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
         notas: row.notas || [],
         chavesNfe: row.chaves_nfe || [],
         notasDocumentos: row.notas_documentos || [],
-        observacoes: `ERP - CT-e ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
+        observacoes: `ERP - ${row.tipo} ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
       })),
     );
   } catch (error) {

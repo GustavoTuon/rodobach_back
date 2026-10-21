@@ -25,6 +25,9 @@ test("only closed manifests confirm delivery; partial, cancelled and future clos
 });
 
 test("same number in different series and companies resolves independently", () => {
+  const copiedKey = { ...cte, serie: "O" };
+  assert.equal(resolveCargaDocumento(cte, [cte, copiedKey]), cte);
+  assert.equal(resolveCargaDocumento({ chave: cte.chave }, [cte, copiedKey]), null);
   const other = { ...budget, empresa: "2" };
   assert.equal(resolveCargaDocumento(budget, [cte, budget, other]), budget);
   assert.equal(resolveCargaDocumento(other, [cte, budget, other]), other);
