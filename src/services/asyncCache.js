@@ -1,27 +1,23 @@
-// Bounded cache with one in-flight operation per key. Failures are never cached.
-export function createAsyncCache({ ttlMs = 30000, maxEntries = 20, maxPending = 20, maxBytes = 20 * 1024 * 1024, now = Date.now } = {}) {
-  const entries = new Map(), pending = new Map();
-  let bytes = 0;
-  const remove = key => { const entry = entries.get(key); if (entry) bytes -= entry.bytes; entries.delete(key); };
+// Bounded cache with shared in-flight work. Failed queries are never retained.
+export function createAsyncCache({ ttlMs = 30_000, maxEntries = 100, now = Date.now } = {}) {
+  const entries = new Map();
   return {
-    async get(key, loader) {
-      for (const [id, entry] of entries) if (entry.expires <= now()) remove(id);
-      if (entries.has(key)) {
-        const entry = entries.get(key); entries.delete(key); entries.set(key, entry);
-        return structuredClone(entry.value);
-      }
-      if (pending.has(key)) return structuredClone(await pending.get(key));
-      if (pending.size >= maxPending) throw Object.assign(new Error("Muitas consultas em andamento."), { status: 503 });
-      const promise = Promise.resolve().then(loader).then(value => {
-        const size = Buffer.byteLength(JSON.stringify(value) || "");
-        if (size <= maxBytes) {
-          while (entries.size >= maxEntries || bytes + size > maxBytes) remove(entries.keys().next().value);
-          entries.set(key, { value: structuredClone(value), bytes: size, expires: now() + ttlMs }); bytes += size;
-        }
+    clear() { entries.clear(); },
+    get(key, fetch) {
+      const existing = entries.get(key);
+      if (existing && (existing.pending || existing.expiresAt > now())) return existing.promise;
+      const entry = { pending: true, expiresAt: 0 };
+      entry.promise = Promise.resolve().then(fetch).then(value => {
+        entry.pending = false; entry.expiresAt = now() + ttlMs;
         return value;
+      }, error => {
+        if (entries.get(key) === entry) entries.delete(key);
+        throw error;
       });
-      pending.set(key, promise);
-      try { return structuredClone(await promise); } finally { pending.delete(key); }
+      entries.delete(key);
+      entries.set(key, entry);
+      if (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      return entry.promise;
     },
   };
 }

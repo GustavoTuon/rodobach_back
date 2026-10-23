@@ -1,5 +1,26 @@
 # Rodobach Backend
 
+## Histórico de cargas e desempenho da tela
+
+A migração `069_quitacao_historico_cargas.sql` encerra somente cargas com
+`legado_id`, data anterior a `2026-08-01` e status `aguardando_cte`. A quitação
+histórica fica registrada em `dados_legados.quitacao_historica`, com motivo,
+data e status anterior. Ela não cria títulos nem baixas no ERP e não é copiada
+ao duplicar cargas. Viagens mistas só são encerradas se todas as cargas estiverem
+entregues. A tela identifica esse caso como “Quitação histórica · planilha”.
+
+Para conferir o alcance: `node scripts/settle-historical-loads.mjs`.
+Para aplicar exclusivamente essa migração: acrescente `--apply`. A execução é
+transacional, registra checksum em `schema_migrations` e pode ser repetida.
+
+As consultas financeiras buscam recebimentos apenas dos títulos envolvidos.
+Resultados iguais compartilham consultas em andamento e cache de até 60 segundos;
+resumo e filtros usam até 30 segundos. Gravações do módulo invalidam os caches.
+A sincronização de entregas acontece em segundo plano, e a tela visível atualiza
+a cada minuto. A lista é exibida independentemente do carregamento do resumo.
+
+Validação SQL isolada: `$env:CARGAS_WORKFLOW_DB_TEST='1'; node --test test/cargasHistorical.test.js test/cargasViagensV2Workflow.test.js`.
+
 ## Identificação de documentos e entregas de cargas
 
 A migração `068_carga_documentos_identidade_erp.sql` acrescenta empresa e série

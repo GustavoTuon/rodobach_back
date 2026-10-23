@@ -672,7 +672,18 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
     const digits = q.replace(/\D/g, "");
-    if (!digits) return res.json([]);
+    const batch = req.query.placa !== undefined || req.query.data !== undefined;
+    const placa = String(req.query.placa || "").toUpperCase().replace(/[-\s]/g, "");
+    const data = String(req.query.data || "");
+    const page = Number(req.query.page || 1);
+    if (batch && (!/^[A-Z]{3}\d[A-Z0-9]\d{2}$/.test(placa)
+      || !/^\d{4}-\d{2}-\d{2}$/.test(data)
+      || !Number.isFinite(Date.parse(`${data}T00:00:00Z`))
+      || new Date(`${data}T00:00:00Z`).toISOString().slice(0, 10) !== data
+      || !Number.isSafeInteger(page) || page < 1 || page > 10000)) {
+      return res.status(400).json({ error: "Informe uma placa, uma data de emissão e uma página válidas." });
+    }
+    if (!batch && !digits) return res.json([]);
     const { rows } = await clientPool.query(
       `
       SELECT
@@ -697,16 +708,17 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
         ORDER BY (c.empresacli=con.empresacon) DESC,c.empresacli LIMIT 1
       ) cli ON TRUE
       WHERE COALESCE(con.statuscon, 0) <> 3
-        AND (($2::boolean AND TRIM(con.chavectecon)=$1)
-          OR (NOT $2::boolean AND con.codigocon::text = LTRIM($1, '0')))
+        AND ${batch ? `REGEXP_REPLACE(UPPER(TRIM(con.veiculocon)), '[-[:space:]]', '', 'g') = $1
+          AND con.dataemissaocon >= $2::date AND con.dataemissaocon < $2::date + INTERVAL '1 day'`
+          : `(($2::boolean AND TRIM(con.chavectecon)=$1)
+          OR (NOT $2::boolean AND con.codigocon::text = LTRIM($1, '0')))`}
       GROUP BY con.empresacon,con.seriecon,con.codigocon,con.dataemissaocon,con.chavectecon,con.chaveorcamentocon,con.veiculocon,cli.fantasiacli,cli.nomecli
-      ORDER BY con.dataemissaocon DESC, con.codigocon DESC
-      LIMIT 30
+      ORDER BY con.dataemissaocon DESC, con.codigocon DESC, con.empresacon, con.seriecon
+      LIMIT $3 OFFSET $4
     `,
-      [digits, digits.length === 44],
+      batch ? [placa, data, 101, (page - 1) * 100] : [digits, digits.length === 44, 30, 0],
     );
-    res.json(
-      rows.map((row) => ({
+    const items = (batch ? rows.slice(0, 100) : rows).map((row) => ({
         tipo: row.tipo,
         numero: String(row.numero),
         chave: row.chave || "",
@@ -719,8 +731,8 @@ viagensRouter.get("/viagens/documentos-financeiros", async (req, res, next) => {
         chavesNfe: row.chaves_nfe || [],
         notasDocumentos: row.notas_documentos || [],
         observacoes: `ERP - ${row.tipo} ${row.serie || ""}-${row.numero}${row.notas?.length ? ` | NF ${row.notas.join(", ")}` : ""}`,
-      })),
-    );
+      }));
+    res.json(batch ? { items, page, hasMore: rows.length > 100 } : items);
   } catch (error) {
     next(error);
   }
