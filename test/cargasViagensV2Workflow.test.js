@@ -48,6 +48,21 @@ test('real SQL: document before trip, trip edit, removal, conflict and rollback'
     assert.equal(editLoad.status,200,JSON.stringify(editLoad.body));
     assert.equal(editLoad.body.valorCliente,1234);
     assert.equal(editLoad.body.paradas[0].cidade,'Parada');
+    const originalBeforeCopy = await request(app).get(`/cargas-viagens-v2/cargas/${id}`);
+    const duplicate = await request(app).post('/cargas-viagens-v2/cargas').send({
+      ...editLoad.body,
+      paradas: editLoad.body.paradas.map(stop => ({ ...stop, endereco: 'Novo endereço da cópia' })),
+    });
+    assert.equal(duplicate.status, 201, JSON.stringify(duplicate.body));
+    assert.notEqual(duplicate.body.id, id);
+    assert.notEqual(duplicate.body.codigo, editLoad.body.codigo);
+    assert.equal(duplicate.body.cliente, editLoad.body.cliente);
+    assert.equal(duplicate.body.valorCliente, 1234);
+    assert.equal(duplicate.body.paradas[0].endereco, 'Novo endereço da cópia');
+    assert.deepEqual(duplicate.body.documentos, []);
+    assert.equal(duplicate.body.status, 'aguardando_viagem');
+    assert.deepEqual((await request(app).get(`/cargas-viagens-v2/cargas/${id}`)).body, originalBeforeCopy.body);
+    await request(app).delete(`/cargas-viagens-v2/cargas/${duplicate.body.id}`).expect(204);
     const url=`/cargas-viagens-v2/cargas/${id}/documentos`;
     const documentos=[{tipo:'Orçamento',numero:'1283',empresa:'2',serie:'O'},{tipo:'CT-e',numero:'1283',empresa:'2',serie:'1'}];
     const link=await request(app).put(url).send({documentos});

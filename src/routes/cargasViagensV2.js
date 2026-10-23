@@ -1,3 +1,4 @@
+import { createAsyncCache } from "../services/asyncCache.js";
 import { resolveCargaDocumento, deliveredCargaIds, cargaDocumentosDelivery } from "../services/cargaDocumentosIdentity.js";
 import { Router } from "express";
 import { pool } from "../db/pool.js";
@@ -6,6 +7,17 @@ import jwt from "jsonwebtoken";
 import { config, tableName } from "../config.js";
 
 export const cargasViagensV2Router = Router();
+const financialCache = createAsyncCache({ ttlMs: 60_000 });
+const metadataCache = createAsyncCache({ ttlMs: 30_000, maxEntries: 2 });
+cargasViagensV2Router.use((req, res, next) => {
+  if (!["GET", "HEAD"].includes(req.method) && req.path.startsWith("/cargas-viagens-v2/")) {
+    res.on("finish", () => {
+      if (res.statusCode < 400) { financialCache.clear(); metadataCache.clear(); }
+    });
+  }
+  next();
+});
+const historicalFinancial = carga => ({ ...EMPTY_FINANCIAL, status: "quitado", quitacaoHistorica: carga.quitacaoHistorica });
 
 const CARGAS = () => tableName("cargas_v2");
 const VIAGENS = () => tableName("viagens_v2");
@@ -133,6 +145,7 @@ function mapCarga(row) {
   const paradas = Array.isArray(row.paradas) ? row.paradas.filter(Boolean) : [];
   return {
     id: Number(row.id),
+    quitacaoHistorica: row.dados_legados?.quitacao_historica || null,
     legadoId: row.legado_id ? Number(row.legado_id) : null,
     codigo: row.codigo_carga || `C-${String(row.id).padStart(6, "0")}`,
     data: isoDate(row.data),
@@ -207,6 +220,7 @@ function mapViagem(row) {
     },
     cargas: cargas.map((carga) => ({
       id: Number(carga.id),
+      quitacaoHistorica: carga.quitacaoHistorica || null,
       codigo: carga.codigo || "",
       cliente: carga.cliente || "",
       clienteFinal: carga.clienteFinal || "",
@@ -260,6 +274,7 @@ const viagemSelect = () => `
     COALESCE((
       SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
         'id', c.id, 'codigo', c.codigo_carga, 'cliente', c.cliente,
+        'quitacaoHistorica', c.dados_legados->'quitacao_historica',
         'clienteFinal', c.cliente_final, 'tomadorServico', c.tomador_servico,
         'origem', c.cidade_origem, 'ufOrigem', c.uf_origem,
         'destino', c.cidade_destino, 'ufDestino', c.uf_destino,
@@ -286,7 +301,7 @@ async function financialByCteDocuments(cargas = []) {
   const numbers = [...new Set(references.map((item) => text(item.numero)).filter(Boolean).map((value) => String(Number(value))))];
   if (!keys.length && !numbers.length) return [];
 
-  const { rows } = await clientPool.query(`
+  const { rows } = await financialCache.get(JSON.stringify([keys.sort(), numbers.sort()]), () => clientPool.query(`
     WITH cte_documentos AS (
       SELECT DISTINCT
         con.empresacon,
@@ -300,14 +315,6 @@ async function financialByCteDocuments(cargas = []) {
           (CARDINALITY($1::text[]) > 0 AND TRIM(COALESCE(con.chavectecon, '')) = ANY($1::text[]))
           OR (CARDINALITY($2::text[]) > 0 AND con.codigocon::text = ANY($2::text[]))
         )
-    ),
-    recebimentos AS (
-      SELECT
-        empresarcb, seriercb, duplicatarcb, parcelarcb,
-        MAX(datarecebimentorcb)::date AS data_recebimento,
-        COALESCE(SUM(valorrecebidorcb), 0)::numeric AS valor_recebido
-      FROM financeiro.receberrecebimentos
-      GROUP BY empresarcb, seriercb, duplicatarcb, parcelarcb
     ),
     vinculos AS (
       SELECT DISTINCT
@@ -329,11 +336,13 @@ async function financialByCteDocuments(cargas = []) {
         ON rec.empresarec = rcv.empresa
        AND rec.serierec = rcv.serie
        AND rec.duplicatarec = rcv.duplicata
-      LEFT JOIN recebimentos rcb
-        ON rcb.empresarcb = rec.empresarec
-       AND rcb.seriercb = rec.serierec
-       AND rcb.duplicatarcb = rec.duplicatarec
-       AND rcb.parcelarcb = rec.parcelarec
+      LEFT JOIN LATERAL (
+        SELECT MAX(datarecebimentorcb)::date AS data_recebimento,
+          CASE WHEN COUNT(*) > 0 THEN COALESCE(SUM(valorrecebidorcb), 0)::numeric END AS valor_recebido
+        FROM financeiro.receberrecebimentos
+        WHERE empresarcb = rec.empresarec AND seriercb = rec.serierec
+          AND duplicatarcb = rec.duplicatarec AND parcelarcb = rec.parcelarec
+      ) rcb ON TRUE
 
       UNION
 
@@ -361,11 +370,13 @@ async function financialByCteDocuments(cargas = []) {
        AND rec.serierec = rcc.seriercc
        AND rec.duplicatarec = rcc.duplicatarcc
        AND rec.parcelarec = rcc.parcelarcc
-      LEFT JOIN recebimentos rcb
-        ON rcb.empresarcb = rec.empresarec
-       AND rcb.seriercb = rec.serierec
-       AND rcb.duplicatarcb = rec.duplicatarec
-       AND rcb.parcelarcb = rec.parcelarec
+      LEFT JOIN LATERAL (
+        SELECT MAX(datarecebimentorcb)::date AS data_recebimento,
+          CASE WHEN COUNT(*) > 0 THEN COALESCE(SUM(valorrecebidorcb), 0)::numeric END AS valor_recebido
+        FROM financeiro.receberrecebimentos
+        WHERE empresarcb = rec.empresarec AND seriercb = rec.serierec
+          AND duplicatarcb = rec.duplicatarec AND parcelarcb = rec.parcelarec
+      ) rcb ON TRUE
     ),
     totais AS (
       SELECT
@@ -412,7 +423,7 @@ async function financialByCteDocuments(cargas = []) {
       ELSE 'em_aberto'
     END AS status_financeiro
     FROM totais
-  `, [keys, numbers]);
+  `, [keys, numbers]));
 
   return rows.map(row => {
     const item = {
@@ -434,8 +445,9 @@ async function financialByCteDocuments(cargas = []) {
 
 export async function enrichCargasFinancial(cargas = [], logger = null) {
   try {
-    const lookup = await financialByCteDocuments(cargas);
+    const lookup = await financialByCteDocuments(cargas.filter(carga => !carga.quitacaoHistorica));
     return cargas.map((carga) => {
+      if (carga.quitacaoHistorica) return { ...carga, financeiro: historicalFinancial(carga) };
       const ctes = (carga.documentos || []).filter(isCte);
       const statuses = ctes.map(documento => {
         const match = resolveCargaDocumento(documento, lookup);
@@ -447,7 +459,7 @@ export async function enrichCargasFinancial(cargas = [], logger = null) {
     logger?.warn?.({ err: error }, "Falha ao consultar situacao financeira das cargas V2");
     return cargas.map((carga) => ({
       ...carga,
-      financeiro: { ...EMPTY_FINANCIAL, status: "indisponivel" },
+      financeiro: carga.quitacaoHistorica ? historicalFinancial(carga) : { ...EMPTY_FINANCIAL, status: "indisponivel" },
     }));
   }
 }
@@ -462,9 +474,10 @@ async function enrichViagensFinancial(viagens = [], logger = null) {
   }
   return viagens.map((viagem) => {
     const cargas = (viagem.cargas || []).map((carga) => queues.get(carga.id)?.shift() || carga);
-    const statuses = cargas.filter((carga) => carga.financeiro?.ctes > 0).map((carga) => carga.financeiro);
+    const statuses = cargas.filter((carga) => carga.financeiro?.ctes > 0 || carga.quitacaoHistorica).map((carga) => carga.financeiro);
     const financeiro = aggregateFinancialStatuses(statuses, cargas.length);
     financeiro.ctes = cargas.reduce((sum, carga) => sum + number(carga.financeiro?.ctes), 0);
+    if (cargas.length && cargas.every(carga => carga.quitacaoHistorica)) financeiro.quitacaoHistorica = cargas[0].quitacaoHistorica;
     return { ...viagem, cargas, financeiro };
   });
 }
@@ -559,18 +572,21 @@ export async function syncDeliveredCargasV2() {
         }
       }
       await client.query("COMMIT");
+      if (cargaIds.length) metadataCache.clear();
       lastDeliverySyncAt = Date.now();
       return { updated: cargaIds.length };
-    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    } catch (error) { lastDeliverySyncAt = Date.now(); await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   })();
   try { return await deliverySyncPromise; }
+  catch (error) { lastDeliverySyncAt = Date.now(); throw error; }
   finally { deliverySyncPromise = null; }
 }
 
 cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) => {
   try {
-    await syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
+    void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
+    const result = await metadataCache.get("resumo", async () => {
     const [localResult, financialRows] = await Promise.all([
       pool.query(`
       SELECT
@@ -586,9 +602,10 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
         (SELECT COUNT(*)::int FROM ${VIAGENS()} WHERE situacao='entregue') AS viagens_entregues
       `),
       pool.query(`
-        SELECT c.id, c.status, vc.viagem_id,
+        SELECT c.id, c.status, c.dados_legados, vc.viagem_id,
           COALESCE(JSONB_AGG(JSONB_BUILD_OBJECT(
-            'tipo', d.tipo_documento, 'numero', d.numero_documento, 'chave', d.chave_documento
+            'tipo', d.tipo_documento, 'numero', d.numero_documento, 'chave', d.chave_documento,
+            'empresa', d.empresa_documento, 'serie', d.serie_documento
           )) FILTER (WHERE d.id IS NOT NULL), '[]'::jsonb) AS documentos
         FROM ${CARGAS()} c
         LEFT JOIN ${VINCULOS()} vc ON vc.carga_id = c.id
@@ -600,6 +617,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
     const financialLoads = await enrichCargasFinancial(financialRows.rows.map((row) => ({
       id: Number(row.id),
       status: row.status,
+      quitacaoHistorica: row.dados_legados?.quitacao_historica || null,
       viagemId: row.viagem_id ? Number(row.viagem_id) : null,
       documentos: row.documentos || [],
     })), req.log);
@@ -612,17 +630,20 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
     const viagensQuitadas = [...byTrip.values()].filter((cargas) =>
       cargas.length > 0 && cargas.every((carga) => carga.financeiro.status === "quitado"),
     ).length;
-    res.json({
+    return {
       ...localResult.rows[0],
       em_transito: localResult.rows[0].cargas_em_transito,
       quitadas: cargaQuitadas,
       viagens_quitadas: viagensQuitadas,
+    };
     });
+    res.json(result);
   } catch (error) { next(error); }
 });
 
 cargasViagensV2Router.get("/cargas-viagens-v2/filtros", async (_req, res, next) => {
   try {
+    const result = await metadataCache.get("filtros", async () => {
     const [{ rows }, activeSellers] = await Promise.all([pool.query(`
       SELECT
         ARRAY(SELECT DISTINCT cliente FROM ${CARGAS()} WHERE NULLIF(TRIM(cliente),'') IS NOT NULL ORDER BY cliente) AS empresas,
@@ -640,7 +661,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/filtros", async (_req, res, next) 
         AND UPPER(TRIM(p.nomepes::text)) IN ('MAICON STEINBACH', 'MAURICIO STEINBACK')
       ORDER BY nome
     `)]);
-    res.json({
+    return {
       empresas: rows[0].empresas || [],
       origens: rows[0].origens || [],
       ufsOrigem: rows[0].ufs_origem || [],
@@ -648,13 +669,15 @@ cargasViagensV2Router.get("/cargas-viagens-v2/filtros", async (_req, res, next) 
       ufsDestino: rows[0].ufs_destino || [],
       materiais: rows[0].materiais || [],
       vendedores: activeSellers.rows.map((row) => row.nome),
+    };
     });
+    res.json(result);
   } catch (error) { next(error); }
 });
 
 cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) => {
   try {
-    await syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
+    void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
     if (req.query.status === "veiculo_vinculado") {
@@ -690,11 +713,11 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
     }
     const financialFilter = text(req.query.financeiro, "").toLowerCase();
     if (financialFilter && financialFilter !== "sem_cte") {
-      where.push(`EXISTS (
+      where.push(`(c.dados_legados ? 'quitacao_historica' OR EXISTS (
         SELECT 1 FROM ${DOCUMENTOS()} fd
         WHERE fd.carga_id = c.id
           AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') IN ('CTE','ORAMENTO','ORCAMENTO')
-      )`);
+      ))`);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const paged = req.query.page !== undefined || req.query.pageSize !== undefined;
@@ -705,11 +728,19 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
     }
     const { page, pageSize, offset } = pagination(req.query);
     if (financialFilter) {
-      const { rows } = await pool.query(`${cargaSelect()} ${whereSql} ORDER BY c.data DESC,c.id DESC`, values);
+      // Determine financial membership with only IDs and documents; fetch full details for this page.
+      const { rows } = await pool.query(`SELECT c.id, c.dados_legados,
+        COALESCE((SELECT JSONB_AGG(TO_JSONB(d)) FROM ${DOCUMENTOS()} d WHERE d.carga_id=c.id), '[]'::jsonb) AS documentos
+        FROM ${CARGAS()} c LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
+        LEFT JOIN ${VIAGENS()} v ON v.id=vc.viagem_id
+        ${whereSql} ORDER BY c.data DESC,c.id DESC`, values);
       const enriched = await enrichCargasFinancial(rows.map(mapCarga), req.log);
       const filtered = enriched.filter((item) => item.financeiro.status === financialFilter);
+      const pageLoads = filtered.slice(offset, offset + pageSize);
+      const finances = new Map(pageLoads.map(item => [item.id, item.financeiro]));
+      const details = pageLoads.length ? await pool.query(`${cargaSelect()} WHERE c.id=ANY($1::bigint[]) ORDER BY c.data DESC,c.id DESC`, [pageLoads.map(item => item.id)]) : { rows: [] };
       return res.json({
-        items: filtered.slice(offset, offset + pageSize),
+        items: details.rows.map(row => ({ ...mapCarga(row), financeiro: finances.get(Number(row.id)) })),
         total: filtered.length,
         page,
         pageSize,
@@ -743,8 +774,9 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas/:id", async (req, res, next
 });
 
 cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) => {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     const input = req.body || {};
     const user = auditUser(req.user);
     await client.query("BEGIN");
@@ -761,13 +793,14 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
     await client.query(`UPDATE ${CARGAS()} SET codigo_carga='C-'||LPAD(id::text,6,'0') WHERE id=$1`, [id]);
     await savePricingFields(client, id, input);
     await replaceRotas(client, id, input.paradas);
-    await client.query("COMMIT");
-    const saved = await pool.query(`${cargaSelect()} WHERE c.id=$1`, [id]);
+    const saved = await client.query(`${cargaSelect()} WHERE c.id=$1`, [id]);
     const [item] = await enrichCargasFinancial([mapCarga(saved.rows[0])], req.log);
+    await client.query("COMMIT");
     res.status(201).json(item);
   } catch (error) {
-    await client.query("ROLLBACK"); next(error);
-  } finally { client.release(); }
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally { client?.release(); }
 });
 
 cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next) => {
@@ -822,7 +855,7 @@ cargasViagensV2Router.delete("/cargas-viagens-v2/cargas/:id", async (req, res, n
 
 cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) => {
   try {
-    await syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
+    void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
     if (text(req.query.status)) { values.push(text(req.query.status)); where.push(`v.situacao=$${values.length}`); }
@@ -842,12 +875,12 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
     }
     const financialFilter = text(req.query.financeiro, "").toLowerCase();
     if (financialFilter && financialFilter !== "sem_cte") {
-      where.push(`EXISTS (
+      where.push(`(EXISTS (SELECT 1 FROM ${VINCULOS()} hvc JOIN ${CARGAS()} hc ON hc.id=hvc.carga_id WHERE hvc.viagem_id=v.id AND hc.dados_legados ? 'quitacao_historica') OR EXISTS (
         SELECT 1 FROM ${VINCULOS()} fvc
         JOIN ${DOCUMENTOS()} fd ON fd.carga_id = fvc.carga_id
         WHERE fvc.viagem_id = v.id
           AND REGEXP_REPLACE(UPPER(COALESCE(fd.tipo_documento, '')), '[^A-Z]', '', 'g') IN ('CTE','ORAMENTO','ORCAMENTO')
-      )`);
+      ))`);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const paged = req.query.page !== undefined || req.query.pageSize !== undefined;
