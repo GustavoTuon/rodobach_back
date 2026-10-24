@@ -48,10 +48,10 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     config.db.schema=schema;
     t.mock.method(getVeiculosPool(),'query',async sql=>({rows:sql.includes('SELECT m.municipio') ? [{municipio:'Criciúma',uf:'SC',rodovia:'BR-101',rua:null,data_hora:new Date().toISOString()}] : sql.includes('mensagens_cb') ? [{placa:'ABC1234',odometro:197611.7,data_hora:new Date().toISOString()}] : [{placa:'ABC1234'},{placa:'DEF4G56'}]}));
     t.mock.method(clientPool,'query',async()=>({rows:[]}));
-    const km=await request(driverApp).get('/manutencao-plantao/placas/ABC1234/hodometro?time=10%3A30');
+    const km=await request(driverApp).get('/manutencao-plantao/placas/ABC1234/hodometro?date=2026-09-30&time=10%3A30');
     assert.equal(km.status,200);assert.equal(km.body.odometer,197611.7);assert.equal(km.body.source,'telemetria');
-    assert.equal((await request(reviewerApp).get('/manutencao-plantao/placas/ABC1234/hodometro?time=10%3A30')).status,200);
-    assert.equal((await request(driverApp).get('/manutencao-plantao/placas/ZZZ9999/hodometro?time=10%3A30')).status,404);
+    assert.equal((await request(reviewerApp).get('/manutencao-plantao/placas/ABC1234/hodometro?date=2026-09-30&time=10%3A30')).status,200);
+    assert.equal((await request(driverApp).get('/manutencao-plantao/placas/ZZZ9999/hodometro?date=2026-09-30&time=10%3A30')).status,404);
     const position=await request(driverApp).get('/manutencao-plantao/placas/ABC1234/localizacao');
     assert.equal(position.status,200);assert.equal(position.body.location,'Criciúma / SC — BR-101');assert.equal(position.body.source,'telemetria');
     assert.equal((await request(reviewerApp).get('/manutencao-plantao/placas/ABC1234/localizacao')).status,200);

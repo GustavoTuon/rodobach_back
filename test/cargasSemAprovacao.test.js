@@ -95,7 +95,7 @@ test('cadastra viagem sem placa, motorista, valor ou cargas',async t=>{
 test('edita viagem incompleta preservando identificador quando vazio',async t=>{
  const {app,calls}=setup(t);
  await request(app).put('/cargas-viagens-v2/viagens/1').send({numero:'',data:'',placa:'',cargaIds:[]}).expect(200);
- assert.ok(calls.some(c=>c.sql.includes('SET data=$2,placa_veiculo=$3')&&!c.sql.includes('numero_viagem=')));
+ assert.ok(calls.some(c=>c.sql.startsWith('UPDATE ')&&c.sql.includes('data=$2,placa_veiculo=$3')&&!c.sql.includes('numero_viagem=')));
  assert.ok(calls.some(c=>c.sql==='COMMIT'));
 });
 
@@ -124,7 +124,7 @@ test('rejeita reserva adulterada antes de gravar a viagem',async t=>{
 test('ignora tentativa de alterar identificador na edição',async t=>{
  const {app,calls}=setup(t);
  await request(app).put('/cargas-viagens-v2/viagens/1').send({numero:'MANUAL'}).expect(200);
- const update=calls.find(c=>c.sql.includes('SET data=$2,placa_veiculo=$3'));
+ const update=calls.find(c=>c.sql.startsWith('UPDATE ')&&c.sql.includes('data=$2,placa_veiculo=$3'));
  assert.ok(update);
  assert.ok(!update.params.includes('MANUAL'));
 });
