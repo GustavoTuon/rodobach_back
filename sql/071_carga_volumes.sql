@@ -1,0 +1,2 @@
+ALTER TABLE cargas_v2 ADD COLUMN IF NOT EXISTS volumes INTEGER CHECK (volumes >= 0);
+ALTER TABLE carga_rotas_v2 ADD COLUMN IF NOT EXISTS volumes INTEGER CHECK (volumes >= 0);

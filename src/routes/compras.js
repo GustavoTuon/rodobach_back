@@ -4,6 +4,7 @@ import {
   supplierPublicRouter,
 } from "./comprasAccess.js";
 import { importErpQuotes } from "../services/purchasesImport.js";
+import { purchaseTrend } from "../services/purchasesTrend.js";
 import express from "express";
 import { z } from "zod";
 import {
@@ -282,6 +283,9 @@ comprasRouter.get(
       [uuid(req.params.id)],
     );
     if (!rows[0]) fail("Cotação não encontrada.", 404);
+    if (rows[0].origem_dados?.empresa != null) {
+      rows[0].itens = rows[0].itens.map(item => ({...item, empresa:String(rows[0].origem_dados.empresa)}));
+    }
     const invites = await pool.query(
       `SELECT v.*,f.nome,f.email,f.telefone FROM ${t("convites")} v JOIN ${t("fornecedores")} f ON f.id=v.fornecedor_id WHERE v.cotacao_id=$1 ORDER BY f.nome`,
       [req.params.id],
@@ -356,29 +360,45 @@ comprasRouter.get(
   route(async (req, res) => {
     const quote = (
       await pool.query(
-        `SELECT itens,criado_em FROM ${t("cotacoes")} WHERE id=$1`,
+        `SELECT itens,criado_em,origem_dados FROM ${t("cotacoes")} WHERE id=$1`,
         [uuid(req.params.id)],
       )
     ).rows[0];
     if (!quote) fail("Cotação não encontrada.", 404);
     const products = quote.itens.map((i) => ({
       id: String(i.id),
-      empresa: String(i.empresa),
+      empresa: String(quote.origem_dados?.empresa ?? i.empresa),
       codigo: String(i.codigo),
     }));
     const { rows } = await clientPool.query(
       `SELECT p.id produto_id,h.* FROM jsonb_to_recordset($1::jsonb) AS p(id text,empresa text,codigo text) CROSS JOIN LATERAL (
-    SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,f.nomefor fornecedor,n.fornecedornfe fornecedor_codigo,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,u.abreviaturauni unidade,COALESCE(i.totalitemestoquenep,i.totalitemnep) total
+    SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,n.serienfe serie,f.nomefor fornecedor,n.fornecedornfe fornecedor_codigo,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,u.abreviaturauni unidade,i.totalitemnep total_nota,i.valordescontonep desconto,i.valorfretenep frete,COALESCE(i.totalitemestoquenep,i.totalitemnep) total
     FROM compras.notasfiscaisentradaprodutos i JOIN compras.notasfiscaisentrada n ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep
-    LEFT JOIN gerais.fornecedores f ON f.empresafor=n.empresanfe AND f.codigofor=n.fornecedornfe
-    LEFT JOIN estoque.unidades u ON u.empresauni=i.empresanep AND u.codigouni=i.unidadenep
+    LEFT JOIN LATERAL (SELECT f0.nomefor FROM gerais.fornecedores f0
+      WHERE f0.codigofor=n.fornecedornfe AND (f0.empresafor=n.empresanfe OR (SELECT count(*) FROM gerais.fornecedores fx WHERE fx.codigofor=n.fornecedornfe)=1)
+      ORDER BY (f0.empresafor=n.empresanfe) DESC LIMIT 1) f ON true
+    LEFT JOIN LATERAL (SELECT u0.abreviaturauni FROM estoque.unidades u0
+      WHERE u0.codigouni=i.unidadenep AND (u0.empresauni=i.empresanep OR (SELECT count(*) FROM estoque.unidades ux WHERE ux.codigouni=i.unidadenep)=1)
+      ORDER BY (u0.empresauni=i.empresanep) DESC LIMIT 1) u ON true
     WHERE i.empresanep::text=p.empresa AND i.produtonep::text=p.codigo
       AND COALESCE(n.dataentradanfe,n.dataemissaonfe)::date <= ($2::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date
     ORDER BY COALESCE(n.dataentradanfe,n.dataemissaonfe) DESC NULLS LAST,n.codigonfe DESC,i.sequencianep DESC LIMIT 3
   ) h`,
-      [JSON.stringify(products), quote.criado_em],
+      [JSON.stringify(products), req.query.referencia === "atual" ? new Date().toISOString() : quote.criado_em],
     );
     res.json(rows);
+  }),
+);
+comprasRouter.get(
+  "/compras/cotacoes/:id/tendencia",
+  route(async (req, res) => {
+    const quote = (await pool.query(`SELECT itens,criado_em,origem_dados FROM ${t("cotacoes")} WHERE id=$1`, [uuid(req.params.id)])).rows[0];
+    if (!quote) fail("Cotação não encontrada.", 404);
+    const product = quote.itens.find(item => String(item.id) === String(req.query.produtoId || ""));
+    if (!product) fail("Produto não pertence à cotação.");
+    const cutoff = req.query.referencia === "atual" ? new Date().toISOString() : quote.criado_em;
+    const series = await purchaseTrend({...product, empresa:quote.origem_dados?.empresa ?? product.empresa}, cutoff);
+    res.json({series, cutoff, unit:product.unidade, source:"ERP"});
   }),
 );
 comprasRouter.post(
@@ -573,8 +593,12 @@ comprasRouter.get(
       `SELECT COALESCE(n.dataentradanfe,n.dataemissaonfe) AS "data",n.codigonfe documento,n.fornecedornfe fornecedor_codigo,f.nomefor fornecedor,i.quantidadenep quantidade,i.valorunitarionep valor_unitario,u.abreviaturauni unidade,COALESCE(i.totalitemestoquenep,i.totalitemnep) total
        FROM compras.notasfiscaisentradaprodutos i
        JOIN compras.notasfiscaisentrada n ON n.empresanfe=i.empresanep AND n.serienfe=i.serienep AND n.codigonfe=i.codigonep AND n.fornecedornfe=i.fornecedornep
-       LEFT JOIN gerais.fornecedores f ON f.empresafor=n.empresanfe AND f.codigofor=n.fornecedornfe
-       LEFT JOIN estoque.unidades u ON u.empresauni=i.empresanep AND u.codigouni=i.unidadenep
+       LEFT JOIN LATERAL (SELECT f0.nomefor FROM gerais.fornecedores f0
+      WHERE f0.codigofor=n.fornecedornfe AND (f0.empresafor=n.empresanfe OR (SELECT count(*) FROM gerais.fornecedores fx WHERE fx.codigofor=n.fornecedornfe)=1)
+      ORDER BY (f0.empresafor=n.empresanfe) DESC LIMIT 1) f ON true
+       LEFT JOIN LATERAL (SELECT u0.abreviaturauni FROM estoque.unidades u0
+      WHERE u0.codigouni=i.unidadenep AND (u0.empresauni=i.empresanep OR (SELECT count(*) FROM estoque.unidades ux WHERE ux.codigouni=i.unidadenep)=1)
+      ORDER BY (u0.empresauni=i.empresanep) DESC LIMIT 1) u ON true
        WHERE i.empresanep::text=$1 AND i.produtonep::text=$2
          AND ($3::date IS NULL OR COALESCE(n.dataentradanfe,n.dataemissaonfe)::date <= $3::date)
          AND ($4::date IS NULL OR COALESCE(n.dataentradanfe,n.dataemissaonfe)::date >= $4::date)

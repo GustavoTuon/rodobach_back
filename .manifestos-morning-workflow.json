@@ -1,0 +1,11 @@
+{
+  "id": "DjcKalK7A5dXGL8L",
+  "name": "Rodobach - Manifestos em aberto - segunda a sexta 16h",
+  "recipient": "5548999503759",
+  "cron": "0 16 * * 1-5",
+  "timezone": "America/Sao_Paulo",
+  "recipients": [
+    "5548999503759",
+    "5548996466096"
+  ]
+}

@@ -1,5 +1,38 @@
 # Rodobach Backend
 
+## Resumo de manifestos no n8n
+
+O workflow de manifestos em aberto usa `America/Sao_Paulo`, segunda a sexta às
+16h (`0 16 * * 1-5`), e os dois destinatários configurados em
+`scripts/manifestos-message-code.js`. O resumo mantém número, placa e data de
+autorização, não envia listas vazias e evita repetir o envio no mesmo dia.
+`node scripts/update-manifestos-schedule.mjs` apenas consulta e mostra a prévia;
+`--apply` atualiza e publica o workflow existente. Chaves do n8n e do WhatsApp
+continuam em variáveis de ambiente. O script de criação recusa duplicar um
+workflow de manifestos já existente.
+
+## Volumes e itinerário de conferência
+
+A migração `071_carga_volumes.sql` adiciona volumes inteiros opcionais à carga e
+às paradas. `NULL` representa quantidade não informada, diferente de zero.
+A soma das entregas adicionais e a soma das coletas adicionais não podem exceder,
+cada uma, o total da carga. A entrega e a coleta principais recebem seus respectivos
+saldos no itinerário; se faltar uma quantidade, o saldo fica a distribuir.
+O itinerário permite ordenar paradas para a impressão e apresenta apenas dados
+operacionais, com campos manuais para contagem e assinaturas. A ordem escolhida
+vale para a impressão atual; não modifica a programação da viagem.
+
+## Documento ERP da viagem
+
+A migração `070_viagem_documento_erp.sql` adiciona a referência do documento da
+impressão em `viagens_v2.documento_erp`. Frota consulta `logistica.controleviagens`;
+terceiros consultam `logistica.cartasfretes`. A pesquisa restringe pela placa da
+viagem e aceita número e data opcionais, com paginação. Ao salvar, o servidor
+confere novamente tipo, empresa, série, número e placa no ERP. O mesmo documento
+pode ser usado em várias viagens locais. Alterar a placa ou o tipo de propriedade
+limpa o vínculo. Nenhum documento do ERP é criado ou alterado por essa operação.
+As cargas recebem a referência da viagem vinculada para impressão.
+
 ## Histórico de cargas e desempenho da tela
 
 A migração `069_quitacao_historico_cargas.sql` encerra somente cargas com

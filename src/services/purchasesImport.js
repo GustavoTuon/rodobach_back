@@ -74,7 +74,7 @@ export async function importErpQuotes(actor = "importacao-erp") {
         if (!products.has(key))
           products.set(key, {
             id: `erp-${key}`,
-            empresa: r.produto_empresa || String(g.empresa),
+            empresa: String(g.empresa),
             codigo: key,
             nome: r.produto || `Produto ${key}`,
             quantidade:

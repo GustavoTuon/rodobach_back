@@ -1,0 +1,31 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import express from "express";
+import request from "supertest";
+import {purchaseTrend} from "../src/services/purchasesTrend.js";
+import {comprasRouter} from "../src/routes/compras.js";
+import {pool} from "../src/db/pool.js";
+import {clientPool} from "../src/db/clientPool.js";
+import {requireRoutePermission} from "../src/middleware/permissions.js";
+const id="55926d25-6e7d-4c22-a36d-747c0402c18a";
+const appFor=user=>{const app=express();app.use((req,_res,next)=>{req.user=user;next();});app.use(requireRoutePermission);app.use(comprasRouter);app.use((err,_req,res,_next)=>res.status(err.status || 500).json({error:err.message}));return app;};
+test("tendência preserva unidade, empresa, meses vazios e valores numéricos",async()=>{
+ let params,sql;
+ const result=await purchaseTrend({empresa:"2",codigo:"1864",unidade:"UN"},"2026-10-01T12:00:00Z",{query:async(s,p)=>{sql=s;params=p;return {rows:[{month:"2026-09",minimum:"6.48",maximum:"9.5",purchase:null,offers:2}]};}});
+ assert.deepEqual(params,["2","1864","2026-10-01T12:00:00Z","UN"]);
+ assert.deepEqual(result,[{month:"2026-09",minimum:6.48,maximum:9.5,purchase:null,offers:2}]);
+ assert.match(sql,/i\.empresanep::text=\$1/);assert.match(sql,/c\.empresacot::text = \$1/);
+ assert.match(sql,/upper\(trim\(u\.abreviaturauni\)\)=upper\(trim\(\$4\)\)/);
+ assert.match(sql,/c\.reprovadacot IS NOT TRUE/);assert.match(sql,/generate_series/);
+});
+test("rota deriva produto e data do registro e bloqueia produto estranho",async t=>{
+ const cutoff="2026-10-01T12:00:00Z";
+ t.mock.method(pool,"query",async()=>({rows:[{criado_em:cutoff,itens:[{id:"p",empresa:"2",codigo:"1864",unidade:"UN"}]}]}));
+ let params;
+ t.mock.method(clientPool,"query",async(_sql,p)=>{params=p;return {rows:[]};});
+ const app=appFor({id:1,permissions:{compras:true}});
+ const response=await request(app).get(`/compras/cotacoes/${id}/tendencia?produtoId=p&empresa=9&ate=2099-01-01`);
+ assert.equal(response.status,200);assert.deepEqual(params,["2","1864",cutoff,"UN"]);
+ assert.equal((await request(app).get(`/compras/cotacoes/${id}/tendencia?produtoId=outro`)).status,400);
+ assert.equal((await request(appFor({id:2,permissions:{}})).get(`/compras/cotacoes/${id}/tendencia?produtoId=p`)).status,403);
+});

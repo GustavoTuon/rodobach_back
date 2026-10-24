@@ -115,6 +115,29 @@ test('real SQL: document before trip, trip edit, removal, conflict and rollback'
     assert.equal(edited.status,200,JSON.stringify(edited.body));
     assert.equal(edited.body.cargas[0].status,'entregue');
     assert.equal(edited.body.situacao,'entregue');
+    // ERP links persist through reads and ordinary edits, but not vehicle changes.
+    const erpDoc={tipo:'viagem_frota',numero:'987',empresa:'2',serie:'',placa:'QA00000'};
+    await db.query("UPDATE pg_temp.viagens_v2 SET tipo_propriedade='FROTA',documento_erp=$2::jsonb WHERE id=$1",[trip.body.id,JSON.stringify(erpDoc)]);
+    assert.deepEqual((await request(app).get(tripUrl)).body.documentoErp,erpDoc);
+    assert.deepEqual((await request(app).get(`/cargas-viagens-v2/cargas/${id}`)).body.documentoErp,erpDoc);
+    const preserveDoc=await request(app).put(tripUrl).send({placa:'QA00000',tipoPropriedade:'FROTA',cargaIds:[id]});
+    assert.equal(preserveDoc.status,200,JSON.stringify(preserveDoc.body));
+    assert.deepEqual(preserveDoc.body.documentoErp,erpDoc);
+    const changePlate=await request(app).put(tripUrl).send({placa:'QB00000',tipoPropriedade:'FROTA',cargaIds:[id]});
+    assert.equal(changePlate.status,200,JSON.stringify(changePlate.body));
+    assert.equal(changePlate.body.documentoErp,null);
+    assert.equal((await request(app).get(`/cargas-viagens-v2/cargas/${id}`)).body.documentoErp,null);
+    const volumePayload={cliente:'Volumes QA',volumes:23,paradas:[{tipo:'entrega',cidade:'Entrega intermediária',volumes:10}]};
+    const withVolumes=await request(app).put(`/cargas-viagens-v2/cargas/${id}`).send(volumePayload);
+    assert.equal(withVolumes.status,200,JSON.stringify(withVolumes.body));
+    assert.equal(withVolumes.body.volumes,23);
+    assert.equal(withVolumes.body.paradas[0].volumes,10);
+    assert.equal((await request(app).get(tripUrl)).body.cargas[0].volumes,23);
+    // Invalid distribution rolls back both the load and its stops.
+    const invalidVolumes=await request(app).put(`/cargas-viagens-v2/cargas/${id}`).send({...volumePayload,volumes:5});
+    assert.ok(invalidVolumes.status>=400);
+    const afterInvalid=(await request(app).get(`/cargas-viagens-v2/cargas/${id}`)).body;
+    assert.equal(afterInvalid.volumes,23);assert.equal(afterInvalid.paradas[0].volumes,10);
     await request(app).put('/cargas-viagens-v2/cargas/99999/documentos').send({documentos:[]}).expect(404);
     assert.equal((await db.query('SELECT COUNT(*)::int AS total FROM pg_temp.carga_documentos_v2')).rows[0].total,2);
     await request(app).delete(tripUrl).expect(204);

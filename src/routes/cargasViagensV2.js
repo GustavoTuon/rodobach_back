@@ -1,4 +1,6 @@
 import { createAsyncCache } from "../services/asyncCache.js";
+import { parseVolumes, validateCargaVolumes } from "../services/cargaVolumes.js";
+import { searchTripDocuments, documentType } from "../services/viagemDocumentoErp.js";
 import { resolveCargaDocumento, deliveredCargaIds, cargaDocumentosDelivery } from "../services/cargaDocumentosIdentity.js";
 import { Router } from "express";
 import { pool } from "../db/pool.js";
@@ -131,6 +133,7 @@ function mapParada(row) {
     id: Number(row.id),
     ordem: Number(row.ordem || 0),
     tipo: row.tipo_parada || "entrega",
+    volumes: row.volumes == null ? null : Number(row.volumes),
     cidade: row.cidade || "",
     uf: row.uf || "",
     cliente: row.cliente || "",
@@ -159,6 +162,7 @@ function mapCarga(row) {
     ufDestino: row.uf_destino || "",
     material: row.material || "",
     peso: Number(row.peso_kg || 0),
+    volumes: row.volumes == null ? null : Number(row.volumes),
     valorCliente: Number(row.valor_cliente || 0),
     valorTon: Number(row.peso_kg || 0) > 0
       ? Number(row.valor_cliente || 0) / (Number(row.peso_kg) / 1000)
@@ -177,6 +181,7 @@ function mapCarga(row) {
     aprovadoEm: row.aprovado_em || null,
     viagemId: row.viagem_id ? Number(row.viagem_id) : null,
     numeroViagem: row.numero_viagem || "",
+    documentoErp: row.documento_erp || null,
     placa: row.placa_veiculo || "",
     motorista: row.motorista || "",
     documentos: documentos.map(mapDocumento),
@@ -197,6 +202,7 @@ function mapViagem(row) {
     data: isoDate(row.data),
     placa: row.placa_veiculo || "",
     tipoPropriedade: row.tipo_propriedade || "",
+    documentoErp: row.documento_erp || null,
     motorista: row.motorista || "",
     km: row.km_viagem === null ? null : Number(row.km_viagem),
     numeroMotorista: row.numero_motorista || "",
@@ -230,6 +236,7 @@ function mapViagem(row) {
       destino: carga.destino || "",
       ufDestino: carga.ufDestino || "",
       peso: Number(carga.peso || 0),
+      volumes: carga.volumes == null ? null : Number(carga.volumes),
       valorCliente: Number(carga.valorCliente || 0),
       status: carga.status || "",
       documentos: Array.isArray(carga.documentos) ? carga.documentos : [],
@@ -255,7 +262,7 @@ async function savePricingFields(client, cargaId, input = {}) {
 }
 
 const cargaSelect = () => `
-  SELECT c.*, v.id AS viagem_id, v.numero_viagem, v.placa_veiculo, v.motorista,
+  SELECT c.*, v.id AS viagem_id, v.numero_viagem, v.placa_veiculo, v.motorista, v.documento_erp,
     COALESCE((
       SELECT JSONB_AGG(TO_JSONB(r) ORDER BY r.ordem, r.id)
        FROM ${ROTAS()} r WHERE r.carga_id = c.id
@@ -278,7 +285,7 @@ const viagemSelect = () => `
         'clienteFinal', c.cliente_final, 'tomadorServico', c.tomador_servico,
         'origem', c.cidade_origem, 'ufOrigem', c.uf_origem,
         'destino', c.cidade_destino, 'ufDestino', c.uf_destino,
-         'peso', c.peso_kg, 'valorCliente', c.valor_cliente, 'status', c.status,
+         'peso', c.peso_kg, 'volumes', c.volumes, 'valorCliente', c.valor_cliente, 'status', c.status,
         'documentos', COALESCE((
           SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
             'id', d.id, 'tipo', d.tipo_documento, 'numero', d.numero_documento,
@@ -486,11 +493,11 @@ async function replaceRotas(client, cargaId, paradas = []) {
   await client.query(`DELETE FROM ${ROTAS()} WHERE carga_id=$1`, [cargaId]);
   for (const [index, parada] of (Array.isArray(paradas) ? paradas : []).entries()) {
     await client.query(
-      `INSERT INTO ${ROTAS()} (carga_id,ordem,tipo_parada,cidade,uf,cliente,endereco,numero_nota_fiscal,observacoes)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      `INSERT INTO ${ROTAS()} (carga_id,ordem,tipo_parada,cidade,uf,cliente,endereco,numero_nota_fiscal,observacoes,volumes)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [cargaId, number(parada.ordem, index + 1), text(parada.tipo, "entrega"), text(parada.cidade),
         text(parada.uf, "").slice(0, 2).toUpperCase(), text(parada.cliente), text(parada.endereco),
-        text(parada.nf || parada.numeroNotaFiscal), text(parada.observacoes || parada.obs)],
+        text(parada.nf || parada.numeroNotaFiscal), text(parada.observacoes || parada.obs),parseVolumes(parada.volumes)],
     );
   }
 }
@@ -790,6 +797,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
         user.id, user.login],
     );
     const id = rows[0].id;
+    await client.query(`UPDATE ${CARGAS()} SET volumes=$2 WHERE id=$1`,[id,validateCargaVolumes(input)]);
     await client.query(`UPDATE ${CARGAS()} SET codigo_carga='C-'||LPAD(id::text,6,'0') WHERE id=$1`, [id]);
     await savePricingFields(client, id, input);
     await replaceRotas(client, id, input.paradas);
@@ -817,6 +825,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
         text(input.condicaoPagamento), text(input.observacoes), user.id, user.login],
     );
     if (!rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Carga nao encontrada." }); }
+    await client.query(`UPDATE ${CARGAS()} SET volumes=$2 WHERE id=$1`,[req.params.id,validateCargaVolumes(input)]);
     await savePricingFields(client, req.params.id, input);
     await replaceRotas(client, req.params.id, input.paradas);
     await client.query("COMMIT");
@@ -912,6 +921,40 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
     const items = await enrichViagensFinancial(rows.map(mapViagem), req.log);
     res.json({ items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
   } catch (error) { next(error); }
+});
+
+cargasViagensV2Router.get("/cargas-viagens-v2/viagens/:id/documentos-erp", async (req, res, next) => {
+  try {
+    const {rows} = await pool.query(`SELECT placa_veiculo,tipo_propriedade FROM ${VIAGENS()} WHERE id=$1`,[req.params.id]);
+    if (!rows.length) return res.status(404).json({error:'Viagem não encontrada.'});
+    res.json(await searchTripDocuments(rows[0],req.query));
+  } catch(error) { next(error); }
+});
+
+cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id/documento-erp", async (req, res, next) => {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const {rows} = await client.query(`SELECT placa_veiculo,tipo_propriedade FROM ${VIAGENS()} WHERE id=$1 FOR UPDATE`,[req.params.id]);
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({error:'Viagem não encontrada.'}); }
+    const input = req.body?.documento;
+    let documento = null;
+    if (input !== null) {
+      if (!input?.numero || !input?.empresa || input.tipo !== documentType(rows[0].tipo_propriedade)
+        || (input.tipo === 'carta_frete' && typeof input.serie !== 'string')) {
+        await client.query('ROLLBACK'); return res.status(400).json({error:'Selecione um documento válido da consulta.'});
+      }
+      const result = await searchTripDocuments(rows[0],{numero:input.numero,empresa:input.empresa,serie:input.serie});
+      documento = result.items[0];
+      if (!documento) { await client.query('ROLLBACK'); return res.status(409).json({error:'Documento não disponível para esta placa. Pesquise novamente.'}); }
+    }
+    const user = auditUser(req.user);
+    await client.query(`UPDATE ${VIAGENS()} SET documento_erp=$2::jsonb,atualizado_por_id=$3,atualizado_por_login=$4,atualizado_em=NOW() WHERE id=$1`,[req.params.id,documento ? JSON.stringify(documento) : null,user.id,user.login]);
+    await client.query('COMMIT');
+    res.json({documentoErp:documento});
+  } catch(error) { if (client) await client.query('ROLLBACK'); next(error); }
+  finally { client?.release(); }
 });
 
 cargasViagensV2Router.get("/cargas-viagens-v2/viagens/:id", async (req, res, next) => {
@@ -1020,7 +1063,10 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     const previousIds = previous.rows.map((row) => Number(row.carga_id));
     const removedIds = previousIds.filter((id) => !cargaIds.includes(id));
     await client.query(
-      `UPDATE ${VIAGENS()} SET data=$2,placa_veiculo=$3,tipo_propriedade=$4,motorista=$5,
+      `UPDATE ${VIAGENS()} SET documento_erp=CASE WHEN
+       REGEXP_REPLACE(UPPER(COALESCE(placa_veiculo,'')),'[^A-Z0-9]','','g') IS DISTINCT FROM REGEXP_REPLACE(UPPER(COALESCE($3,'')),'[^A-Z0-9]','','g')
+       OR tipo_propriedade IS DISTINCT FROM $4 THEN NULL ELSE documento_erp END,
+       data=$2,placa_veiculo=$3,tipo_propriedade=$4,motorista=$5,
        km_viagem=$6,numero_motorista=$7,cnh_motorista=$8,antt_veiculo=$9,conta_deposito=$10,chave_pix=$11,
        valor_motorista=$12,doc_placas=$13,doc_antt=$14,doc_conta_deposito=$15,doc_chave_pix=$16,
        doc_cnh_motorista=$17,doc_consulta_motorista=$18,doc_comprovante_residencia=$19,doc_numero_motorista=$20,

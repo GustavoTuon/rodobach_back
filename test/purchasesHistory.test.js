@@ -60,7 +60,8 @@ test("referência histórica usa a abertura persistida, não uma data fornecida 
     rows: [
       {
         criado_em: "2026-07-15T15:00:00Z",
-        itens: [{ id: "p", empresa: "2", codigo: "669" }],
+        origem_dados: {empresa:2},
+        itens: [{ id: "p", empresa: "1", codigo: "669" }],
       },
     ],
   }));
@@ -75,8 +76,17 @@ test("referência histórica usa a abertura persistida, não uma data fornecida 
   );
   assert.equal(response.status, 200);
   assert.equal(params[1], "2026-07-15T15:00:00Z");
+  assert.equal(JSON.parse(params[0])[0].empresa, "2");
   assert.match(sql, /America\/Sao_Paulo/);
   assert.match(sql, /LIMIT 3/);
+  assert.match(sql, /i\.totalitemnep total_nota/);
+  assert.match(sql, /i\.valorunitarionep valor_unitario/);
+  assert.match(sql, /count\(\*\) FROM estoque\.unidades ux WHERE ux\.codigouni=i\.unidadenep\)=1/);
+  assert.match(sql, /count\(\*\) FROM gerais\.fornecedores fx WHERE fx\.codigofor=n\.fornecedornfe\)=1/);
+  const before = Date.now();
+  const current = await request(app).get(`/compras/cotacoes/${id}/historico?referencia=atual&ate=2099-01-01`);
+  assert.equal(current.status, 200);
+  assert.ok(Date.parse(params[1]) >= before && Date.parse(params[1]) <= Date.now());
 });
 test("escolha com quantidade maior é bloqueada no servidor até confirmação", async (t) => {
   const product = { id, quantidade: 10 };
