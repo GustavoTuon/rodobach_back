@@ -19,7 +19,7 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
   const makeApp = user => {
     const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user=user;next();});
     app.use(requireRoutePermission);app.use(enforceReadOnly);app.use(manutencaoPlantaoRouter);
-    app.use((error,_req,res,_next)=>res.status(500).json({error:error.message}));return app;
+    app.use((error,_req,res,_next)=>res.status(error.statusCode || 500).json({error:error.message}));return app;
   };
   const driverApp=makeApp(driver), reviewerApp=makeApp(reviewer);
   const body={plate:'ABC1234',amount:200,service:'Borracharia',supplier:'Oficina Teste',expenseDate:'2026-09-30',document:'NF-123',receiptReason:'Fornecedor nao emitiu comprovante.'};
@@ -42,12 +42,20 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
       await client.query(await fs.readFile(new URL('../sql/058_plantao_arla.sql',import.meta.url),'utf8'));
       await client.query(await fs.readFile(new URL('../sql/060_plantao_dados_nota_telemetria.sql',import.meta.url),'utf8'));
       await client.query(await fs.readFile(new URL('../sql/061_plantao_fluxo_conferencia.sql',import.meta.url),'utf8'));
+      await client.query(await fs.readFile(new URL('../sql/072_plantao_forma_pagamento.sql',import.meta.url),'utf8'));
+      await client.query(await fs.readFile(new URL('../sql/073_plantao_descarga.sql',import.meta.url),'utf8'));
       assert.equal((await client.query('SELECT data_despesa::text AS dia FROM manutencao_plantao')).rows[0].dia,'2026-09-30');
       await client.query('COMMIT');
     } catch(error) {await client.query('ROLLBACK');throw error;} finally {client.release();}
     config.db.schema=schema;
     t.mock.method(getVeiculosPool(),'query',async sql=>({rows:sql.includes('SELECT m.municipio') ? [{municipio:'Criciúma',uf:'SC',rodovia:'BR-101',rua:null,data_hora:new Date().toISOString()}] : sql.includes('mensagens_cb') ? [{placa:'ABC1234',odometro:197611.7,data_hora:new Date().toISOString()}] : [{placa:'ABC1234'},{placa:'DEF4G56'}]}));
-    t.mock.method(clientPool,'query',async()=>({rows:[]}));
+    t.mock.method(clientPool,'query',async(sql,values)=>{
+      if(sql.includes('FROM logistica.controleviagens') && !sql.includes('logistica.conhecimentos')) return {rows:values[0]==='ABC1234' && (values.length===2 || values[1]==='1' && values[2]==='880') ? [{company:'1',number:'880',plate:'ABC1234',departure:'2026-09-30'}] : []};
+      if(sql.includes('FROM logistica.conhecimentos')) return {rows:[{company:'2',series:'1',code:'4736',number:'4736',customerCode:'1994',customerName:'Cliente ERP'},{company:'2',series:'1',code:'4737',number:'4737',customerName:'Cliente B'}]};
+      return {rows:sql.includes('financeiro.formaspagamento') && (!values || values[0] === '1' && values[1] === '1') ? [{code:'1',company:'1',name:'DEPÓSITO - INTER'}] : []};
+    });
+    assert.equal((await request(reviewerApp).get('/manutencao-plantao/formas-pagamento')).status,200);
+    assert.equal((await request(driverApp).get('/manutencao-plantao/formas-pagamento')).status,403);
     const km=await request(driverApp).get('/manutencao-plantao/placas/ABC1234/hodometro?date=2026-09-30&time=10%3A30');
     assert.equal(km.status,200);assert.equal(km.body.odometer,197611.7);assert.equal(km.body.source,'telemetria');
     assert.equal((await request(reviewerApp).get('/manutencao-plantao/placas/ABC1234/hodometro?date=2026-09-30&time=10%3A30')).status,200);
@@ -81,7 +89,10 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     assert.equal(response.status,200);assert.equal(response.body.record.checkedBy,'financeiro');
     assert.equal((await request(driverApp).put(`${path}/${id}`).send({...body,version:3})).status,409);
     assert.equal((await request(driverApp).delete(`${path}/${id}`).send({version:3,reason:'duplicado'})).status,409);
-    response=await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${id}/controle`).send({version:3,paymentDate:"2026-09-30",posted:false});
+    assert.equal((await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${id}/controle`).send({version:3,paymentDate:"2026-09-30"})).status,400);
+    assert.equal((await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${id}/controle`).send({version:3,paymentDate:"2026-09-30",paymentMethod:{code:'999',company:'1'}})).status,400);
+    response=await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${id}/controle`).send({version:3,paymentDate:"2026-09-30",posted:false,paymentMethod:{code:'1',company:'1'}});
+    assert.equal(response.body.record.paymentMethod.name,'DEPÓSITO - INTER');
     assert.equal(response.status,200);assert.equal(response.body.record.paid,true);assert.equal(response.body.record.paymentDate,"2026-09-30");assert.equal(response.body.record.posted,false);assert.equal(response.body.record.checked,true);
     assert.equal((await request(driverApp).patch(`${path}/${id}/controle`).send({version:3,posted:true})).status,403);
     assert.equal((await request(makeApp({...driver,id:99})).patch(`${path}/${id}/controle`).send({version:4,posted:true})).status,403);
@@ -94,6 +105,7 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     assert.equal(response.body.record.paymentDate,"2026-09-30");assert.equal(response.body.record.paid,true);
     response=await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${id}/controle`).send({version:5,paymentDate:null});
     assert.equal(response.status,200);assert.equal(response.body.record.paid,false);assert.equal(response.body.record.paymentDate,null);assert.equal(response.body.record.posted,true);
+    assert.equal(response.body.record.paymentMethod,null);
     response=await request(driverApp).post(path).send({...body,document:'NF-456',amount:100});
     assert.equal(response.status,201);const removed=response.body.record.id;
     assert.equal((await request(driverApp).delete(`${path}/${removed}`).send({version:1,reason:'Lançado por engano'})).status,200);
@@ -115,7 +127,7 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     response=await request(reviewerApp).put(`/manutencao-plantao/conferencia/${fuelId}`).send({...fuel,receipt:undefined,amount:1300,version:1});
     assert.equal(response.status,200);assert.equal(response.body.record.odometer,197611.7);assert.equal(response.body.record.authorProfile,'colaborador');assert.equal(response.body.record.hasReceipt,true);assert.equal(response.body.record.liters,200.5);
     assert.equal(getVeiculosPool().query.mock.calls.filter(call=>call.arguments[0].includes('SELECT m.odometro')).length,telemetryCallsBefore);
-    response=await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${fuelId}/controle`).send({version:2,paymentDate:'2026-09-30'});
+    response=await request(reviewerApp).patch(`/manutencao-plantao/conferencia/${fuelId}/controle`).send({version:2,paymentDate:'2026-09-30',paymentMethod:{code:'1',company:'1'}});
     assert.equal(response.status,200);assert.equal(response.body.record.paid,true);assert.equal(response.body.record.checked,false);
     assert.equal((await request(driverApp).get(`${path}/${fuelId}/historico`)).body.history[0].depois.comprovante_foto,true);
     response=await request(driverApp).get(path);assert.ok(response.body.records.some(r=>r.id===fuelId));assert.ok(!response.body.records.some(r=>r.receipt));
@@ -134,6 +146,29 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     assert.equal((await request(driverApp).post(path).send({...fuel,document:'ARLA-INCOMPLETO',arlaLiters:20})).status,400);
     assert.equal((await request(driverApp).post(path).send({...fuel,document:'ARLA-SOMA',fuelAmount:1100,arlaLiters:20,arlaAmount:200})).status,400);
     assert.equal((await request(driverApp).post(path).send({...fuel,document:"VALOR-INVALIDO",amount:1234,fuelAmount:2000})).status,400);
+    const unloading={trip:{company:'1',number:'880'},cte:{company:'2',series:'1',code:'4736'},reimbursement:false};
+    const discharge={...body,source:'motorista',service:'Descarga',document:'',note:'Chapa e movimentação',amount:150,unloading};
+    assert.equal((await request(driverApp).get('/manutencao-plantao/placas/ABC1234/descarga-viagens')).body.trips[0].number,'880');
+    assert.equal((await request(reviewerApp).get('/manutencao-plantao/placas/ABC1234/descarga-viagens?company=1&number=880')).body.ctes.length,2);
+    assert.equal((await request(driverApp).post(path).send({...discharge,unloading:undefined})).status,400);
+    assert.equal((await request(driverApp).post(path).send({...discharge,unloading:{...unloading,reimbursement:undefined}})).status,400);
+    assert.equal((await request(driverApp).post(path).send({...discharge,plate:'DEF4G56'})).status,400);
+    assert.equal((await request(driverApp).post(path).send({...discharge,unloading:{...unloading,cte:{...unloading.cte,code:'999'}}})).status,400);
+    response=await request(driverApp).post(path).send(discharge);
+    assert.equal(response.status,201,JSON.stringify(response.body));
+    const unloadingId=response.body.record.id;
+    assert.equal(response.body.record.unloading.cte.customerName,'Cliente ERP');
+    assert.equal(response.body.record.unloading.reimbursement,false);
+    assert.equal((await request(driverApp).post(path).send(discharge)).status,409);
+    // Same amount on another CT-e is a separate cost, not a duplicate.
+    assert.equal((await request(driverApp).post(path).send({...discharge,unloading:{...unloading,cte:{...unloading.cte,code:'4737'}}})).status,201);
+    response=await request(reviewerApp).put(`/manutencao-plantao/conferencia/${unloadingId}`).send({...discharge,version:1,unloading:{...unloading,reimbursement:true}});
+    assert.equal(response.status,200);assert.equal(response.body.record.unloading.reimbursement,true);
+    response=await request(driverApp).get(`${path}/${unloadingId}/historico`);
+    assert.equal(response.body.history[0].antes.descarga.reimbursement,false);
+    assert.equal(response.body.history[0].depois.descarga.reimbursement,true);
+    response=await request(driverApp).put(`${path}/${unloadingId}`).send({...discharge,version:2,service:'Outros',unloading:null});
+    assert.equal(response.status,200);assert.equal(response.body.record.unloading,null);
   } finally {
     config.db.schema=original;
     await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);
