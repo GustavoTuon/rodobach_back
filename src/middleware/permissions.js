@@ -8,6 +8,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/frota\/multas(?:\/|$)/, "multas-frota"],
   [/^\/manutencao\/componentes-posicao(?:\/|$)/, ["manutencao-posicoes", "manutencao"]],
   [/^\/manutencao(?:\/|$)/, "manutencao"],
+  [/^\/manutencao-plantao\/formas-pagamento(?:\/|$)/, "conferencia-manutencao"],
   [/^\/manutencao-plantao\/conferencia(?:\/|$)/, "conferencia-manutencao"],
   [/^\/manutencao-plantao\/placas(?:\/|$)/, ["manutencao-plantao", "conferencia-manutencao"]],
   [/^\/manutencao-plantao(?:\/|$)/, "manutencao-plantao"],
