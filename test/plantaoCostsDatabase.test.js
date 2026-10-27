@@ -22,7 +22,7 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     app.use((error,_req,res,_next)=>res.status(error.statusCode || 500).json({error:error.message}));return app;
   };
   const driverApp=makeApp(driver), reviewerApp=makeApp(reviewer);
-  const body={plate:'ABC1234',amount:200,service:'Borracharia',supplier:'Oficina Teste',expenseDate:'2026-09-30',document:'NF-123',receiptReason:'Fornecedor nao emitiu comprovante.'};
+  const body={plate:'ABC1234',amount:200,service:'Borracharia',supplier:'Oficina Teste',expenseDate:'2026-09-30',document:'NF-123',documentType:'nf_produto',receiptReason:'Fornecedor nao emitiu comprovante.'};
   const path='/manutencao-plantao/lancamentos';
   try {
     await pool.query(`CREATE SCHEMA ${quoteIdent(schema)}`);
@@ -44,6 +44,7 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
       await client.query(await fs.readFile(new URL('../sql/061_plantao_fluxo_conferencia.sql',import.meta.url),'utf8'));
       await client.query(await fs.readFile(new URL('../sql/072_plantao_forma_pagamento.sql',import.meta.url),'utf8'));
       await client.query(await fs.readFile(new URL('../sql/073_plantao_descarga.sql',import.meta.url),'utf8'));
+      await client.query(await fs.readFile(new URL('../sql/074_plantao_documento_pneu_viagem.sql',import.meta.url),'utf8'));
       assert.equal((await client.query('SELECT data_despesa::text AS dia FROM manutencao_plantao')).rows[0].dia,'2026-09-30');
       await client.query('COMMIT');
     } catch(error) {await client.query('ROLLBACK');throw error;} finally {client.release();}
@@ -169,6 +170,25 @@ test('controle de custos: concorrência, autoria, edição, exclusão, auditoria
     assert.equal(response.body.history[0].depois.descarga.reimbursement,true);
     response=await request(driverApp).put(`${path}/${unloadingId}`).send({...discharge,version:2,service:'Outros',unloading:null});
     assert.equal(response.status,200);assert.equal(response.body.record.unloading,null);
+    // Persist the new fields through the real database, then edit and unlink.
+    const linkedExpense={...body,amount:321,document:'NFS-TESTE',documentType:'nf_servico',tireFireNumber:'PNEU-001',trip:{company:'1',number:'880'}};
+    assert.equal((await request(driverApp).post(path).send({...linkedExpense,supplier:' '})).status,400);
+    assert.equal((await request(driverApp).post(path).send({...linkedExpense,document:''})).status,400);
+    assert.equal((await request(driverApp).post(path).send({...linkedExpense,plate:'DEF4G56'})).status,400);
+    response=await request(driverApp).post(path).send(linkedExpense);
+    assert.equal(response.status,201,JSON.stringify(response.body));
+    const linkedId=response.body.record.id;
+    assert.equal(response.body.record.documentType,'nf_servico');
+    assert.equal(response.body.record.tireFireNumber,'PNEU-001');
+    assert.equal(response.body.record.trip.number,'880');
+    const listed=(await request(reviewerApp).get('/manutencao-plantao/conferencia')).body.records.find(r=>r.id===linkedId);
+    assert.equal(listed.tireFireNumber,'PNEU-001');assert.equal(listed.trip.company,'1');
+    response=await request(reviewerApp).put(`/manutencao-plantao/conferencia/${linkedId}`).send({...linkedExpense,version:1,tireFireNumber:'PNEU-002',trip:null});
+    assert.equal(response.status,200,JSON.stringify(response.body));
+    assert.equal(response.body.record.trip,null);assert.equal(response.body.record.tireFireNumber,'PNEU-002');
+    const history=(await request(driverApp).get(`${path}/${linkedId}/historico`)).body.history;
+    assert.equal(history[0].antes.viagem_despesa.number,'880');
+    assert.equal(history[0].depois.viagem_despesa,null);assert.equal(history[0].depois.numero_fogo,'PNEU-002');
   } finally {
     config.db.schema=original;
     await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);

@@ -15,7 +15,7 @@ import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services
 export const manutencaoPlantaoRouter = express.Router();
 const TABLE = () => tableName("manutencao_plantao");
 const LIST_COLUMNS = `id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,
-  usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,
+  usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,
   hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
 const canRegister = requirePermission("manutencao-plantao");
 const canReview = (req, res, next) => isExpenseDriver(req.user)
@@ -24,6 +24,9 @@ const canReview = (req, res, next) => isExpenseDriver(req.user)
 const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao"]);
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
+  documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
+  tireFireNumber: z.string().trim().max(80).optional(),
+  trip: z.object({company:z.string().regex(/^\d{1,9}$/),number:z.string().regex(/^\d{1,9}$/)}).strict().nullable().optional(),
   unloading: z.object({
     trip:z.object({company:z.string().regex(/^\d{1,9}$/),number:z.string().regex(/^\d{1,9}$/)}).strict(),
     cte:z.object({company:z.string().regex(/^\d{1,9}$/),series:z.string().min(1).max(20),code:z.string().regex(/^\d{1,12}$/)}).strict(),
@@ -55,7 +58,7 @@ const schema = z.object({
   supplierCompany: z.union([z.string().max(30), z.number()]).nullable().optional(),
 }).strict();
 function record(row) {
-  return {expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
+  return {documentType:row.tipo_documento || null,tireFireNumber:row.numero_fogo || "",trip:row.viagem_despesa || null,expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
     arlaLiters: row.arla_litros == null ? null : Number(row.arla_litros),
     arlaAmount: row.arla_valor == null ? null : Number(row.arla_valor),
     fuelAmount: row.valor_combustivel == null ? null : Number(row.valor_combustivel),
@@ -119,7 +122,7 @@ manutencaoPlantaoRouter.get('/manutencao-plantao/placas/:plate/descarga-viagens'
     if ((number && !/^\d{1,9}$/.test(number)) || (company && (!/^\d{1,9}$/.test(company) || !number))) return res.status(400).json({error:'Viagem inválida.'});
     if (company) {
       const trip=await unloadingTrip(plate,company,number);
-      return res.set('Cache-Control','no-store').json({trip,ctes:await unloadingCtes(company,number)});
+      return res.set('Cache-Control','no-store').json({trip,ctes:req.query.tripOnly === 'true' ? [] : await unloadingCtes(company,number)});
     }
     res.set('Cache-Control','no-store').json({trips:await unloadingTrips(plate,number)});
   } catch(error) {next(error);}
@@ -183,6 +186,7 @@ async function mutate(req, res, next, action) {
   let client;
   let telemetry = null;
   let unloading = null;
+  let expenseTrip = null;
   try {
     const body = req.body;
     if (!canManage(req) && (action === "status" || body.paid !== undefined || body.posted !== undefined || body.paymentDate !== undefined)) {
@@ -200,6 +204,7 @@ async function mutate(req, res, next, action) {
         if (!body.note.trim()) return res.status(400).json({error:'Descreva os custos da descarga, como chapa e outros serviços.'});
         unloading=await resolveUnloading(body.plate,body.unloading);
       } else if (body.unloading) return res.status(400).json({error:'Vínculo de descarga só pode ser usado no tipo Descarga.'});
+      if (body.service !== 'Descarga' && body.trip) expenseTrip = await unloadingTrip(body.plate,body.trip.company,body.trip.number);
     }
     client = await pool.connect();
     await client.query("BEGIN");
@@ -216,6 +221,12 @@ async function mutate(req, res, next, action) {
     }
     let after;
     if (["create","edit"].includes(action)) {
+      if (!body.supplier.trim()) return await reject(400,"Informe o fornecedor, mesmo que não esteja cadastrado.");
+      const documentType = body.documentType ?? before?.tipo_documento;
+      if (!documentType) return await reject(400,"Selecione o tipo de documento fiscal ou informe que não há documento.");
+      if (documentType === 'nf_servico' && !body.document.trim()) return await reject(400,"Informe o número da nota fiscal de serviço.");
+      if (body.tireFireNumber && !['Borracharia','Manutenção'].includes(body.service)) return await reject(400,"O número de fogo só pode ser informado em borracharia ou manutenção.");
+      if (body.trip === undefined && before?.viagem_despesa && body.service !== 'Descarga') expenseTrip = await unloadingTrip(body.plate,before.viagem_despesa.company,before.viagem_despesa.number);
       const invoice = body.photos?.invoice !== undefined ? body.photos.invoice : body.receipt !== undefined ? body.receipt : before?.comprovante_foto;
       const receiptReason = body.receiptReason === undefined ? before?.justificativa_sem_nota || "" : body.receiptReason;
       if (!invoice && receiptReason.length < 10) return await reject(400,"Anexe a nota ou informe uma justificativa com pelo menos 10 caracteres.");
@@ -275,7 +286,8 @@ async function mutate(req, res, next, action) {
         before ? before.perfil_autor : req.user.expenseProfile === "motorista" ? "motorista" : "colaborador",
         invoice ? "" : receiptReason,
       ])).rows[0];
-      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb WHERE id=$1 RETURNING *`,[after.id,unloading ? JSON.stringify(unloading) : null])).rows[0];
+      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb WHERE id=$1 RETURNING *`,
+        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null])).rows[0];
     } else if (action === "status") {
       let method = record(before).paymentMethod;
       if (body.paymentDate) {
