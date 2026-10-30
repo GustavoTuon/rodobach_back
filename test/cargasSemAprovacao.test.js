@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
 import {pool} from '../src/db/pool.js';
+import {clientPool} from '../src/db/clientPool.js';
 import {cargasViagensV2Router} from '../src/routes/cargasViagensV2.js';
 
 function setup(t, status='reprovada', operationalStatus='aguardando_cte', linked=true) {
@@ -17,10 +18,12 @@ function setup(t, status='reprovada', operationalStatus='aguardando_cte', linked
   };
   t.mock.method(pool,'connect',async()=>({query,release(){}}));
   t.mock.method(pool,'query',query);
-  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:2,login:'operador',admin:false,permissions:{viagens:true}};next();});app.use(cargasViagensV2Router);app.use((error,_req,res,_next)=>res.status(500).json({error:error.message}));
+  t.mock.method(clientPool,'query',async()=>({rows:[{codigo:'1',empresa:'1',nome:'Responsável ERP'}]}));
+  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:2,login:'operador',admin:false,permissions:{viagens:true}};next();});app.use(cargasViagensV2Router);app.use((error,_req,res,_next)=>res.status(error.statusCode || 500).json({error:error.message}));
   return {app,calls};
 }
-const input={cliente:'Cliente',clienteFinal:'Entrega',tomadorServico:'Tomador',origem:'Origem',ufOrigem:'SC',destino:'Destino',ufDestino:'SP',valorCliente:500};
+const responsavel={codigo:'1',empresa:'1'};
+const input={responsavel,cliente:'Cliente',clienteFinal:'Entrega',tomadorServico:'Tomador',origem:'Origem',ufOrigem:'SC',destino:'Destino',ufDestino:'SP',valorCliente:500};
 
 test('desvincula o último CT-e sem excluir carga ou viagem e preserva a entrega', async t => {
  const {app,calls}=setup(t,'aprovada','entregue');
@@ -71,7 +74,7 @@ test('salva mais de um CT-e na mesma carga',async t=>{
 });
 test('cadastra carga sem informações comerciais e usa valores padrão',async t=>{
  const {app,calls}=setup(t);
- await request(app).post('/cargas-viagens-v2/cargas').send({}).expect(201);
+ await request(app).post('/cargas-viagens-v2/cargas').send({responsavel}).expect(201);
  const insert=calls.find(c=>c.sql.includes('INSERT INTO')&&c.sql.includes('status_aprovacao'));
  assert.equal(insert.params[1],'');
  assert.equal(insert.params[5],'');
@@ -81,7 +84,7 @@ test('cadastra carga sem informações comerciais e usa valores padrão',async t
 
 test('edita carga com campos comerciais vazios',async t=>{
  const {app,calls}=setup(t);
- await request(app).put('/cargas-viagens-v2/cargas/1').send({cliente:'Cliente conhecido'}).expect(200);
+ await request(app).put('/cargas-viagens-v2/cargas/1').send({responsavel,cliente:'Cliente conhecido'}).expect(200);
  assert.ok(calls.some(c=>c.sql==='COMMIT'));
 });
 

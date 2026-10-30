@@ -1,4 +1,5 @@
 import { createAsyncCache } from "../services/asyncCache.js";
+import { listResponsaveis, resolveResponsavel } from '../services/cargaResponsavel.js';
 import { parseVolumes, validateCargaVolumes } from "../services/cargaVolumes.js";
 import { searchTripDocuments, documentType } from "../services/viagemDocumentoErp.js";
 import { resolveCargaDocumento, deliveredCargaIds, cargaDocumentosDelivery } from "../services/cargaDocumentosIdentity.js";
@@ -156,6 +157,7 @@ function mapCarga(row) {
     clienteFinal: row.cliente_final || "",
     tomadorServico: row.tomador_servico || "",
     vendedor: row.vendedor || "",
+    responsavel: row.responsavel_erp || null,
     origem: row.cidade_origem || "",
     ufOrigem: row.uf_origem || "",
     destino: row.cidade_destino || "",
@@ -648,6 +650,9 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
   } catch (error) { next(error); }
 });
 
+cargasViagensV2Router.get('/cargas-viagens-v2/responsaveis', async (req,res,next) => {
+  try { res.json(await listResponsaveis(req.query.q)); } catch(error) { next(error); }
+});
 cargasViagensV2Router.get("/cargas-viagens-v2/filtros", async (_req, res, next) => {
   try {
     const result = await metadataCache.get("filtros", async () => {
@@ -676,6 +681,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/filtros", async (_req, res, next) 
       ufsDestino: rows[0].ufs_destino || [],
       materiais: rows[0].materiais || [],
       vendedores: activeSellers.rows.map((row) => row.nome),
+      responsaveis: await listResponsaveis(),
     };
     });
     res.json(result);
@@ -703,6 +709,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
       ["destino", "c.cidade_destino"],
       ["material", "c.material"],
       ["vendedor", "c.vendedor"],
+      ["responsavel", "c.responsavel_erp->>'nome'"],
     ];
     for (const [queryKey, column] of partialFilters) {
       if (!text(req.query[queryKey])) continue;
@@ -783,8 +790,9 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas/:id", async (req, res, next
 cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) => {
   let client;
   try {
-    client = await pool.connect();
     const input = req.body || {};
+    const responsavel = await resolveResponsavel(input.responsavel);
+    client = await pool.connect();
     const user = auditUser(req.user);
     await client.query("BEGIN");
     const { rows } = await client.query(
@@ -797,6 +805,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
         user.id, user.login],
     );
     const id = rows[0].id;
+    await client.query(`UPDATE ${CARGAS()} SET responsavel_erp=$2::jsonb WHERE id=$1`,[id,JSON.stringify(responsavel)]);
     await client.query(`UPDATE ${CARGAS()} SET volumes=$2 WHERE id=$1`,[id,validateCargaVolumes(input)]);
     await client.query(`UPDATE ${CARGAS()} SET codigo_carga='C-'||LPAD(id::text,6,'0') WHERE id=$1`, [id]);
     await savePricingFields(client, id, input);
@@ -812,9 +821,11 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
 });
 
 cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next) => {
-  const client = await pool.connect();
+  let client;
   try {
     const input = req.body || {};
+    const responsavel = await resolveResponsavel(input.responsavel);
+    client = await pool.connect();
     const user = auditUser(req.user);
     await client.query("BEGIN");
     const { rowCount } = await client.query(
@@ -825,6 +836,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
         text(input.condicaoPagamento), text(input.observacoes), user.id, user.login],
     );
     if (!rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Carga nao encontrada." }); }
+    await client.query(`UPDATE ${CARGAS()} SET responsavel_erp=$2::jsonb WHERE id=$1`,[req.params.id,JSON.stringify(responsavel)]);
     await client.query(`UPDATE ${CARGAS()} SET volumes=$2 WHERE id=$1`,[req.params.id,validateCargaVolumes(input)]);
     await savePricingFields(client, req.params.id, input);
     await replaceRotas(client, req.params.id, input.paradas);
@@ -832,8 +844,8 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
     const saved = await pool.query(`${cargaSelect()} WHERE c.id=$1`, [req.params.id]);
     const [item] = await enrichCargasFinancial([mapCarga(saved.rows[0])], req.log);
     res.json(item);
-  } catch (error) { await client.query("ROLLBACK"); next(error); }
-  finally { client.release(); }
+  } catch (error) { if (client) await client.query("ROLLBACK").catch(() => {}); next(error); }
+  finally { client?.release(); }
 });
 
 // Historical approval records are retained, but no longer participate in this workflow.
@@ -873,6 +885,11 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
       where.push(`(CONCAT_WS(' ',v.numero_viagem,v.placa_veiculo,v.motorista) ILIKE $${values.length}
         OR EXISTS (SELECT 1 FROM ${VINCULOS()} qvc JOIN ${DOCUMENTOS()} qd ON qd.carga_id=qvc.carga_id
           WHERE qvc.viagem_id=v.id AND CONCAT_WS(' ',qd.numero_documento,qd.chave_documento) ILIKE $${values.length}))`);
+    }
+    if (text(req.query.responsavel)) {
+      values.push(`%${text(req.query.responsavel)}%`);
+      where.push(`EXISTS (SELECT 1 FROM ${VINCULOS()} fvc JOIN ${CARGAS()} fc ON fc.id=fvc.carga_id
+        WHERE fvc.viagem_id=v.id AND fc.responsavel_erp->>'nome' ILIKE $${values.length})`);
     }
     if (text(req.query.vendedor)) {
       values.push(`%${text(req.query.vendedor)}%`);
