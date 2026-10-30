@@ -1,3 +1,4 @@
+import { reimbursementSchema, validateReimbursement } from '../services/expenseReimbursement.js';
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -15,8 +16,8 @@ import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services
 export const manutencaoPlantaoRouter = express.Router();
 const TABLE = () => tableName("manutencao_plantao");
 const LIST_COLUMNS = `id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,
-  usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,
-  hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
+  usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,dados_pagamento,
+  reembolso,hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
 const canRegister = requirePermission("manutencao-plantao");
 const canReview = (req, res, next) => isExpenseDriver(req.user)
   ? res.status(403).json({error: "O perfil motorista não possui acesso à conferência."})
@@ -24,6 +25,7 @@ const canReview = (req, res, next) => isExpenseDriver(req.user)
 const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao"]);
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
+  paymentDetails:z.object({holderName:z.string().trim().min(1).max(160),pixKey:z.string().trim().min(1).max(160)}).strict().nullable().optional(),
   documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
   tireFireNumber: z.string().trim().max(80).optional(),
   trip: z.object({company:z.string().regex(/^\d{1,9}$/),number:z.string().regex(/^\d{1,9}$/)}).strict().nullable().optional(),
@@ -58,7 +60,7 @@ const schema = z.object({
   supplierCompany: z.union([z.string().max(30), z.number()]).nullable().optional(),
 }).strict();
 function record(row) {
-  return {documentType:row.tipo_documento || null,tireFireNumber:row.numero_fogo || "",trip:row.viagem_despesa || null,expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
+  return {reimbursement:row.reembolso || {status:row.descarga?.reimbursement ? "a_cobrar" : "nao_aplicavel",customer:row.descarga?.cte?.customerName || "",document:"",receivedDate:null,note:""},paymentDetails:row.dados_pagamento || null,documentType:row.tipo_documento || null,tireFireNumber:row.numero_fogo || "",trip:row.viagem_despesa || null,expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
     arlaLiters: row.arla_litros == null ? null : Number(row.arla_litros),
     arlaAmount: row.arla_valor == null ? null : Number(row.arla_valor),
     fuelAmount: row.valor_combustivel == null ? null : Number(row.valor_combustivel),
@@ -149,7 +151,7 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/localizacao", can
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/lancamentos", canRegister, async (req, res, next) => {
   try {
-    const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE usuario_id = $1 AND excluido_em IS NULL ORDER BY criado_em DESC`, [req.user.id]);
+    const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`);
     res.json({records: rows.map(record)});
   } catch (error) { next(error); }
 });
@@ -216,7 +218,7 @@ async function mutate(req, res, next, action) {
       before = (await client.query(`SELECT * FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL FOR UPDATE`,[req.params.id])).rows[0];
       if (!before) return await reject(404,"Lançamento não encontrado.");
       if (!canManage(req) && String(before.usuario_id) !== String(req.user.id)) return await reject(403,"Você s? pode alterar seus próprios lançamentos.");
-      if (before.conferido_em && !["check", "status"].includes(action)) return await reject(409,"Lançamento conferido não pode ser editado ou excluído.");
+      if ((before.conferido_em || before.pago) && !["check", "status"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
       if (before.revisao !== body.version && !(action === "check" && before.conferido_em)) return await reject(409,"Este lançamento foi alterado. Atualize a lista antes de continuar.");
     }
     let after;
@@ -227,6 +229,7 @@ async function mutate(req, res, next, action) {
       if (documentType === 'nf_servico' && !body.document.trim()) return await reject(400,"Informe o número da nota fiscal de serviço.");
       if (body.tireFireNumber && !['Borracharia','Manutenção'].includes(body.service)) return await reject(400,"O número de fogo só pode ser informado em borracharia ou manutenção.");
       if (body.trip === undefined && before?.viagem_despesa && body.service !== 'Descarga') expenseTrip = await unloadingTrip(body.plate,before.viagem_despesa.company,before.viagem_despesa.number);
+      if (body.service === 'Abastecimento' && !expenseTrip) return await reject(400,"Vincule uma viagem da placa para registrar o abastecimento.");
       const invoice = body.photos?.invoice !== undefined ? body.photos.invoice : body.receipt !== undefined ? body.receipt : before?.comprovante_foto;
       const receiptReason = body.receiptReason === undefined ? before?.justificativa_sem_nota || "" : body.receiptReason;
       if (!invoice && receiptReason.length < 10) return await reject(400,"Anexe a nota ou informe uma justificativa com pelo menos 10 caracteres.");
@@ -286,8 +289,8 @@ async function mutate(req, res, next, action) {
         before ? before.perfil_autor : req.user.expenseProfile === "motorista" ? "motorista" : "colaborador",
         invoice ? "" : receiptReason,
       ])).rows[0];
-      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb WHERE id=$1 RETURNING *`,
-        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null])).rows[0];
+      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb,dados_pagamento=$6::jsonb WHERE id=$1 RETURNING *`,
+        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null,JSON.stringify(body.paymentDetails === undefined ? before?.dados_pagamento ?? null : body.paymentDetails)])).rows[0];
     } else if (action === "status") {
       let method = record(before).paymentMethod;
       if (body.paymentDate) {
@@ -299,7 +302,8 @@ async function mutate(req, res, next, action) {
         method=rows[0];
       } else if (body.paymentDate === null) method=null;
       after = (await client.query(`UPDATE ${TABLE()} SET pago=$2,lancado=$3,data_pagamento=$4,
-        forma_pagamento_codigo=$5,forma_pagamento_empresa=$6,forma_pagamento_nome=$7,revisao=revisao+1 WHERE id=$1 RETURNING *`,
+        forma_pagamento_codigo=$5,forma_pagamento_empresa=$6,forma_pagamento_nome=$7,
+        revisao=revisao+1 WHERE id=$1 RETURNING *`,
       [before.id,body.paymentDate === undefined ? before.pago : Boolean(body.paymentDate),body.posted === undefined ? before.lancado : body.posted,body.paymentDate === undefined ? before.data_pagamento : body.paymentDate,
         method?.code ?? null,method?.company ?? null,method?.name ?? null])).rows[0];
     } else if (action === "delete") {
@@ -308,6 +312,12 @@ async function mutate(req, res, next, action) {
       if (before.conferido_em) {await client.query("COMMIT"); return res.json({record:record(before)});}
       if (!before.comprovante_foto && (before.justificativa_sem_nota || "").trim().length<10) return await reject(400,"Anexe a nota ou registre a justificativa antes de conferir.");
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login])).rows[0];
+    }
+    if (action === "status" && body.reimbursement) {
+      const error = validateReimbursement(body.reimbursement, today());
+      if (error) return await reject(400,error);
+      after = (await client.query(`UPDATE ${TABLE()} SET reembolso=$2::jsonb WHERE id=$1 RETURNING *`,
+        [before.id,JSON.stringify(body.reimbursement)])).rows[0];
     }
     await audit(client,req,action,before,after);
     await client.query("COMMIT");
@@ -318,7 +328,7 @@ async function mutate(req, res, next, action) {
 manutencaoPlantaoRouter.post("/manutencao-plantao/lancamentos",canRegister,validateBody(schema),(req,res,next)=>mutate(req,res,next,"create"));
 for (const path of ["lancamentos","conferencia"]) {
   const permission = path === "conferencia" ? canReview : canRegister;
-  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canReview,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional()}).strict().refine(body => body.posted !== undefined || body.paymentDate !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
+  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canReview,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
   manutencaoPlantaoRouter.put(`/manutencao-plantao/${path}/:id`,permission,validateBody(changeSchema),(req,res,next)=>mutate(req,res,next,"edit"));
   manutencaoPlantaoRouter.delete(`/manutencao-plantao/${path}/:id`,permission,validateBody(deleteSchema),(req,res,next)=>mutate(req,res,next,"delete"));
   manutencaoPlantaoRouter.get(`/manutencao-plantao/${path}/:id/comprovante`,permission,async(req,res,next)=>{
@@ -326,7 +336,6 @@ for (const path of ["lancamentos","conferencia"]) {
     try {
       const {rows} = await pool.query(`SELECT usuario_id,comprovante_foto,painel_foto,bomba_foto FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL`,[req.params.id]);
       if (!rows[0]) return res.status(404).json({error:"Lançamento não encontrado."});
-      if (!canManage(req) && String(rows[0].usuario_id)!==String(req.user.id)) return res.status(403).json({error:"Sem acesso a este comprovante."});
       res.set("Cache-Control","no-store").json({receipt:rows[0].comprovante_foto,photos:{odometer:rows[0].painel_foto,pump:rows[0].bomba_foto,invoice:rows[0].comprovante_foto}});
     } catch(error) {next(error);}
   });
@@ -335,7 +344,6 @@ for (const path of ["lancamentos","conferencia"]) {
     try {
       const {rows} = await pool.query(`SELECT usuario_id FROM ${TABLE()} WHERE id=$1`,[req.params.id]);
       if (!rows[0]) return res.status(404).json({error:"Lançamento não encontrado."});
-      if (!canManage(req) && String(rows[0].usuario_id)!==String(req.user.id)) return res.status(403).json({error:"Sem acesso a este lançamento."});
       const history = await pool.query(`SELECT evento, usuario_login, ocorrido_em, antes, depois FROM ${historyTable()} WHERE lancamento_id=$1 ORDER BY ocorrido_em DESC,id DESC`,[req.params.id]);
       res.json({history:history.rows});
     } catch(error) {next(error);}

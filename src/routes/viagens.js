@@ -344,6 +344,7 @@ function mapClientOption(row) {
     documento: row.document || "",
     contato: row.contact || "",
     condicaoPagamento: row.payment_condition || "",
+    responsavel: row.owner_code == null ? null : {codigo:String(row.owner_code),empresa:String(row.owner_company),nome:row.owner_name},
     vendedorCodigo: row.seller_code || null,
     vendedor: row.seller_name || "",
     cidade: row.city || "",
@@ -377,6 +378,7 @@ async function loadClientOptions(search = "") {
       cnpjcpfcli AS document,
       NULL::text AS contact,
       condicaopagamentocli AS payment_condition,
+      responsavel.codigorep AS owner_code, responsavel.empresarep AS owner_company, TRIM(responsavel.nomerep) AS owner_name,
       clientes.vendedorcli AS seller_code,
       pessoas.nomepes AS seller_name,
       cidades.nomecid AS city,
@@ -386,6 +388,7 @@ async function loadClientOptions(search = "") {
       clientes.bairrocli AS district,
       clientes.cepcli AS zip_code
     FROM gerais.clientes clientes
+    LEFT JOIN financeiro.responsaveis responsavel ON responsavel.codigorep=clientes.responsavelcli AND responsavel.ativorep='S'
     LEFT JOIN gerais.pessoas pessoas
       ON pessoas.codigorepresentantepes = clientes.vendedorcli
      AND pessoas.ativopes::text = 'S'

@@ -1,5 +1,24 @@
 # Rodobach Backend
 
+## Responsável das cargas e controle de reembolsos
+
+As migrações `077_cargas_responsavel.sql` e `078_plantao_reembolso.sql` acrescentam
+campos sem alterar vendedores ou conferências históricas. Aplicação isolada:
+`node scripts/apply-client-improvements.mjs --apply` (sem `--apply`, apenas consulta).
+
+Cargas novas e editadas exigem um responsável ativo de `financeiro.responsaveis`.
+A API valida código e empresa e guarda o nome retornado pelo ERP. O cadastro de
+clientes usa `responsavelcli` para sugerir o responsável. Cargas antigas sem vínculo
+permanecem sem responsável até serem revisadas; o vendedor não é convertido automaticamente.
+
+Na gestão de despesas, Pagamentos, Conferência e Reembolsos têm abas próprias.
+Novos pagamentos não confirmam a conferência; despesas pagas continuam bloqueadas
+para edição/exclusão. Reembolsos são controles locais, auditados e protegidos por
+revisão: a cobrar, cobrado ou recebido, com cliente, documento e data de recebimento.
+Descargas antigas com previsão de reembolso aparecem como a cobrar. Não há criação
+automática de CT-e nem baixa no ERP. O CSV exporta as despesas dos filtros da tela,
+incluindo viagem, placa, período, fornecedor, cliente e controles financeiros.
+
 ## Resumo de manifestos no n8n
 
 O workflow de manifestos em aberto usa `America/Sao_Paulo`, segunda a sexta às

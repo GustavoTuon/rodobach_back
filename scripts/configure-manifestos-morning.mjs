@@ -1,16 +1,12 @@
 import {manifestosMessageCode} from './manifestos-message-code.js';
+import {manifestosMessageQuery} from './manifestos-message-query.js';
 import {config} from '../src/config.js';
 import {clientPool} from '../src/db/clientPool.js';
 import {writeFileSync} from 'node:fs';
 
 const name='Rodobach - Manifestos em aberto - segunda a sexta 16h';
 const number='5548999503759';
-const query=`SELECT m.empresamdf empresa,m.seriemdf serie,m.codigomdf numero,
- m.veiculomdf placa,to_char(m.datahoraautorizacaomdf AT TIME ZONE 'America/Sao_Paulo','DD/MM/YYYY') autorizado,
- count(*) OVER()::int total
- FROM logistica.mdfe m
- WHERE m.statusmdf IN (3,5) AND m.datahoraencerramentomdf IS NULL AND m.datahoracancelamentomdf IS NULL
- ORDER BY m.datahoraautorizacaomdf ASC NULLS LAST,m.empresamdf,m.seriemdf,m.codigomdf LIMIT 30`;
+const query=manifestosMessageQuery;
 const code=manifestosMessageCode;
 async function api(path,method='GET',body){
  const r=await fetch(config.n8n.apiUrl+'/api/v1'+path,{method,headers:{'X-N8N-API-KEY':config.n8n.apiKey,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(30000)});

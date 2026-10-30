@@ -38,13 +38,16 @@ test('real SQL: document before trip, trip edit, removal, conflict and rollback'
     };
     t.mock.method(pool, 'connect', async () => ({query, release(){}}));
     t.mock.method(pool, 'query', query);
-    t.mock.method(clientPool, 'query', async () => ({rows:[]}));
+    t.mock.method(clientPool, 'query', async (sql,args) => ({rows:sql.includes('financeiro.responsaveis') && args?.[0]==='1' ? [{codigo:'1',empresa:'1',nome:'Responsavel ERP'}] : []}));
     const app=express(); app.use(express.json()); app.use(cargasViagensV2Router);
-    app.use((err,_req,res,_next)=>res.status(500).json({error:err.message}));
-    const create=await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'QA isolated'});
+    app.use((err,_req,res,_next)=>res.status(err.statusCode || 500).json({error:err.message}));
+    const create=await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'QA isolated',responsavel:{codigo:'1',empresa:'1',nome:'Nome incorreto'}});
     assert.equal(create.status,201,JSON.stringify(create.body));
+    assert.deepEqual(create.body.responsavel,{codigo:'1',empresa:'1',nome:'Responsavel ERP'});
+    await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'Sem responsavel'}).expect(400);
+    await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'Inativo',responsavel:{codigo:'9',empresa:'1'}}).expect(400);
     const id=create.body.id;
-    const editLoad=await request(app).put(`/cargas-viagens-v2/cargas/${id}`).send({cliente:'QA edited',origem:'Origem',destino:'Destino',valorCliente:1234,peso:500,paradas:[{tipo:'entrega',cidade:'Parada',uf:'SC',nf:'10'}]});
+    const editLoad=await request(app).put(`/cargas-viagens-v2/cargas/${id}`).send({responsavel:{codigo:'1',empresa:'1'},cliente:'QA edited',origem:'Origem',destino:'Destino',valorCliente:1234,peso:500,paradas:[{tipo:'entrega',cidade:'Parada',uf:'SC',nf:'10'}]});
     assert.equal(editLoad.status,200,JSON.stringify(editLoad.body));
     assert.equal(editLoad.body.valorCliente,1234);
     assert.equal(editLoad.body.paradas[0].cidade,'Parada');
@@ -93,7 +96,7 @@ test('real SQL: document before trip, trip edit, removal, conflict and rollback'
     assert.equal(linked.body.total,1);
     assert.equal(linked.body.items[0].id,id);
     const tripUrl=`/cargas-viagens-v2/viagens/${trip.body.id}`;
-    const second=await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'Segunda carga QA'});
+    const second=await request(app).post('/cargas-viagens-v2/cargas').send({cliente:'Segunda carga QA',responsavel:{codigo:'1',empresa:'1'}});
     assert.equal(second.status,201);
     const addLoad=await request(app).put(tripUrl).send({placa:'QA00000',cargaIds:[id,second.body.id]});
     assert.equal(addLoad.status,200,JSON.stringify(addLoad.body));
@@ -127,7 +130,7 @@ test('real SQL: document before trip, trip edit, removal, conflict and rollback'
     assert.equal(changePlate.status,200,JSON.stringify(changePlate.body));
     assert.equal(changePlate.body.documentoErp,null);
     assert.equal((await request(app).get(`/cargas-viagens-v2/cargas/${id}`)).body.documentoErp,null);
-    const volumePayload={cliente:'Volumes QA',volumes:23,paradas:[{tipo:'entrega',cidade:'Entrega intermediária',volumes:10}]};
+    const volumePayload={responsavel:{codigo:'1',empresa:'1'},cliente:'Volumes QA',volumes:23,paradas:[{tipo:'entrega',cidade:'Entrega intermediária',volumes:10}]};
     const withVolumes=await request(app).put(`/cargas-viagens-v2/cargas/${id}`).send(volumePayload);
     assert.equal(withVolumes.status,200,JSON.stringify(withVolumes.body));
     assert.equal(withVolumes.body.volumes,23);

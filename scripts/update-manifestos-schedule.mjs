@@ -1,4 +1,5 @@
 import {manifestosMessageCode} from './manifestos-message-code.js';
+import {manifestosMessageQuery} from './manifestos-message-query.js';
 import {config} from '../src/config.js';
 import {clientPool} from '../src/db/clientPool.js';
 import {readFileSync,writeFileSync} from 'node:fs';
@@ -12,6 +13,7 @@ async function api(path,method='GET',body){
 }
 try {
   let workflow=await api('/workflows/'+metadata.id);
+  const previousSentDay=workflow.staticData?.global?.lastSentDay;
   const trigger=workflow.nodes.find(n=>n.id==='schedule');
   const formatter=workflow.nodes.find(n=>n.id==='format');
   const query=workflow.nodes.find(n=>n.id==='query');
@@ -22,6 +24,7 @@ try {
   workflow.connections[trigger.name]=workflow.connections[oldName];
   if(oldName!==trigger.name)delete workflow.connections[oldName];
   formatter.parameters.jsCode=manifestosMessageCode;
+  query.parameters.query=manifestosMessageQuery;
   const name='Rodobach - Manifestos em aberto - segunda a sexta 16h';
   if(process.argv.includes('--apply')){
     await api('/workflows/'+metadata.id,'PUT',{name,nodes:workflow.nodes,connections:workflow.connections,settings:{...workflow.settings,timezone:'America/Sao_Paulo'}});
@@ -30,6 +33,8 @@ try {
     await api('/workflows/'+metadata.id+'/activate','POST');
     workflow=await api('/workflows/'+metadata.id);
     if(!workflow.active||workflow.nodes.find(n=>n.id==='schedule').parameters.rule.interval[0].expression!=='0 16 * * 1-5')throw new Error('Schedule verification failed');
+    if(workflow.nodes.find(n=>n.id==='query').parameters.query!==manifestosMessageQuery || workflow.nodes.find(n=>n.id==='format').parameters.jsCode!==manifestosMessageCode)throw new Error('Route message verification failed');
+    if(workflow.staticData?.global?.lastSentDay!==previousSentDay)throw new Error('Daily guard changed unexpectedly');
     writeFileSync(metadataFile,JSON.stringify({...metadata,name,cron:'0 16 * * 1-5',timezone:'America/Sao_Paulo'},null,2));
   }
   const {rows}=await clientPool.query(query.parameters.query);

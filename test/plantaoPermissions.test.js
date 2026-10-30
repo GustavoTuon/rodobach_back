@@ -24,12 +24,20 @@ test("motorista não lê nem altera conferência, inclusive por URL direta",asyn
  assert.equal((await request(app(reviewer)).post("/manutencao-plantao/lancamentos").send({})).status,403);
  assert.equal(query.mock.callCount(),0);
 });
-test("leitura do motorista aplica autoria no SQL, conferência exige permissão própria",async t=>{
+test("cadastro de custos lista todos os autores, conferência exige permissão própria",async t=>{
  const query=t.mock.method(pool,"query",async()=>({rows:[]}));
  assert.equal((await request(app(driver)).get("/manutencao-plantao/lancamentos?usuario_id=43")).status,200);
- assert.match(query.mock.calls[0].arguments[0],/WHERE usuario_id = \$1/);
- assert.deepEqual(query.mock.calls[0].arguments[1],[42]);
+ assert.match(query.mock.calls[0].arguments[0],/WHERE excluido_em IS NULL/);
+ assert.doesNotMatch(query.mock.calls[0].arguments[0],/WHERE usuario_id/);
+ assert.equal(query.mock.calls[0].arguments[1],undefined);
  assert.equal((await request(app(reviewer)).get("/manutencao-plantao/conferencia")).status,200);
+});
+test("cadastro consulta comprovante e histórico de outro autor sem liberar usuários sem acesso",async t=>{
+ t.mock.method(pool,"query",async sql=>({rows:sql.includes('SELECT evento') ? [] : [{usuario_id:99,comprovante_foto:'receipt'}]}));
+ for (const endpoint of ['comprovante','historico']) {
+   assert.equal((await request(app(driver)).get(`/manutencao-plantao/lancamentos/${id}/${endpoint}`)).status,200);
+   assert.equal((await request(app({id:100,permissions:{}})).get(`/manutencao-plantao/lancamentos/${id}/${endpoint}`)).status,403);
+ }
 });
 test("mutação exige versão válida e acesso somente consulta bloqueia alterações",async t=>{
  const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});

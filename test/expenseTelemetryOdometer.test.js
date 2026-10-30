@@ -21,10 +21,10 @@ test("KM vem apenas da telemetria no dia selecionado, sem consultar abasteciment
 });
 test("sem leitura não aceita KM manual para criar abastecimento",async t=>{
  t.mock.method(getVeiculosPool(),"query",async sql=>({rows:sql.includes("mensagens_cb")?[]:[{placa:"ABC1234"}]}));
- t.mock.method(clientPool,"query",async()=>({rows:[]}));
+ t.mock.method(clientPool,"query",async sql=>({rows:sql.includes('logistica.controleviagens') ? [{company:'1',number:'883',plate:'ABC1234'}] : []}));
  const statements=[];t.mock.method(pool,"connect",async()=>({query:async sql=>{statements.push(sql);return {rows:[]};},release(){}}));
  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:42,permissions:{"manutencao-plantao":true}};next();});app.use(manutencaoPlantaoRouter);
- const result=await request(app).post("/manutencao-plantao/lancamentos").send({plate:"ABC1234",amount:1200,supplier:"Posto Teste",documentType:"sem_documento",service:"Abastecimento",source:"motorista",liters:200,odometer:999999,expenseDate:"2026-10-01",expenseTime:"10:30",receiptReason:"Nota nao disponibilizada pelo posto."});
+ const result=await request(app).post("/manutencao-plantao/lancamentos").send({plate:"ABC1234",trip:{company:'1',number:'883'},amount:1200,supplier:"Posto Teste",documentType:"sem_documento",service:"Abastecimento",source:"motorista",liters:200,odometer:999999,expenseDate:"2026-10-01",expenseTime:"10:30",receiptReason:"Nota nao disponibilizada pelo posto."});
  assert.equal(result.status,422);assert.match(result.body.error,/telemetria/);assert.equal(statements.some(sql=>/INSERT|UPDATE/.test(sql)),false);
  assert.equal((await expenseTelemetryOdometer("ABC1234","2026-10-01","10:30:00")).odometer,null);
 });
