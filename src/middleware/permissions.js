@@ -8,10 +8,10 @@ const ROUTE_PERMISSIONS = [
   [/^\/frota\/multas(?:\/|$)/, "multas-frota"],
   [/^\/manutencao\/componentes-posicao(?:\/|$)/, ["manutencao-posicoes", "manutencao"]],
   [/^\/manutencao(?:\/|$)/, "manutencao"],
-  [/^\/manutencao-plantao\/formas-pagamento(?:\/|$)/, "conferencia-manutencao"],
+  [/^\/manutencao-plantao\/formas-pagamento(?:\/|$)/, "pagamento-despesas"],
   [/^\/manutencao-plantao\/conferencia(?:\/|$)/, "conferencia-manutencao"],
-  [/^\/manutencao-plantao\/placas(?:\/|$)/, ["manutencao-plantao", "conferencia-manutencao"]],
-  [/^\/manutencao-plantao(?:\/|$)/, "manutencao-plantao"],
+  [/^\/manutencao-plantao\/placas(?:\/|$)/, ["manutencao-plantao", "conferencia-manutencao", "pagamento-despesas", "lancamento-despesas", "reembolso-despesas"]],
+  [/^\/manutencao-plantao(?:\/|$)/, ["manutencao-plantao", "conferencia-manutencao", "pagamento-despesas", "lancamento-despesas", "reembolso-despesas"]],
   [/^\/cargas-viagens-v2(?:\/|$)/, "viagens"],
   [/^\/viagens(?:\/|$)/, "viagens"],
   [/^\/motoristas\/folgas(?:\/|$)/, "folgas-motoristas"],
@@ -72,7 +72,7 @@ export function requireRoutePermission(req, res, next) {
   const sharedReads = {
     "/financeiro/custos-veiculos/filtros": ["custos-veiculos", "abastecimentos", "analise-frota"],
     "/manutencao/veiculos": ["manutencao", "manutencao-posicoes"],
-    "/manutencao/fornecedores": ["manutencao", "manutencao-posicoes", "manutencao-plantao", "conferencia-manutencao"],
+    "/manutencao/fornecedores": ["manutencao", "manutencao-posicoes", "manutencao-plantao", "conferencia-manutencao", "pagamento-despesas", "lancamento-despesas", "reembolso-despesas"],
   };
   if (["GET", "HEAD"].includes(req.method) && sharedReads[path.replace(/\/$/, "")]) return requirePermission(sharedReads[path.replace(/\/$/, "")])(req, res, next);
   // The executive screen consumes these existing reports, but cannot mutate them.

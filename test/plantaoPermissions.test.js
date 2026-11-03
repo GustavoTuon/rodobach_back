@@ -16,11 +16,47 @@ import { EXTRA_PERMISSION_COLUMNS } from "../src/services/screenPermissions.js";
 const driver={id:42,login:"driver",permissions:{"manutencao-plantao":true}};
 const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":true}};
 const id="55926d25-6e7d-4c22-a36d-747c0402c18a";
+test("cada ação financeira exige permissão própria, inclusive em payload misto",async t=>{
+ const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
+ const fields={paymentDate:null,posted:true,reimbursement:{status:"nao_aplicavel",customer:"",document:"",receivedDate:null,note:""}};
+ const permissions={paymentDate:"pagamento-despesas",posted:"lancamento-despesas",reimbursement:"reembolso-despesas"};
+ for(const [field,value] of Object.entries(fields)) {
+   for(const user of [driver,reviewer,{id:44,permissions:{[permissions[field]]:true},expenseProfile:"motorista"}]) {
+     assert.equal((await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,[field]:value})).status,403);
+   }
+   const user={id:44,permissions:{[permissions[field]]:true}};
+   const other=field==="posted" ? "paymentDate" : "posted";
+   assert.equal((await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,[field]:value,[other]:fields[other]})).status,403);
+   assert.equal((await request(app(user)).patch(`/manutencao-plantao/conferencia/${id}`).send({version:1})).status,403);
+ }
+ assert.equal(connect.mock.callCount(),0);
+});
+test("permissões isoladas leem status, comprovantes e histórico pela tela única",async t=>{
+ t.mock.method(pool,"query",async sql=>({rows:sql.includes('SELECT evento') ? [] : [{id,usuario_id:99,valor:100,pago:true,lancado:true,conferido_em:new Date(),comprovante_foto:'receipt'}]}));
+ for(const key of ['manutencao-plantao','conferencia-manutencao','pagamento-despesas','lancamento-despesas','reembolso-despesas']) {
+   const user={id:44,permissions:{[key]:true}};
+   const response=await request(app(user)).get('/manutencao-plantao/lancamentos');
+   assert.equal(response.status,200);assert.equal(response.body.records[0].paid,true);assert.equal(response.body.records[0].posted,true);assert.equal(response.body.records[0].checked,true);
+   for(const endpoint of ['comprovante','historico']) assert.equal((await request(app(user)).get(`/manutencao-plantao/lancamentos/${id}/${endpoint}`)).status,200);
+ }
+});
+test("permissão isolada altera somente seu controle em despesa de outro autor",async t=>{
+ const row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:false,lancado:false,justificativa_sem_nota:'Nota não fornecida pelo fornecedor.'};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){writes.push({sql,params});return {rows:[row]};}}));
+ for(const [key,body] of [['pagamento-despesas',{paymentDate:null}],['lancamento-despesas',{posted:true}],['reembolso-despesas',{reimbursement:{status:'nao_aplicavel',customer:'',document:'',receivedDate:null,note:''}}]]) {
+   const response=await request(app({id:44,permissions:{[key]:true}})).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,...body});
+   assert.equal(response.status,200,JSON.stringify(response.body));
+ }
+ assert.equal((await request(app(reviewer)).patch(`/manutencao-plantao/conferencia/${id}`).send({version:1})).status,200);
+ assert.equal(writes.filter(x=>x.sql.includes('INSERT INTO') && x.sql.includes('historico')).length,4);
+});
 function app(user) {const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user=user;next();});app.use(requireRoutePermission);app.use(enforceReadOnly);app.use(manutencaoPlantaoRouter);app.use(usuariosRouter);return app;}
 test("motorista não lê nem altera conferência, inclusive por URL direta",async t=>{
  const query=t.mock.method(pool,"query",async()=>{throw new Error("must not query");});
  assert.equal((await request(app(driver)).get("/manutencao-plantao/conferencia")).status,403);
  assert.equal((await request(app(driver)).patch(`/manutencao-plantao/conferencia/${id}`)).status,403);
+ assert.equal((await request(app({id:100,permissions:{}})).get('/manutencao-plantao/placas/ABC1234/pneus')).status,403);
  assert.equal((await request(app(reviewer)).post("/manutencao-plantao/lancamentos").send({})).status,403);
  assert.equal(query.mock.callCount(),0);
 });

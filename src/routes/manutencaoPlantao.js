@@ -9,6 +9,7 @@ import { getVeiculosPool } from "../db/pool-veiculos.js";
 import { ADDITIONAL_MAINTENANCE_PLATES, mergeMaintenanceVehicles } from "../services/maintenanceVehicles.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { expenseTelemetryOdometer } from "../services/expenseTelemetryOdometer.js";
+import { expenseTires, resolveExpenseTire } from "../services/expenseTires.js";
 import {unloadingTrips,unloadingTrip,unloadingCtes,resolveUnloading} from '../services/expenseUnloading.js';
 import { validateBody } from "../middleware/validate.js";
 import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services/expenseDriverAccess.js";
@@ -17,17 +18,20 @@ export const manutencaoPlantaoRouter = express.Router();
 const TABLE = () => tableName("manutencao_plantao");
 const LIST_COLUMNS = `id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,
   usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,dados_pagamento,
-  reembolso,hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
+  pneu_vinculado,reembolso,hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
 const canRegister = requirePermission("manutencao-plantao");
 const canReview = (req, res, next) => isExpenseDriver(req.user)
   ? res.status(403).json({error: "O perfil motorista não possui acesso à conferência."})
   : requirePermission("conferencia-manutencao")(req, res, next);
-const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao"]);
+const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao", "pagamento-despesas", "lancamento-despesas", "reembolso-despesas"]);
+const hasAction = (req, key) => !isExpenseDriver(req.user) && (req.user.admin === true || req.user.permissions?.[key] === true);
+const canPay = (req,res,next) => hasAction(req,"pagamento-despesas") ? next() : res.status(403).json({error:"Sem permissão para registrar pagamentos."});
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
   paymentDetails:z.object({holderName:z.string().trim().min(1).max(160),pixKey:z.string().trim().min(1).max(160)}).strict().nullable().optional(),
   documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
   tireFireNumber: z.string().trim().max(80).optional(),
+  tire: z.object({code:z.string().trim().min(1).max(80),company:z.string().trim().min(1).max(30)}).strict().nullable().optional(),
   trip: z.object({company:z.string().regex(/^\d{1,9}$/),number:z.string().regex(/^\d{1,9}$/)}).strict().nullable().optional(),
   unloading: z.object({
     trip:z.object({company:z.string().regex(/^\d{1,9}$/),number:z.string().regex(/^\d{1,9}$/)}).strict(),
@@ -73,9 +77,9 @@ function record(row) {
     unloading:row.descarga || null,
     paymentMethod: row.forma_pagamento_codigo == null ? null : {code:row.forma_pagamento_codigo,company:row.forma_pagamento_empresa,name:row.forma_pagamento_nome},
     paid: row.pago ?? null, posted: row.lancado ?? null, document: row.documento, version: row.revisao, checkedAt: row.conferido_em,
-    date: row.criado_em, checked: Boolean(row.conferido_em), checkedBy: row.conferido_login};
+    tire: row.pneu_vinculado || null, date: row.criado_em, checked: Boolean(row.conferido_em), checkedBy: row.conferido_login};
 }
-manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canReview, async (_req,res,next) => {
+manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, async (_req,res,next) => {
   try {
     const {rows} = await clientPool.query(`SELECT codigofpg::text AS code,empresafpg::text AS company,TRIM(nomefpg) AS name
       FROM financeiro.formaspagamento WHERE ativofpg='S' ORDER BY nomefpg,empresafpg,codigofpg`);
@@ -98,6 +102,14 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/placas", canRead, async (req, r
       ? (access.plate ? [{placa: access.plate}] : []) : await plantaoPlates();
     res.json({veiculos, access});
   } catch (error) { next(error); }
+});
+manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/pneus", canRead, async (req,res,next) => {
+  try {
+    const plate = req.params.plate.toUpperCase();
+    if (!/^[A-Z]{3}\d[A-Z0-9]\d{2}$/.test(plate)) return res.status(400).json({error:"Placa inválida."});
+    await requireExpensePlate(req.user,plate);
+    res.set("Cache-Control","no-store").json({tires:await expenseTires(plate)});
+  } catch(error) {next(error);}
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/hodometro", canRead, async (req,res,next) => {
   try {
@@ -149,7 +161,7 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/localizacao", can
     res.set("Cache-Control","no-store").json({location:[city,address].filter(Boolean).join(" — ").slice(0,160),city,address,date:row?.data_hora || null,source:"telemetria"});
   } catch(error) {next(error);}
 });
-manutencaoPlantaoRouter.get("/manutencao-plantao/lancamentos", canRegister, async (req, res, next) => {
+manutencaoPlantaoRouter.get("/manutencao-plantao/lancamentos", canRead, async (req, res, next) => {
   try {
     const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`);
     res.json({records: rows.map(record)});
@@ -159,7 +171,7 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/conferencia", canReview, async 
   try { const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`); res.json({records: rows.map(record)}); }
   catch (error) { next(error); }
 });
-const canManage = req => !isExpenseDriver(req.user) && (req.user.admin === true || req.user.permissions?.["conferencia-manutencao"] === true);
+const canManage = req => !isExpenseDriver(req.user) && req.user.admin === true;
 const today = () => new Date().toLocaleDateString("en-CA", {timeZone:"America/Sao_Paulo"});
 const changeSchema = schema.extend({version: z.number().int().positive()});
 const deleteSchema = z.object({version:z.number().int().positive(), reason:z.string().trim().min(5).max(300)}).strict();
@@ -191,15 +203,19 @@ async function mutate(req, res, next, action) {
   let expenseTrip = null;
   try {
     const body = req.body;
-    if (!canManage(req) && (action === "status" || body.paid !== undefined || body.posted !== undefined || body.paymentDate !== undefined)) {
-      return res.status(403).json({error:"Pagamento e lançamento são exclusivos da conferência."});
+    const controls = [["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
+    if (controls.some(([field,key]) => body[field] !== undefined && !hasAction(req,key))) {
+      return res.status(403).json({error:"Você não possui permissão para alterar este controle da despesa."});
+    }
+    if (["edit","delete"].includes(action) && !canManage(req) && req.user.permissions?.["manutencao-plantao"] !== true) {
+      return res.status(403).json({error:"Sem permissão para editar despesas."});
     }
     if (action === "status" && body.paymentDate && body.paymentDate > today()) {
       return res.status(400).json({error:"A data do pagamento não pode estar no futuro."});
     }
     if (["create","edit"].includes(action)) {
       await requireExpensePlate(req.user, body.plate);
-      if (body.paid !== undefined || body.posted !== undefined) return res.status(400).json({error:"Atualize os controles pela conferência."});
+      if (body.paid !== undefined || body.posted !== undefined) return res.status(400).json({error:"Atualize os controles na despesa."});
       const error = await validateRegistration(body);
       if (error) return res.status(400).json({error});
       if (body.service === 'Descarga') {
@@ -217,12 +233,13 @@ async function mutate(req, res, next, action) {
     if (action !== "create") {
       before = (await client.query(`SELECT * FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL FOR UPDATE`,[req.params.id])).rows[0];
       if (!before) return await reject(404,"Lançamento não encontrado.");
-      if (!canManage(req) && String(before.usuario_id) !== String(req.user.id)) return await reject(403,"Você s? pode alterar seus próprios lançamentos.");
+      if (["edit","delete"].includes(action) && !canManage(req) && String(before.usuario_id) !== String(req.user.id)) return await reject(403,"Você só pode alterar seus próprios lançamentos.");
       if ((before.conferido_em || before.pago) && !["check", "status"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
       if (before.revisao !== body.version && !(action === "check" && before.conferido_em)) return await reject(409,"Este lançamento foi alterado. Atualize a lista antes de continuar.");
     }
     let after;
     if (["create","edit"].includes(action)) {
+      const tire = await resolveExpenseTire(body,before);
       if (!body.supplier.trim()) return await reject(400,"Informe o fornecedor, mesmo que não esteja cadastrado.");
       const documentType = body.documentType ?? before?.tipo_documento;
       if (!documentType) return await reject(400,"Selecione o tipo de documento fiscal ou informe que não há documento.");
@@ -289,8 +306,8 @@ async function mutate(req, res, next, action) {
         before ? before.perfil_autor : req.user.expenseProfile === "motorista" ? "motorista" : "colaborador",
         invoice ? "" : receiptReason,
       ])).rows[0];
-      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb,dados_pagamento=$6::jsonb WHERE id=$1 RETURNING *`,
-        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null,JSON.stringify(body.paymentDetails === undefined ? before?.dados_pagamento ?? null : body.paymentDetails)])).rows[0];
+      after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb,dados_pagamento=$6::jsonb,pneu_vinculado=$7::jsonb WHERE id=$1 RETURNING *`,
+        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (tire?.code ?? body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null,JSON.stringify(body.paymentDetails === undefined ? before?.dados_pagamento ?? null : body.paymentDetails),JSON.stringify(tire)])).rows[0];
     } else if (action === "status") {
       let method = record(before).paymentMethod;
       if (body.paymentDate) {
@@ -327,8 +344,8 @@ async function mutate(req, res, next, action) {
 }
 manutencaoPlantaoRouter.post("/manutencao-plantao/lancamentos",canRegister,validateBody(schema),(req,res,next)=>mutate(req,res,next,"create"));
 for (const path of ["lancamentos","conferencia"]) {
-  const permission = path === "conferencia" ? canReview : canRegister;
-  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canReview,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
+  const permission = canRead;
+  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canRead,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
   manutencaoPlantaoRouter.put(`/manutencao-plantao/${path}/:id`,permission,validateBody(changeSchema),(req,res,next)=>mutate(req,res,next,"edit"));
   manutencaoPlantaoRouter.delete(`/manutencao-plantao/${path}/:id`,permission,validateBody(deleteSchema),(req,res,next)=>mutate(req,res,next,"delete"));
   manutencaoPlantaoRouter.get(`/manutencao-plantao/${path}/:id/comprovante`,permission,async(req,res,next)=>{
