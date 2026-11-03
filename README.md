@@ -1,5 +1,38 @@
 # Rodobach Backend
 
+## Pneu vinculado na despesa de borracharia
+
+O lançamento permite escolher entre os pneus montados na placa (ERP e
+movimentações locais), por número, posição ou marca. A API valida empresa,
+número e placa e salva a identificação em `pneu_vinculado`, junto ao número
+de fogo. Editar a despesa preserva a posição registrada, mesmo que o pneu
+tenha sido movimentado depois. Trocar a placa exige selecionar novamente.
+Também é possível informar um número manualmente ou continuar sem número;
+esses casos não criam vínculo com o cadastro. O lançamento não movimenta pneus.
+
+Antes de iniciar a API atualizada, execute
+`node scripts/apply-expense-tire.mjs --apply` (migração 080). Sem `--apply`,
+o comando somente verifica se a migração está pendente.
+
+## Tela única de despesas e permissões por ação
+
+A tela `/manutencao-plantao` reúne cadastro, conferência e controles financeiros.
+Qualquer uma das permissões de despesas permite consultar os lançamentos,
+status, comprovantes e histórico. `conferencia-manutencao` permite somente
+conferir; pagamentos, lançamento no ERP e reembolsos exigem, respectivamente,
+`pagamento-despesas`, `lancamento-despesas` e `reembolso-despesas`.
+O cadastro continua em `manutencao-plantao`, com edição dos próprios registros
+pendentes. Administradores podem editar registros pendentes de outros autores.
+Despesas conferidas ou pagas continuam bloqueadas para edição/exclusão.
+O perfil motorista não pode executar ações de conferência ou financeiras.
+
+Aplique `node scripts/apply-expense-permissions.mjs --apply` antes de iniciar
+a API atualizada. Sem `--apply`, o comando apenas verifica a migração 079.
+As novas permissões iniciam desativadas: conceda cada responsabilidade no
+cadastro de usuários. Administradores mantêm acesso integral. Para uma pessoa
+que só confere, habilite apenas “Despesas — conferir”; os status financeiros
+continuam visíveis. URLs antigas de conferência abrem a mesma tela.
+
 ## Responsável das cargas e controle de reembolsos
 
 As migrações `077_cargas_responsavel.sql` e `078_plantao_reembolso.sql` acrescentam
