@@ -11,7 +11,7 @@
 
 - API: `npm start` dentro de `rodobach_back`.
 - Worker de alertas de veículos vazios: `npm run worker`, em processo separado.
-- Worker de manutenção: `npm run worker:maintenance`, iniciado separadamente e somente quando desejar habilitar os envios. Procedimento em [ALERTAS-MANUTENCAO.md](ALERTAS-MANUTENCAO.md).
+- Manutenção: agendamento exclusivo do n8n, atualmente desativado. Não iniciar worker local; consulte [ALERTAS-MANUTENCAO.md](ALERTAS-MANUTENCAO.md).
 - Frontend local: `npm run dev`; produção: `npm run build`.
 - Monitor Trafegus: `npm start`; por padrão escuta apenas em `127.0.0.1`.
 

@@ -23,13 +23,14 @@ test('cargo corrections and their history require administrator access', async t
 });
 
 test("all business router declarations have an explicit policy", () => {
-  // Supplier endpoints use invitation tokens or supplier sessions, not employee permissions.
+  // These endpoints use supplier sessions, invitation tokens or scoped machine credentials.
   const supplierPolicies = new Set([
     "compras.js:get:/compras-publico/:token",
     "compras.js:put:/compras-publico/:token",
     "comprasAccess.js:post:/compras-fornecedor/login",
     "comprasAccess.js:post:/compras-fornecedor/senha",
     "comprasAccess.js:get:/compras-fornecedor/cotacoes",
+    "maintenanceIntegration.js:post:/integracoes/n8n/manutencao",
   ]);
   const dir = new URL("../src/routes/", import.meta.url);
   const missing = [];
@@ -48,6 +49,7 @@ test("supplier sessions and invitations reject unauthenticated access", async ()
   for (const [method, path] of [
     ["get", "/api/compras-fornecedor/cotacoes"],
     ["post", "/api/compras-fornecedor/senha"],
+    ["post", "/api/integracoes/n8n/manutencao"],
   ]) {
     assert.equal((await request(app)[method](path)).status, 401);
   }

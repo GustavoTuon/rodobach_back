@@ -174,15 +174,18 @@ export async function getN8nAutomation(id) {
   return mapWorkflow(workflow, executionsPayload);
 }
 
-function assertNotLegacyMaintenance(id) {
+async function assertNotLegacyMaintenance(id) {
   if (id === "hhjl1q5uyxov5kZI") {
-    throw Object.assign(new Error("Os alertas de manutenção usam somente o backend. O fluxo antigo do n8n deve permanecer desativado."), {statusCode: 409});
+    const workflow = await n8nFetch(`/workflows/${encodeURIComponent(id)}`);
+    if (!workflow.nodes?.some(node => node.name === "Executar manutenção na API" && node.type === "n8n-nodes-base.httpRequest" && node.parameters?.url?.endsWith("/api/integracoes/n8n/manutencao"))) {
+      throw Object.assign(new Error("Migre o fluxo antigo de manutenção antes de ativá-lo."), {statusCode:409});
+    }
   }
 }
 
 export async function setN8nAutomationActive(id, active) {
   assertManagedWorkflow(id);
-  if (active) assertNotLegacyMaintenance(id);
+  if (active) await assertNotLegacyMaintenance(id);
   const action = active ? "activate" : "deactivate";
   await n8nFetch(`/workflows/${encodeURIComponent(id)}/${action}`, { method: "POST" });
   return getN8nAutomation(id);
@@ -190,7 +193,7 @@ export async function setN8nAutomationActive(id, active) {
 
 export async function retryLastFailedN8nAutomation(id) {
   assertManagedWorkflow(id);
-  assertNotLegacyMaintenance(id);
+  await assertNotLegacyMaintenance(id);
   const executionsPayload = await n8nFetch(`/executions?workflowId=${encodeURIComponent(id)}&limit=10`);
   const failedExecution = (executionsPayload?.data || []).find((execution) => (
     ["error", "failed", "crashed"].includes(String(execution.status || "").toLowerCase())

@@ -19,8 +19,6 @@
     "format:check": "prettier --check src package.json",
     "security:check": "node scripts/check-security.mjs",
     "maintenance:preview": "node scripts/maintenance-alerts.mjs --preview",
-    "maintenance:send": "node scripts/maintenance-alerts.mjs --send",
-    "worker:maintenance": "node scripts/maintenance-alerts.mjs --worker",
     "antt:sync": "node scripts/antt-sync.mjs"
   },
   "overrides": {

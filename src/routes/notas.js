@@ -16,13 +16,60 @@ notasRouter.use('/notas',requirePermission('bloco-notas'),enforceReadOnly,(req,r
 notasRouter.get('/notas/placas',async(req,res,next)=>{
  try {const {rows}=await clientPool.query(`SELECT DISTINCT upper(trim(placavei)) AS plate FROM frotas.veiculos WHERE situacaovei::text='1' AND NULLIF(trim(placavei),'') IS NOT NULL ORDER BY 1`);res.json({plates:rows.map(row=>row.plate)});}catch(error){next(error);}
 });
+// Fleet and tasks remain personal, following the existing notes permission.
+const taskTable=()=>tableName('bloco_notas_tarefas');
+const plateSchema=z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/);
+const taskRecord=row=>({id:row.id,plate:row.placa,title:row.titulo,done:row.concluida,version:row.revisao,updatedAt:row.atualizado_em});
+async function fleet(){
+ const [vehicles,links]=await Promise.all([
+  clientPool.query(`SELECT DISTINCT ON (upper(trim(placavei))) upper(trim(placavei)) AS plate, COALESCE(NULLIF(trim(modelovei),''),NULLIF(trim(marcamodelorenavamvei),''),NULLIF(trim(nomevei),''),'') AS model,tipovei,tipoveiculoctevei,numeroeixosvei FROM frotas.veiculos WHERE situacaovei::text='1' AND tipopropriedadevei::text='P' AND NULLIF(trim(placavei),'') IS NOT NULL ORDER BY 1`),
+  clientPool.query('SELECT placa_principal,placa_reboque1,placa_reboque2,placa_reboque3 FROM frotas.veiculosreboquesmotoristas')
+ ]);
+ const normalize=value=>String(value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+ const trailers=new Map();
+ for(const row of links.rows){const main=normalize(row.placa_principal);if(!main)continue;trailers.set(main,[...new Set([...(trailers.get(main)||[]),...[row.placa_reboque1,row.placa_reboque2,row.placa_reboque3].map(normalize).filter(p=>plateSchema.safeParse(p).success&&p!==main)])]);}
+ return vehicles.rows.map(row=>{
+  const plate=normalize(row.plate),implementsList=trailers.get(plate)||[];
+  const parent=[...trailers].find(([,items])=>items.includes(plate))?.[0]||null;
+  const model=(row.model||'').trim();
+  const trailer=Boolean(parent)||Number(row.tipoveiculoctevei)===1||Number(row.tipovei)===2||/^(SR|R)\//i.test(model);
+  const car=!trailer&&Number(row.numeroeixosvei)>0&&Number(row.numeroeixosvei)<=2&&Number(row.tipovei)!==1;
+  return {plate,model:/^VE[IÍ]CULO\s/i.test(model)?'Modelo não informado':model||'Modelo não informado',category:trailer?'implemento':car?'carro':implementsList.length?'carreta':'caminhao',parentPlate:parent,implements:implementsList};
+ }).filter(v=>plateSchema.safeParse(v.plate).success);
+}
+notasRouter.get('/notas/frota',async(req,res,next)=>{try{res.json({vehicles:await fleet()});}catch(error){next(error);}});
+notasRouter.get('/notas/tarefas',async(req,res,next)=>{
+ try{const {rows}=await pool.query(`SELECT * FROM ${taskTable()} WHERE usuario_id=$1 ORDER BY criado_em DESC,id,placa`,[req.user.id]);res.json({tasks:rows.map(taskRecord)});}catch(error){next(error);}
+});
+notasRouter.post('/notas/tarefas',async(req,res,next)=>{
+ const parsed=z.object({id:z.uuid(),title:z.string().trim().min(1).max(200),plates:z.array(plateSchema).min(1).max(1000)}).strict().safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:'Informe a tarefa e selecione ao menos uma placa.'});
+ try{
+  const body=parsed.data,plates=[...new Set(body.plates)],allowed=new Set((await fleet()).filter(v=>v.category!=='implemento').map(v=>v.plate));
+  if(plates.some(p=>!allowed.has(p)))return res.status(400).json({error:'Uma das placas não pertence à frota. Atualize a lista.'});
+  // One statement creates the whole batch atomically; the ID makes retries safe.
+  await pool.query(`INSERT INTO ${taskTable()} (id,usuario_id,placa,titulo) SELECT $1,$2,unnest($3::varchar[]),$4 ON CONFLICT (usuario_id,id,placa) DO NOTHING`,[body.id,req.user.id,plates,body.title]);
+  const {rows}=await pool.query(`SELECT * FROM ${taskTable()} WHERE usuario_id=$1 AND id=$2 ORDER BY placa`,[req.user.id,body.id]);
+  if(rows.length!==plates.length||rows.some(r=>r.titulo!==body.title||!plates.includes(r.placa)))return res.status(409).json({error:'Esta tarefa já foi lançada com outros dados. Atualize a lista.'});
+  res.json({tasks:rows.map(taskRecord)});
+ }catch(error){next(error);}
+});
+notasRouter.patch('/notas/tarefas/:id/:plate',async(req,res,next)=>{
+ const parsed=z.object({done:z.boolean(),version:z.number().int().positive()}).strict().safeParse(req.body);
+ if(!parsed.success||!z.uuid().safeParse(req.params.id).success||!plateSchema.safeParse(req.params.plate).success)return res.status(400).json({error:'Tarefa inválida.'});
+ try{const {rows}=await pool.query(`UPDATE ${taskTable()} SET concluida=$4,revisao=revisao+1,atualizado_em=now() WHERE usuario_id=$1 AND id=$2 AND placa=$3 AND revisao=$5 RETURNING *`,[req.user.id,req.params.id,req.params.plate,parsed.data.done,parsed.data.version]);
+ if(!rows.length)return res.status(409).json({error:'Tarefa alterada em outro aparelho. Atualize e tente novamente.'});res.json({task:taskRecord(rows[0])});
+ }catch(error){next(error);}
+});
 notasRouter.get('/notas',async(req,res,next)=>{
  const query=z.string().trim().max(120).safeParse(req.query.q||'');
+ const plate=z.string().regex(/^$|^[A-Z]{3}\d[A-Z0-9]\d{2}$/).optional().safeParse(req.query.plate);
+ if(!plate.success)return res.status(400).json({error:'Placa inválida.'});
  if(!query.success)return res.status(400).json({error:'Busca inválida.'});
  try {
   const {rows}=await pool.query(`SELECT id,titulo,placa,left(texto,160) AS texto,revisao,atualizado_em,criado_em FROM ${table()}
    WHERE usuario_id=$1 AND excluido_em IS NULL AND ($2='' OR strpos(lower(titulo || ' ' || placa || ' ' || texto),lower($2))>0)
-   ORDER BY atualizado_em DESC,id LIMIT 101`,[req.user.id,query.data]);
+   AND ($3::text IS NULL OR placa=$3) ORDER BY atualizado_em DESC,id LIMIT 101`,[req.user.id,query.data,plate.data??null]);
   res.json({notes:rows.slice(0,100).map(record),hasMore:rows.length>100});
  }catch(error){next(error);}
 });

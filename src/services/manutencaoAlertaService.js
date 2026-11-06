@@ -126,9 +126,9 @@ export function buildMaintenanceAlertMessage(item, status, event, currentKm) {
   ].filter(line => line !== null && line !== undefined).join("\n");
 }
 
-export async function runMaintenanceAlerts({ dryRun = true, planIds = null, onlyOverdue = false, dailyDate = null } = {}) {
+export async function runMaintenanceAlerts({ dryRun = true, planIds = null, onlyOverdue = false, dailyDate = null, recipientNumber = null } = {}) {
   if (dailyDate !== null && maintenanceDate(dailyDate) !== dailyDate) throw new Error("Data de execução inválida.");
-  const recipient = process.env.MAINTENANCE_ALERT_NUMBER;
+  const recipient = recipientNumber || process.env.MAINTENANCE_ALERT_NUMBER;
   if (recipient && !/^\d{10,15}$/.test(recipient)) throw new Error("Destinatário de manutenção inválido.");
   if (!dryRun && config.readOnly) throw new Error("Envios desabilitados: ambiente somente consulta.");
   if (planIds !== null && (!Array.isArray(planIds) || !planIds.length || planIds.some(id => !Number.isSafeInteger(id) || id <= 0))) {
@@ -222,18 +222,4 @@ export async function runMaintenanceAlerts({ dryRun = true, planIds = null, only
     await lockClient.query("SELECT pg_advisory_unlock($1)", [LOCK_ID]).catch(() => {});
     lockClient.release();
   }
-}
-
-export function startMaintenanceAlertScheduler() {
-  if (config.readOnly || !process.env.EVOLUTION_API_URL || !process.env.EVOLUTION_API_KEY) return null;
-  let pending = null;
-  const execute = () => {
-    if (pending) return;
-    pending = runMaintenanceAlerts({dryRun: false})
-      .catch(error => console.error("Alerta de manutenção:", error.code || error.name))
-      .finally(() => { pending = null; });
-  };
-  const first = setTimeout(execute, 120000);
-  const timer = setInterval(execute, 10 * 60000);
-  return async () => { clearTimeout(first); clearInterval(timer); await pending; };
 }

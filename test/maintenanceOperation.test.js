@@ -6,9 +6,10 @@ import {alertType, componentAlertType, buildMaintenanceAlertMessage, runMaintena
 import {setN8nAutomationActive, retryLastFailedN8nAutomation} from '../src/services/n8nService.js';
 import {config} from '../src/config.js';
 
-test('terminal defaults to simulation; live manual send requires an explicit plan selection', () => {
+test('terminal only permits simulation; local send and worker modes are removed', () => {
   assert.equal(parseMaintenanceCommand([]).dryRun, true);
-  assert.deepEqual(parseMaintenanceCommand(['--send', '--ids=65,82']), {mode: '--send', planIds: [65,82], dryRun: false, onlyOverdue: true});
+  assert.throws(()=>parseMaintenanceCommand(['--send','--ids=65,82']));
+  assert.throws(()=>parseMaintenanceCommand(['--worker']));
   for (const args of [['--send'], ['--send','--preview'], ['--worker','--ids=65'], ['--send','--ids='], ['--send','--ids=65,0'], ['--all']]) {
     assert.throws(() => parseMaintenanceCommand(args));
   }
@@ -38,9 +39,12 @@ test('kilometre alerts preserve exact service threshold and do not infer movemen
   assert.equal(item.km_proximo_envio, 300000);
 });
 
-test('legacy n8n maintenance cannot be activated or retried from the application', async () => {
+test('legacy n8n maintenance cannot be activated or retried from the application', async (t) => {
+  const calls=[];
+  t.mock.method(globalThis,'fetch',async (url,options)=>{calls.push({url,method:options?.method||'GET'});return {ok:true,text:async()=>JSON.stringify({nodes:[]})};});
   await assert.rejects(setN8nAutomationActive('hhjl1q5uyxov5kZI', true), {statusCode: 409});
   await assert.rejects(retryLastFailedN8nAutomation('hhjl1q5uyxov5kZI'), {statusCode: 409});
+  assert.ok(calls.every(call=>call.method==='GET'));
 });
 
 test('invalid plan filters and read-only mode fail before connecting or sending', async () => {

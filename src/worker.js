@@ -8,5 +8,5 @@ if (config.readOnly) {
 } else {
   startAnttMonitor();
   startEmptyVehicleAlertScheduler();
-  logger.info("Worker de alertas de veículos vazios iniciado; manutenção usa npm run worker:maintenance");
+  logger.info("Worker de alertas de veículos vazios iniciado; manutenção é agendada exclusivamente pelo n8n");
 }

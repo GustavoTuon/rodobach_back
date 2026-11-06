@@ -40,6 +40,7 @@ import { folgasMotoristasRouter } from "./routes/folgasMotoristas.js";
 import { consultaCteRouter } from "./routes/consultaCte.js";
 import { canhotosRouter } from "./routes/canhotos.js";
 import { multasFrotaRouter } from "./routes/multasFrota.js";
+import { maintenanceIntegrationRouter } from './routes/maintenanceIntegration.js';
 import { startEmptyVehicleAlertScheduler } from "./services/statusCargaAlertaService.js";
 import { startDailyOdometerCollector } from "./services/dailyOdometer.js";
 
@@ -121,6 +122,9 @@ app.get("/api/health/viagens", requireAuth, requireAdmin, async (_req, res) => {
 // Autenticação (login não requer token)
 app.use("/api", authRouter);
 app.use("/api", comprasPublicRouter);
+// Dedicated machine credential, limited to maintenance; no user session required.
+app.use('/api/integracoes/n8n/manutencao', rateLimit({windowMs:60000,limit:6,standardHeaders:true,legacyHeaders:false}));
+app.use('/api', maintenanceIntegrationRouter);
 
 // ── Rotas protegidas (JWT obrigatório a partir daqui) ─────────────────────────
 app.use("/api", requireAuth);
