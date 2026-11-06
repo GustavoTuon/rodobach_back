@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import {pool} from '../src/db/pool.js';
 import {tableName,config,quoteIdent} from '../src/config.js';
-const files=['082_bloco_notas.sql','086_notas_tarefas_frota.sql'];
+const files=['082_bloco_notas.sql','086_notas_tarefas_frota.sql','087_bloco_notas_acesso_individual.sql'];
 const client=await pool.connect();
 try {
   await client.query('BEGIN');

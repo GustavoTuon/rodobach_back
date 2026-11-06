@@ -80,3 +80,10 @@ test('lote valida frota, remove placas repetidas e salva em uma instrução',asy
  assert.equal(query.mock.callCount(),2);
  const fleet=await request(app()).get('/notas/frota');assert.deepEqual(fleet.body.vehicles[0].implements,['DEF5678']);assert.equal(fleet.body.vehicles[0].category,'carreta');
 });
+
+test('admin consulta sem concessão; usuário comum só após liberação individual',async t=>{
+ t.mock.method(pool,'query',async()=>({rows:[]}));
+ assert.equal((await request(app({id:1,admin:true,permissions:{}})).get('/notas')).status,200);
+ assert.equal((await request(app({id:42,admin:false,permissions:{'bloco-notas':false}})).get('/notas')).status,403);
+ assert.equal((await request(app({id:42,admin:false,permissions:{'bloco-notas':true}})).get('/notas')).status,200);
+});
