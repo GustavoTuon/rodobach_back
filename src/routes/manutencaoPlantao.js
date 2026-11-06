@@ -87,8 +87,8 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, asyn
     res.set("Cache-Control","no-store").json({methods:rows});
   } catch(error) {next(error);}
 });
-manutencaoPlantaoRouter.get("/manutencao-plantao/documentos-erp", requirePermission("lancamento-despesas"), async (req,res,next) => {
-  if (!hasAction(req,"lancamento-despesas")) return res.status(403).json({error:"Sem permissão para consultar documentos de lançamento."});
+manutencaoPlantaoRouter.get("/manutencao-plantao/documentos-erp", requirePermission(["lancamento-despesas","conferencia-manutencao"]), async (req,res,next) => {
+  if (!hasAction(req,"lancamento-despesas") && !hasAction(req,"conferencia-manutencao")) return res.status(403).json({error:"Sem permissão para consultar documentos de lançamento."});
   const query=z.string().trim().min(2).max(80).safeParse(req.query.q);
   if (!query.success) return res.status(400).json({error:"Informe de 2 a 80 caracteres para buscar."});
   try {res.set("Cache-Control","no-store").json(await searchExpenseErpDocuments(query.data));} catch(error) {next(error);}
@@ -211,7 +211,7 @@ async function mutate(req, res, next, action) {
   try {
     const body = req.body;
     const controls = [["erpDocument","lancamento-despesas"],["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
-    if (controls.some(([field,key]) => body[field] !== undefined && !hasAction(req,key))) {
+    if (controls.some(([field,key]) => body[field] !== undefined && !hasAction(req,key) && !(action === "check" && ["erpDocument","posted"].includes(field) && hasAction(req,"conferencia-manutencao")))) {
       return res.status(403).json({error:"Você não possui permissão para alterar este controle da despesa."});
     }
     if (["edit","delete"].includes(action) && !canManage(req) && req.user.permissions?.["manutencao-plantao"] !== true) {
@@ -241,8 +241,8 @@ async function mutate(req, res, next, action) {
       before = (await client.query(`SELECT * FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL FOR UPDATE`,[req.params.id])).rows[0];
       if (!before) return await reject(404,"Lançamento não encontrado.");
       if (["edit","delete"].includes(action) && !canManage(req) && String(before.usuario_id) !== String(req.user.id)) return await reject(403,"Você só pode alterar seus próprios lançamentos.");
-      if ((before.conferido_em || before.pago) && !["check", "status"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
-      if (before.revisao !== body.version && !(action === "check" && before.conferido_em)) return await reject(409,"Este lançamento foi alterado. Atualize a lista antes de continuar.");
+      if ((before.conferido_em || before.pago) && !["check", "uncheck", "status"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
+      if (before.revisao !== body.version) return await reject(409,"Este lançamento foi alterado. Atualize a lista antes de continuar.");
     }
     let after;
     if (["create","edit"].includes(action)) {
@@ -330,12 +330,14 @@ async function mutate(req, res, next, action) {
         documento_erp=$8,revisao=revisao+1 WHERE id=$1 RETURNING *`,
       [before.id,body.paymentDate === undefined ? before.pago : Boolean(body.paymentDate),body.posted === undefined ? before.lancado : body.posted,body.paymentDate === undefined ? before.data_pagamento : body.paymentDate,
         method?.code ?? null,method?.company ?? null,method?.name ?? null,body.erpDocument === undefined ? before.documento_erp : body.erpDocument])).rows[0];
+    } else if (action === "uncheck") {
+      after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=NULL,conferido_login=NULL,conferido_em=NULL,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id])).rows[0];
     } else if (action === "delete") {
       after = (await client.query(`UPDATE ${TABLE()} SET excluido_em=NOW(),excluido_por=$2,motivo_exclusao=$3,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.login,body.reason])).rows[0];
     } else {
       if (before.conferido_em) {await client.query("COMMIT"); return res.json({record:record(before)});}
       if (!before.comprovante_foto && (before.justificativa_sem_nota || "").trim().length<10) return await reject(400,"Anexe a nota ou registre a justificativa antes de conferir.");
-      after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login])).rows[0];
+      after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),documento_erp=$4,lancado=$5,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login,body.erpDocument ?? before.documento_erp,body.posted ?? before.lancado])).rows[0];
     }
     if (action === "status" && body.reimbursement) {
       const error = validateReimbursement(body.reimbursement, today());
@@ -373,4 +375,4 @@ for (const path of ["lancamentos","conferencia"]) {
     } catch(error) {next(error);}
   });
 }
-manutencaoPlantaoRouter.patch("/manutencao-plantao/conferencia/:id",canReview,validateBody(z.object({version:z.number().int().positive()}).strict()),(req,res,next)=>mutate(req,res,next,"check"));
+manutencaoPlantaoRouter.patch("/manutencao-plantao/conferencia/:id",canReview,validateBody(z.object({version:z.number().int().positive(),checked:z.boolean().optional(),erpDocument:z.string().trim().max(80).optional(),posted:z.boolean().optional()}).strict().refine(body=>body.checked !== false || (body.erpDocument === undefined && body.posted === undefined))),(req,res,next)=>mutate(req,res,next,req.body.checked === false ? "uncheck" : "check"));

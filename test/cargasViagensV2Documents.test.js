@@ -94,3 +94,16 @@ test("delivery sync locks before reading links and completes only unambiguous fu
   assert.deepEqual(calls.find(call => call.sql.includes("AS carga_id")).params, [[1,2,3,4,5]]);
   assert.equal(calls.at(-1).sql, "COMMIT");
 });
+
+test("trip print payload includes material and volumes of linked loads", async t => {
+  t.mock.method(pool,"query",async sql=>{
+    assert.match(sql,/'material', c\.material/);
+    return {rows:[{id:1746,cargas:[{id:4471,material:"JANELA ALUMINIO",peso:6000,volumes:12,documentos:[]}]}]};
+  });
+  t.mock.method(clientPool,"query",async()=>({rows:[]}));
+  const app=express();app.use(cargasViagensV2Router);
+  const response=await request(app).get('/cargas-viagens-v2/viagens/1746');
+  assert.equal(response.status,200);
+  assert.equal(response.body.cargas[0].material,'JANELA ALUMINIO');
+  assert.equal(response.body.cargas[0].volumes,12);
+});

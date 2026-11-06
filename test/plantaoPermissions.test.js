@@ -151,10 +151,31 @@ test("documento financeiro é salvo e auditado sem conferir ou pagar",async t=>{
 });
 test("busca financeira exige permissão e usa consulta parametrizada",async t=>{
  const query=t.mock.method(clientPool,'query',async()=>({rows:[]}));
- assert.equal((await request(app(reviewer)).get('/manutencao-plantao/documentos-erp?q=123')).status,403);
+ assert.equal((await request(app(driver)).get('/manutencao-plantao/documentos-erp?q=123')).status,403);
  const user={id:44,permissions:{'lancamento-despesas':true}};
  assert.equal((await request(app(user)).get('/manutencao-plantao/documentos-erp?q=x')).status,400);
  assert.equal(query.mock.callCount(),0);
  const response=await request(app(user)).get('/manutencao-plantao/documentos-erp').query({q:"123'"});
  assert.equal(response.status,200);assert.deepEqual(query.mock.calls[0].arguments[1],["123'"]);
+});
+
+test("conferência salva vínculo e reversão preserva controles com auditoria",async t=>{
+ let row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:true,lancado:false,documento:'NF-99',documento_erp:'',comprovante_foto:'receipt'};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SET conferido_por=$2')) row={...row,conferido_por:params[1],conferido_login:params[2],conferido_em:new Date(),documento_erp:params[3],lancado:params[4],revisao:row.revisao+1};
+  if(sql.includes('SET conferido_por=NULL')) row={...row,conferido_por:null,conferido_login:null,conferido_em:null,revisao:row.revisao+1};
+  return {rows:[row]};
+ }}));
+ const url=`/manutencao-plantao/conferencia/${id}`;
+ let response=await request(app(reviewer)).patch(url).send({version:1,posted:true,erpDocument:'123'});
+ assert.equal(response.status,200);assert.equal(response.body.record.checked,true);assert.equal(response.body.record.erpDocument,'123');
+ assert.equal((await request(app(reviewer)).patch(url).send({version:1,checked:false})).status,409);
+ assert.equal((await request(app(driver)).patch(url).send({version:2,checked:false})).status,403);
+ assert.equal((await request(app({...reviewer,readOnly:true})).patch(url).send({version:2,checked:false})).status,403);
+ response=await request(app(reviewer)).patch(url).send({version:2,checked:false});
+ assert.equal(response.status,200);assert.equal(response.body.record.checked,false);assert.equal(response.body.record.paid,true);assert.equal(response.body.record.posted,true);assert.equal(response.body.record.erpDocument,'123');
+ const audit=writes.filter(x=>x.sql.includes('INSERT INTO')&&x.sql.includes('historico')).at(-1);
+ assert.equal(audit.params[1],'uncheck');assert.ok(JSON.parse(audit.params[4]).conferido_em);assert.equal(JSON.parse(audit.params[5]).conferido_em,null);
 });
