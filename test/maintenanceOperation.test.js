@@ -40,11 +40,25 @@ test('kilometre alerts preserve exact service threshold and do not infer movemen
 });
 
 test('legacy n8n maintenance cannot be activated or retried from the application', async (t) => {
+  const previous = config.n8n;
+  config.n8n = {...previous, apiUrl:'https://n8n.example.test', apiKey:'test-only-key'};
+  t.after(()=>{config.n8n=previous;});
   const calls=[];
   t.mock.method(globalThis,'fetch',async (url,options)=>{calls.push({url,method:options?.method||'GET'});return {ok:true,text:async()=>JSON.stringify({nodes:[]})};});
   await assert.rejects(setN8nAutomationActive('hhjl1q5uyxov5kZI', true), {statusCode: 409});
   await assert.rejects(retryLastFailedN8nAutomation('hhjl1q5uyxov5kZI'), {statusCode: 409});
+  assert.equal(calls.length,2);
   assert.ok(calls.every(call=>call.method==='GET'));
+});
+
+test('missing n8n configuration fails before any network request', async (t) => {
+  const previous = config.n8n;
+  config.n8n = {...previous, apiUrl:'', apiKey:''};
+  t.after(()=>{config.n8n=previous;});
+  const fetch=t.mock.method(globalThis,'fetch',async()=>{throw new Error('Unexpected network request');});
+  await assert.rejects(setN8nAutomationActive('hhjl1q5uyxov5kZI',true),{statusCode:503});
+  await assert.rejects(retryLastFailedN8nAutomation('hhjl1q5uyxov5kZI'),{statusCode:503});
+  assert.equal(fetch.mock.callCount(),0);
 });
 
 test('invalid plan filters and read-only mode fail before connecting or sending', async () => {
