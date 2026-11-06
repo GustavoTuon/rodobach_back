@@ -1,3 +1,4 @@
+import {searchExpenseErpDocuments} from '../services/expenseErpDocuments.js';
 import { reimbursementSchema, validateReimbursement } from '../services/expenseReimbursement.js';
 import express from "express";
 import { randomUUID } from "node:crypto";
@@ -17,7 +18,7 @@ import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services
 export const manutencaoPlantaoRouter = express.Router();
 const TABLE = () => tableName("manutencao_plantao");
 const LIST_COLUMNS = `id,placa,valor,servico,observacao,fornecedor,fornecedor_codigo,fornecedor_empresa,
-  usuario_id,usuario_login,data_despesa,documento,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,dados_pagamento,
+  usuario_id,usuario_login,data_despesa,documento,documento_erp,revisao,criado_em,conferido_em,conferido_login,forma_pagamento_codigo,forma_pagamento_empresa,forma_pagamento_nome,descarga,tipo_documento,numero_fogo,viagem_despesa,dados_pagamento,
   pneu_vinculado,reembolso,hora_despesa,perfil_autor,justificativa_sem_nota,pago,lancado,data_pagamento,origem,litros,hodometro,local_despesa,combustivel_tipo,cliente_nota,hodometro_telemetria_em,(comprovante_foto IS NOT NULL) AS tem_comprovante,(painel_foto IS NOT NULL) AS tem_painel,(bomba_foto IS NOT NULL) AS tem_bomba,valor_combustivel,arla_litros,arla_valor`;
 const canRegister = requirePermission("manutencao-plantao");
 const canReview = (req, res, next) => isExpenseDriver(req.user)
@@ -76,7 +77,7 @@ function record(row) {
     paymentDate: row.data_pagamento instanceof Date ? row.data_pagamento.toLocaleDateString("en-CA") : row.data_pagamento ?? null,
     unloading:row.descarga || null,
     paymentMethod: row.forma_pagamento_codigo == null ? null : {code:row.forma_pagamento_codigo,company:row.forma_pagamento_empresa,name:row.forma_pagamento_nome},
-    paid: row.pago ?? null, posted: row.lancado ?? null, document: row.documento, version: row.revisao, checkedAt: row.conferido_em,
+    paid: row.pago ?? null, posted: row.lancado ?? null, erpDocument: row.documento_erp || "", document: row.documento, version: row.revisao, checkedAt: row.conferido_em,
     tire: row.pneu_vinculado || null, date: row.criado_em, checked: Boolean(row.conferido_em), checkedBy: row.conferido_login};
 }
 manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, async (_req,res,next) => {
@@ -85,6 +86,12 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, asyn
       FROM financeiro.formaspagamento WHERE ativofpg='S' ORDER BY nomefpg,empresafpg,codigofpg`);
     res.set("Cache-Control","no-store").json({methods:rows});
   } catch(error) {next(error);}
+});
+manutencaoPlantaoRouter.get("/manutencao-plantao/documentos-erp", requirePermission("lancamento-despesas"), async (req,res,next) => {
+  if (!hasAction(req,"lancamento-despesas")) return res.status(403).json({error:"Sem permissão para consultar documentos de lançamento."});
+  const query=z.string().trim().min(2).max(80).safeParse(req.query.q);
+  if (!query.success) return res.status(400).json({error:"Informe de 2 a 80 caracteres para buscar."});
+  try {res.set("Cache-Control","no-store").json(await searchExpenseErpDocuments(query.data));} catch(error) {next(error);}
 });
 export async function plantaoPlates() {
   const [telemetry, extra] = await Promise.all([
@@ -203,7 +210,7 @@ async function mutate(req, res, next, action) {
   let expenseTrip = null;
   try {
     const body = req.body;
-    const controls = [["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
+    const controls = [["erpDocument","lancamento-despesas"],["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
     if (controls.some(([field,key]) => body[field] !== undefined && !hasAction(req,key))) {
       return res.status(403).json({error:"Você não possui permissão para alterar este controle da despesa."});
     }
@@ -320,9 +327,9 @@ async function mutate(req, res, next, action) {
       } else if (body.paymentDate === null) method=null;
       after = (await client.query(`UPDATE ${TABLE()} SET pago=$2,lancado=$3,data_pagamento=$4,
         forma_pagamento_codigo=$5,forma_pagamento_empresa=$6,forma_pagamento_nome=$7,
-        revisao=revisao+1 WHERE id=$1 RETURNING *`,
+        documento_erp=$8,revisao=revisao+1 WHERE id=$1 RETURNING *`,
       [before.id,body.paymentDate === undefined ? before.pago : Boolean(body.paymentDate),body.posted === undefined ? before.lancado : body.posted,body.paymentDate === undefined ? before.data_pagamento : body.paymentDate,
-        method?.code ?? null,method?.company ?? null,method?.name ?? null])).rows[0];
+        method?.code ?? null,method?.company ?? null,method?.name ?? null,body.erpDocument === undefined ? before.documento_erp : body.erpDocument])).rows[0];
     } else if (action === "delete") {
       after = (await client.query(`UPDATE ${TABLE()} SET excluido_em=NOW(),excluido_por=$2,motivo_exclusao=$3,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.login,body.reason])).rows[0];
     } else {
@@ -345,7 +352,7 @@ async function mutate(req, res, next, action) {
 manutencaoPlantaoRouter.post("/manutencao-plantao/lancamentos",canRegister,validateBody(schema),(req,res,next)=>mutate(req,res,next,"create"));
 for (const path of ["lancamentos","conferencia"]) {
   const permission = canRead;
-  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canRead,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
+  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canRead,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),erpDocument:z.string().trim().max(80).optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.erpDocument !== undefined || body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
   manutencaoPlantaoRouter.put(`/manutencao-plantao/${path}/:id`,permission,validateBody(changeSchema),(req,res,next)=>mutate(req,res,next,"edit"));
   manutencaoPlantaoRouter.delete(`/manutencao-plantao/${path}/:id`,permission,validateBody(deleteSchema),(req,res,next)=>mutate(req,res,next,"delete"));
   manutencaoPlantaoRouter.get(`/manutencao-plantao/${path}/:id/comprovante`,permission,async(req,res,next)=>{

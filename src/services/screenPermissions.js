@@ -1,4 +1,5 @@
 export const EXTRA_SCREEN_PERMISSIONS = [
+  {id:"bloco-notas",label:"Bloco de notas pessoal",group:"sistema",legacy:null,column:"perm_bloco_notas"},
   { id: "compras", label: "Compras", group: "operacao", legacy: null, column: "perm_compras" },
   { id: "ociosidade-frota", label: "Ociosidade (teste)", group: "operacao", legacy: "perm_status_carga", column: "perm_ociosidade_frota" },
   {

@@ -18,14 +18,14 @@ const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":tru
 const id="55926d25-6e7d-4c22-a36d-747c0402c18a";
 test("cada ação financeira exige permissão própria, inclusive em payload misto",async t=>{
  const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
- const fields={paymentDate:null,posted:true,reimbursement:{status:"nao_aplicavel",customer:"",document:"",receivedDate:null,note:""}};
- const permissions={paymentDate:"pagamento-despesas",posted:"lancamento-despesas",reimbursement:"reembolso-despesas"};
+ const fields={erpDocument:"123",paymentDate:null,posted:true,reimbursement:{status:"nao_aplicavel",customer:"",document:"",receivedDate:null,note:""}};
+ const permissions={erpDocument:"lancamento-despesas",paymentDate:"pagamento-despesas",posted:"lancamento-despesas",reimbursement:"reembolso-despesas"};
  for(const [field,value] of Object.entries(fields)) {
    for(const user of [driver,reviewer,{id:44,permissions:{[permissions[field]]:true},expenseProfile:"motorista"}]) {
      assert.equal((await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,[field]:value})).status,403);
    }
    const user={id:44,permissions:{[permissions[field]]:true}};
-   const other=field==="posted" ? "paymentDate" : "posted";
+   const other=["posted","erpDocument"].includes(field) ? "paymentDate" : "posted";
    assert.equal((await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,[field]:value,[other]:fields[other]})).status,403);
    assert.equal((await request(app(user)).patch(`/manutencao-plantao/conferencia/${id}`).send({version:1})).status,403);
  }
@@ -52,6 +52,20 @@ test("permissão isolada altera somente seu controle em despesa de outro autor",
  assert.equal(writes.filter(x=>x.sql.includes('INSERT INTO') && x.sql.includes('historico')).length,4);
 });
 function app(user) {const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user=user;next();});app.use(requireRoutePermission);app.use(enforceReadOnly);app.use(manutencaoPlantaoRouter);app.use(usuariosRouter);return app;}
+test("pagamento mantém a despesa aguardando conferência e preserva documento financeiro",async t=>{
+ const row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:false,lancado:true,documento_erp:'123'};
+ t.mock.method(clientPool,'query',async()=>({rows:[{code:'1',company:'1',name:'PIX'}]}));
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  if(sql.includes('SET pago=')) {
+   assert.doesNotMatch(sql,/conferido_em\s*=/);
+   return {rows:[{...row,pago:params[1],lancado:params[2],data_pagamento:params[3],documento_erp:params[7]}]};
+  }
+  return {rows:[row]};
+ }}));
+ const response=await request(app({id:44,permissions:{'pagamento-despesas':true}})).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,paymentDate:'2026-01-01',paymentMethod:{code:'1',company:'1'}});
+ assert.equal(response.status,200);assert.equal(response.body.record.paid,true);
+ assert.equal(response.body.record.checked,false);assert.equal(response.body.record.erpDocument,'123');
+});
 test("motorista não lê nem altera conferência, inclusive por URL direta",async t=>{
  const query=t.mock.method(pool,"query",async()=>{throw new Error("must not query");});
  assert.equal((await request(app(driver)).get("/manutencao-plantao/conferencia")).status,403);
@@ -118,4 +132,29 @@ test("admin salva e lê as novas permissões; usuário comum não altera permiss
  const [sql,params]=query.mock.calls[2].arguments;assert.match(sql,/\$36/);assert.equal(params.length,35+EXTRA_PERMISSION_COLUMNS.length);
  assert.deepEqual(params.slice(33,33+EXTRA_PERMISSION_COLUMNS.length),EXTRA_PERMISSION_COLUMNS.map(column=>body[column]===true));
  assert.deepEqual(params.slice(-2),["colaborador",null]);
+});
+
+test("documento financeiro é salvo e auditado sem conferir ou pagar",async t=>{
+ const row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:false,lancado:false,documento:'NF-99',documento_erp:''};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SET pago=')) return {rows:[{...row,lancado:params[2],documento_erp:params[7]}]};
+  return {rows:[row]};
+ }}));
+ const response=await request(app({id:44,permissions:{'lancamento-despesas':true}})).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,posted:true,erpDocument:' 123 '});
+ assert.equal(response.status,200);
+ assert.equal(response.body.record.erpDocument,'123');assert.equal(response.body.record.document,'NF-99');
+ assert.equal(response.body.record.paid,false);assert.equal(response.body.record.checked,false);
+ const audit=writes.find(x=>x.sql.includes('INSERT INTO') && x.sql.includes('historico'));
+ assert.equal(JSON.parse(audit.params[5]).documento_erp,'123');
+});
+test("busca financeira exige permissão e usa consulta parametrizada",async t=>{
+ const query=t.mock.method(clientPool,'query',async()=>({rows:[]}));
+ assert.equal((await request(app(reviewer)).get('/manutencao-plantao/documentos-erp?q=123')).status,403);
+ const user={id:44,permissions:{'lancamento-despesas':true}};
+ assert.equal((await request(app(user)).get('/manutencao-plantao/documentos-erp?q=x')).status,400);
+ assert.equal(query.mock.callCount(),0);
+ const response=await request(app(user)).get('/manutencao-plantao/documentos-erp').query({q:"123'"});
+ assert.equal(response.status,200);assert.deepEqual(query.mock.calls[0].arguments[1],["123'"]);
 });

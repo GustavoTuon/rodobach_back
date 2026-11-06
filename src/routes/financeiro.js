@@ -1,4 +1,5 @@
 import {getCustoRastreabilidade} from '../services/custoRastreabilidade.js';
+import {loadFleetRevenue} from '../services/fleetRevenueService.js';
 import { Router } from "express";
 import {
   getAvailableDrivers,
@@ -42,6 +43,11 @@ import { getFaturamentoMensalComparativo } from "../services/faturamentoMensalCo
 import { getAlertasOperacionaisMensagem } from "../services/alertasOperacionaisMensagemService.js";
 
 export const financeiroRouter = Router();
+
+financeiroRouter.get('/financeiro/painel-faturamento',async(req,res,next)=>{
+  try {res.set('Cache-Control','no-store').json(await loadFleetRevenue(req.query.month,new Date(),{margin:req.query.margin,reserve:req.query.reserve}));}
+  catch(error) {if(error.status===400)return res.status(400).json({error:error.message});next(error);}
+});
 
 financeiroRouter.get("/financeiro/embarques-clientes", async (req, res, next) => {
   try {

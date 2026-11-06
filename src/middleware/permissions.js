@@ -1,4 +1,6 @@
 const ROUTE_PERMISSIONS = [
+  [/^\/notas(?:\/|$)/, "bloco-notas"],
+  [/^\/financeiro\/painel-faturamento(?:\/|$)/, "faturamento-diario"],
   [/^\/compras(?:\/|$)/, "compras"],
   [/^\/admin\//, "admin"],
   [/^\/usuarios(?:\/|$)/, "admin"],
