@@ -107,8 +107,8 @@ export async function getMaintenanceAudit(pool, filters = {}) {
   return { rows: result.rows.slice(0, 50), pagina: page, temMais: result.rows.length > 50,
     ultimaExecucao: runs.rows[0] || null,
     agendadorNestaApi: false,
-    executorManutencao: "worker",
-    agendamentoDiario: process.env.MAINTENANCE_DAILY_TIME === "08:00" ? "08:00 — Brasília" : null,
+    executorManutencao: "n8n",
+    agendamentoDiario: "08:00 — Brasília (quando o fluxo estiver ativo)",
     whatsappConfigurado: Boolean(process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY),
     somenteConsulta: config.readOnly };
 }

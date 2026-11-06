@@ -198,24 +198,30 @@ Validação em schema temporário, removido ao final:
 As migrações `045_painel_carga_confirmacoes.sql` e `046_manutencao_auditoria.sql`
 precisam estar aplicadas no banco da aplicação para os novos históricos.
 
-Para alertas diários, configure `MAINTENANCE_ALERT_NUMBER` com o destinatário
-exclusivo e `MAINTENANCE_DAILY_TIME=08:00`. Agende `node scripts/maintenance-daily.mjs`
-diariamente às 08:00 em `America/Sao_Paulo`, com o diretório de trabalho na raiz
-do backend. O script verifica se o fluxo antigo de manutenção no n8n está inativo
-antes de enviar. Não execute junto com o worker de manutenção de dez minutos.
+O agendamento da manutenção foi migrado para o n8n em 06/11/2026.
+Workflow: `hhjl1q5uyxov5kZI`, diariamente às 08:00 em `America/Sao_Paulo`.
+**Permanece desativado enquanto os vencimentos são atualizados.**
 
-A consulta é diária, mas o mesmo alerta não é reenviado a cada dia: o histórico
-é consultado por plano/componente, marco, tipo (próximo ou vencido) e destinatário.
-Registros antigos com sufixo de data também impedem repetição. Um novo marco ou
-a passagem de próximo para vencido permite um novo aviso. Tentativas inconclusivas
-ficam bloqueadas para conferência; falhas definitivas podem ser tentadas novamente.
+O n8n chama `POST /api/integracoes/n8n/manutencao` na API hospedada.
+O endpoint exige credencial Bearer exclusiva, cujo hash e destinatário ficam em
+`manutencao_n8n_integracao` (migração 085). O segredo fica nas credenciais do n8n.
+Não utiliza a sessão de um usuário nem depende de caminhos do Windows.
+A função original preserva mensagem, dados do veículo, fonte do KM, destinatários,
+componentes, auditoria e proteção contra duplicidade.
 
-O agendamento do Windows, contatos no banco e valores de `.env` são configurações
-do ambiente e não são instalados pelo Git. No Windows, o script
-`scripts/maintenance-daily.ps1` pode ser usado pelo Agendador de Tarefas.
-Falhas tentam notificar o mesmo destinatário; se o WhatsApp também falhar, consulte
-`.local-logs/maintenance-daily.jsonl`. Logs, credenciais e backups locais não são
-versionados.
+Antes de ativar: publicar este backend, confirmar o endpoint com `dryRun: true`,
+atualizar os vencimentos e obter autorização para retomar os envios.
+O fluxo em produção usa `dryRun: false`, timeout de 5 minutos e sem repetição
+HTTP automática. Erros e resultados parciais falham a execução do n8n; não há
+aviso externo de falha configurado neste fluxo. Consultar execuções e auditoria.
+
+O mesmo marco/tipo/destinatário não é reenviado. Tentativas inconclusivas ficam
+bloqueadas para conferência. Não modificar isso para forçar reenvios.
+
+A tarefa Windows `Rodobach-Manutencao-0800` foi removida com backup local.
+Os scripts diários e o worker de manutenção foram removidos. A única opção de
+terminal restante é `npm run maintenance:preview`, que nunca envia mensagens.
+Backups do fluxo antigo e da tarefa estão em `.local-logs/`, fora do Git.
 
 API Node.js/Express para alimentar as telas ativas do front:
 
