@@ -8,7 +8,7 @@ import {enforceReadOnly} from '../middleware/readOnly.js';
 export const notasRouter=express.Router();
 const table=()=>tableName('bloco_notas');
 const bodySchema=z.object({id:z.uuid(),title:z.string().trim().max(120),plate:z.string().regex(/^$|^[A-Z]{3}\d[A-Z0-9]\d{2}$/),text:z.string().trim().min(1).max(20000),version:z.number().int().nonnegative()}).strict().refine(body=>body.title||body.plate);
-const record=row=>({id:row.id,title:row.titulo,plate:row.placa,text:row.texto,version:row.revisao,updatedAt:row.atualizado_em,createdAt:row.criado_em});
+const record=(row,user)=>({authorId:row.usuario_id,authorName:row.autor||(row.usuario_id===user.id?user.login:null)||null,canEdit:row.usuario_id===user.id&&!user.readOnly,id:row.id,title:row.titulo,plate:row.placa,text:row.texto,version:row.revisao,updatedAt:row.atualizado_em,createdAt:row.criado_em});
 notasRouter.use('/notas',requirePermission('bloco-notas'),enforceReadOnly,(req,res,next)=>{
  if(!req.user?.id)return res.status(401).json({error:'Autenticação necessária.'});
  res.set('Cache-Control','no-store');next();
@@ -16,7 +16,7 @@ notasRouter.use('/notas',requirePermission('bloco-notas'),enforceReadOnly,(req,r
 notasRouter.get('/notas/placas',async(req,res,next)=>{
  try {const {rows}=await clientPool.query(`SELECT DISTINCT upper(trim(placavei)) AS plate FROM frotas.veiculos WHERE situacaovei::text='1' AND NULLIF(trim(placavei),'') IS NOT NULL ORDER BY 1`);res.json({plates:rows.map(row=>row.plate)});}catch(error){next(error);}
 });
-// Fleet and tasks remain personal, following the existing notes permission.
+// Tasks remain personal; saved notes are readable by everyone granted notes access.
 const taskTable=()=>tableName('bloco_notas_tarefas');
 const plateSchema=z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/);
 const taskRecord=row=>({id:row.id,plate:row.placa,title:row.titulo,done:row.concluida,version:row.revisao,updatedAt:row.atualizado_em});
@@ -67,16 +67,16 @@ notasRouter.get('/notas',async(req,res,next)=>{
  if(!plate.success)return res.status(400).json({error:'Placa inválida.'});
  if(!query.success)return res.status(400).json({error:'Busca inválida.'});
  try {
-  const {rows}=await pool.query(`SELECT id,titulo,placa,left(texto,160) AS texto,revisao,atualizado_em,criado_em FROM ${table()}
-   WHERE usuario_id=$1 AND excluido_em IS NULL AND ($2='' OR strpos(lower(titulo || ' ' || placa || ' ' || texto),lower($2))>0)
-   AND ($3::text IS NULL OR placa=$3) ORDER BY atualizado_em DESC,id LIMIT 101`,[req.user.id,query.data,plate.data??null]);
-  res.json({notes:rows.slice(0,100).map(record),hasMore:rows.length>100});
+  const {rows}=await pool.query(`SELECT id,usuario_id,(SELECT login FROM ${tableName('usuarios')} WHERE id=n.usuario_id) AS autor,titulo,placa,left(texto,160) AS texto,revisao,atualizado_em,criado_em FROM ${table()} n
+   WHERE excluido_em IS NULL AND ($1='' OR strpos(lower(titulo || ' ' || placa || ' ' || texto),lower($1))>0)
+   AND ($2::text IS NULL OR placa=$2) ORDER BY atualizado_em DESC,id LIMIT 101`,[query.data,plate.data??null]);
+  res.json({notes:rows.slice(0,100).map(row=>record(row,req.user)),hasMore:rows.length>100});
  }catch(error){next(error);}
 });
 notasRouter.get('/notas/:id',async(req,res,next)=>{
  if(!z.uuid().safeParse(req.params.id).success)return res.status(400).json({error:'Nota inválida.'});
- try {const {rows}=await pool.query(`SELECT * FROM ${table()} WHERE id=$1 AND usuario_id=$2 AND excluido_em IS NULL`,[req.params.id,req.user.id]);
-  if(!rows[0])return res.status(404).json({error:'Nota não encontrada.'});res.json({note:record(rows[0])});
+ try {const {rows}=await pool.query(`SELECT n.*,(SELECT login FROM ${tableName('usuarios')} WHERE id=n.usuario_id) AS autor FROM ${table()} n WHERE id=$1 AND excluido_em IS NULL`,[req.params.id]);
+  if(!rows[0])return res.status(404).json({error:'Nota não encontrada.'});res.json({note:record(rows[0],req.user)});
  }catch(error){next(error);}
 });
 // Client-generated IDs make retries safe; versions protect simultaneous edits.
@@ -91,10 +91,10 @@ notasRouter.put('/notas/:id',async(req,res,next)=>{
   }else{
    ({rows}=await pool.query(`UPDATE ${table()} SET titulo=$3,placa=$4,texto=$5,revisao=revisao+1,atualizado_em=now() WHERE id=$1 AND usuario_id=$2 AND revisao=$6 AND excluido_em IS NULL RETURNING *`,[body.id,req.user.id,body.title,body.plate,body.text,body.version]));
   }
-  if(rows[0])return res.json({note:record(rows[0])});
+  if(rows[0])return res.json({note:record(rows[0],req.user)});
   const current=(await pool.query(`SELECT * FROM ${table()} WHERE id=$1 AND usuario_id=$2 AND excluido_em IS NULL`,[body.id,req.user.id])).rows[0];
   if(!current)return res.status(404).json({error:'Nota não encontrada ou removida. Salve seu texto como uma nova nota.'});
-  if(current.titulo===body.title&&current.placa===body.plate&&current.texto===body.text)return res.json({note:record(current)});
+  if(current.titulo===body.title&&current.placa===body.plate&&current.texto===body.text)return res.json({note:record(current,req.user)});
   res.status(409).json({error:'Esta nota foi alterada em outro aparelho. Seu rascunho foi preservado. Reabra a nota ou salve como nova nota.'});
  }catch(error){next(error);}
 });

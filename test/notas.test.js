@@ -15,19 +15,28 @@ test('sem permissão e acesso somente consulta não chegam ao banco',async t=>{
  assert.equal((await request(app({id:42,permissions:{'bloco-notas':true},readOnly:true})).put(`/notas/${id}`).send(body)).status,403);
  assert.equal(query.mock.callCount(),0);
 });
-test('listagem e leitura são restritas ao proprietário, inclusive administrador',async t=>{
+test('listagem e leitura compartilham notas com usuários autorizados e preservam autoria',async t=>{
  const query=t.mock.method(pool,'query',async(sql,params)=>{
-  assert.match(sql,/usuario_id=\$[12]/);assert.ok(params.includes(77));return {rows:[]};
+  assert.doesNotMatch(sql,/usuario_id=\$[12]/);assert.ok(!params.includes(77));return {rows:[{...row,autor:'Autor original'}]};
  });
- const admin=app({id:77,admin:true});
- assert.equal((await request(admin).get('/notas').query({q:"%' OR true"})).status,200);
- assert.equal((await request(admin).get(`/notas/${id}`)).status,404);assert.equal(query.mock.callCount(),2);
+ const reader=app({id:77,permissions:{'bloco-notas':true}});
+ const list=await request(reader).get('/notas').query({q:"%' OR true"});
+ assert.equal(list.status,200);assert.equal(list.body.notes[0].authorId,42);assert.equal(list.body.notes[0].canEdit,false);
+ const detail=await request(reader).get(`/notas/${id}`);assert.equal(detail.status,200);assert.equal(detail.body.note.authorName,'Autor original');assert.equal(query.mock.callCount(),2);
+});
+test('leitura compartilhada não concede edição ou exclusão das notas de outro autor',async t=>{
+ t.mock.method(pool,'query',async(sql,params)=>{
+  assert.match(sql,/usuario_id=\$2/);assert.equal(params[1],77);return {rows:[]};
+ });
+ const reader=app({id:77,permissions:{'bloco-notas':true}});
+ assert.equal((await request(reader).put(`/notas/${id}`).send({...body,version:1})).status,404);
+ assert.equal((await request(reader).delete(`/notas/${id}`).send({version:1})).status,409);
 });
 test('criação vincula autoria à sessão e aceita apenas campos previstos',async t=>{
  const query=t.mock.method(pool,'query',async(sql,params)=>{assert.equal(params[1],42);return {rows:[row]};});
  assert.equal((await request(app()).put(`/notas/${id}`).send({...body,usuario_id:77})).status,400);
  assert.equal((await request(app()).put(`/notas/${id}`).send({...body,title:'',plate:''})).status,400);
- const response=await request(app()).put(`/notas/${id}`).send(body);assert.equal(response.status,200);assert.equal(response.body.note.version,1);assert.equal(query.mock.callCount(),1);
+ const response=await request(app()).put(`/notas/${id}`).send(body);assert.equal(response.status,200);assert.equal(response.body.note.version,1);assert.equal(response.body.note.canEdit,true);assert.equal(query.mock.callCount(),1);
 });
 test('repetir criação após resposta perdida não duplica a nota',async t=>{
  t.mock.method(pool,'query',async sql=>({rows:sql.startsWith('INSERT')?[]:[row]}));
@@ -64,7 +73,7 @@ test('conclusão concorrente retorna conflito e lista é pessoal',async t=>{
  assert.equal((await request(app()).patch(`/notas/tarefas/${id}/ABC1234`).send({done:true,version:1})).status,409);
 });
 test('notas são filtradas pela placa exata sem perder busca por texto',async t=>{
- t.mock.method(pool,'query',async(sql,params)=>{assert.match(sql,/placa=\$3/);assert.deepEqual(params,[42,'pneu','ABC1234']);return {rows:[]};});
+ t.mock.method(pool,'query',async(sql,params)=>{assert.match(sql,/placa=\$2/);assert.deepEqual(params,['pneu','ABC1234']);return {rows:[]};});
  assert.equal((await request(app()).get('/notas').query({q:'pneu',plate:'ABC1234'})).status,200);
 });
 
