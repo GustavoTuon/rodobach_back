@@ -237,6 +237,7 @@ function mapViagem(row) {
       ufOrigem: carga.ufOrigem || "",
       destino: carga.destino || "",
       ufDestino: carga.ufDestino || "",
+      material: carga.material || "",
       peso: Number(carga.peso || 0),
       volumes: carga.volumes == null ? null : Number(carga.volumes),
       valorCliente: Number(carga.valorCliente || 0),
@@ -287,7 +288,7 @@ const viagemSelect = () => `
         'clienteFinal', c.cliente_final, 'tomadorServico', c.tomador_servico,
         'origem', c.cidade_origem, 'ufOrigem', c.uf_origem,
         'destino', c.cidade_destino, 'ufDestino', c.uf_destino,
-         'peso', c.peso_kg, 'volumes', c.volumes, 'valorCliente', c.valor_cliente, 'status', c.status,
+         'material', c.material, 'peso', c.peso_kg, 'volumes', c.volumes, 'valorCliente', c.valor_cliente, 'status', c.status,
         'documentos', COALESCE((
           SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
             'id', d.id, 'tipo', d.tipo_documento, 'numero', d.numero_documento,
