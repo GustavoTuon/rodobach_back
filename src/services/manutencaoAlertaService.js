@@ -3,6 +3,7 @@ import {sendAuditedMaintenance, maintenanceSendError, maintenanceAttemptExists} 
 import { config, tableName } from "../config.js";
 import { pool } from "../db/pool.js";
 import { sendWhatsappText } from "../routes/whatsapp.js";
+import { isWhatsappGroup, normalizeWhatsappRecipient } from "./whatsappRecipient.js";
 import { getStatusCargaFrota } from "./statusCargaService.js";
 import { loadMaintenanceOdometers } from "./maintenanceOdometer.js";
 export { latestValidFuelOdometer } from "./maintenanceOdometer.js";
@@ -14,7 +15,7 @@ const COMPONENT_ENVIOS = () => tableName("manutencao_componentes_alertas_enviado
 const LOCK_ID = 78482932;
 
 const normalizePlate = value => String(value || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-const phones = value => [...new Set(String(value || "").split(/[,;\s]+/).map(v => v.replace(/\D/g, "")).filter(Boolean))];
+const phones = value => [...new Set(String(value || "").split(/[,;\s]+/).map(normalizeWhatsappRecipient).filter(Boolean))];
 const formatKm = value => `${Number(value || 0).toLocaleString("pt-BR")} km`;
 const formatDate = value => maintenanceDate(value)?.split("-").reverse().join("/") || "-";
 const formatDateTime = value => value && !Number.isNaN(new Date(value).getTime())
@@ -129,7 +130,7 @@ export function buildMaintenanceAlertMessage(item, status, event, currentKm) {
 export async function runMaintenanceAlerts({ dryRun = true, planIds = null, onlyOverdue = false, dailyDate = null, recipientNumber = null } = {}) {
   if (dailyDate !== null && maintenanceDate(dailyDate) !== dailyDate) throw new Error("Data de execução inválida.");
   const recipient = recipientNumber || process.env.MAINTENANCE_ALERT_NUMBER;
-  if (recipient && !/^\d{10,15}$/.test(recipient)) throw new Error("Destinatário de manutenção inválido.");
+  if (recipient && !/^\d{10,15}$/.test(recipient) && !isWhatsappGroup(recipient)) throw new Error("Destinatário de manutenção inválido.");
   if (!dryRun && config.readOnly) throw new Error("Envios desabilitados: ambiente somente consulta.");
   if (planIds !== null && (!Array.isArray(planIds) || !planIds.length || planIds.some(id => !Number.isSafeInteger(id) || id <= 0))) {
     throw new Error("Informe IDs válidos dos planos para envio.");
