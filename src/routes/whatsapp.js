@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { normalizeWhatsappRecipient } from "../services/whatsappRecipient.js";
 
 const router = Router();
 
@@ -36,7 +37,7 @@ async function evolutionFetch(path, options = {}) {
 }
 
 export async function sendWhatsappText(number, text) {
-  const normalized = String(number || "").replace(/\D/g, "");
+  const normalized = normalizeWhatsappRecipient(number);
   if (!normalized || !String(text || "").trim()) throw new Error("Numero e mensagem sao obrigatorios.");
   return evolutionFetch(`/message/sendText/${INSTANCE_NAME}`, {
     method: "POST",
