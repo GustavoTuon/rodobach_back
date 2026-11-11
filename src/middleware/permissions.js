@@ -38,6 +38,7 @@ const ROUTE_PERMISSIONS = [
   [/^\/financeiro\/faturamento-mensal-comparativo(?:\/|$)/, "comparativo-faturamento"],
   [/^\/financeiro\/lucro-viagens(?:\/|$)/, "lucro-viagens"],
   [/^\/financeiro\/consulta-viagens(?:\/|$)/, "lucro-viagens"],
+  [/^\/financeiro\/controle-viagens(?:\/|$)/, "lucro-viagens"],
   [/^\/financeiro\/resultado-fretes(?:\/|$)/, "lucro-viagens"],
   [/^\/financeiro\/analise-clientes(?:\/|$)/, "clientes"],
   [/^\/clientes\/rentabilidade(?:\/|$)/, "clientes-lucro"],

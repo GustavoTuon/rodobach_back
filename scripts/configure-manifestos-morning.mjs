@@ -39,7 +39,7 @@ try {
   const connections={};nodes.slice(0,-1).forEach((n,i)=>{connections[n.name]={main:[[{node:nodes[i+1].name,type:'main',index:0}]]};});
   const payload={name,nodes,connections,settings:{timezone:'America/Sao_Paulo',executionOrder:'v1'}};
   const created=await api('/workflows','POST',payload);
-  writeFileSync('.manifestos-morning-workflow.json',JSON.stringify({id:created.id,name,recipient:number,recipients:['5548999503759','5548996466096'],cron:'0 16 * * 1-5',timezone:'America/Sao_Paulo'},null,2));
+  writeFileSync('.manifestos-morning-workflow.json',JSON.stringify({id:created.id,name,recipient:number,recipients:['5548999503759','5548996466096','554896740082'],cron:'0 16 * * 1-5',timezone:'America/Sao_Paulo'},null,2));
   await api('/workflows/'+created.id+'/activate','POST');
   const verified=await api('/workflows/'+created.id);
   console.log(JSON.stringify({id:verified.id,active:verified.active,timezone:verified.settings.timezone,cron:verified.nodes.find(n=>n.id==='schedule').parameters.rule.interval[0].expression,url:config.n8n.apiUrl+'/workflow/'+verified.id}));
