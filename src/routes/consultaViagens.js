@@ -64,12 +64,9 @@ consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero/indicad
     res.json(await getTripIndicators(rows[0],period.data));
   }catch(error){next(error);}
 });
-consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero',async(req,res,next)=>{
-  const empresa=Number(req.params.empresa),numero=Number(req.params.numero);
-  if(!Number.isSafeInteger(empresa)||empresa<1||!Number.isSafeInteger(numero)||numero<1)return res.status(400).json({error:'Viagem inválida.'});
-  try {
+export async function loadErpTrip(empresa,numero) {
     const {rows}=await clientPool.query(`${header} WHERE v.empresacvg=$1 AND v.codigocvg=$2`,[empresa,numero]);
-    if(!rows[0])return res.status(404).json({error:'Viagem não encontrada.'});
+    if(!rows[0])throw Object.assign(new Error('Viagem não encontrada.'),{status:404});
     const [fretes,despesas,abastecimentos]=await Promise.all([
       clientPool.query(`SELECT f.sequenciacvf AS sequencia,f.datacvf::text AS data,f.conhecimentocvf AS documento,f.serieconhecimentocvf AS serie,
         f.empresaconhecimentocvf AS "empresaDocumento", o.nomecid AS origem,d.nomecid AS destino,f.pesocvf AS peso,
@@ -91,6 +88,14 @@ consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero',async(
         OR EXISTS(SELECT 1 FROM logistica.controleviagensabastecimentos v WHERE v.empresacva=$1 AND v.codigocva=$2 AND v.empresaabastecimentocva=a.empresaaba AND v.abastecimentocva=a.codigoaba)
         ORDER BY a.dataaba,a.empresaaba,a.codigoaba`,[empresa,numero]),
     ]);
+    return {viagem:rows[0],fretes:fretes.rows,despesas:despesas.rows,abastecimentos:abastecimentos.rows};
+}
+consultaViagensRouter.get('/financeiro/consulta-viagens/:empresa/:numero',async(req,res,next)=>{
+  const empresa=Number(req.params.empresa),numero=Number(req.params.numero);
+  if(!Number.isSafeInteger(empresa)||empresa<1||!Number.isSafeInteger(numero)||numero<1)return res.status(400).json({error:'Viagem inválida.'});
+  try {
+    const result=await loadErpTrip(empresa,numero);
+    const rows=[result.viagem], fretes={rows:result.fretes}, despesas={rows:result.despesas}, abastecimentos={rows:result.abastecimentos};
     let conferencia;
     try { conferencia = await auditTripCtes(rows[0]); }
     catch (error) {
