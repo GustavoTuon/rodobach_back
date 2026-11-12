@@ -1,3 +1,4 @@
+import {getFuelAnalysis} from '../services/fuelAnalysisService.js';
 import {getCustoRastreabilidade} from '../services/custoRastreabilidade.js';
 import {loadFleetRevenue} from '../services/fleetRevenueService.js';
 import { Router } from "express";
@@ -34,7 +35,7 @@ import { getDemonstrativoFinanceiro } from "../services/demonstrativoFinanceiroS
 import { getDreEmpresarial, getDreLancamentoDetalhe } from "../services/dreEmpresarialService.js";
 import { getFluxoCaixa } from "../services/fluxoCaixaService.js";
 import { getDespesasFuturas } from "../services/despesasFuturasService.js";
-import { getAbastecimento, getAnaliseFrota } from "../services/analiseFrotaService.js";
+import { getAnaliseFrota } from "../services/analiseFrotaService.js";
 import { getLucroViagens } from "../services/lucroViagensService.js";
 import { getResultadoFretes } from "../services/resultadoFretesService.js";
 import { getFaturamentoDiario } from "../services/faturamentoDiarioService.js";
@@ -502,10 +503,11 @@ financeiroRouter.get("/financeiro/custos-veiculos/resultado", async (req, res, n
 
 financeiroRouter.get("/frota/abastecimentos", async (req, res, next) => {
   try {
-    const abastecimento = await getAbastecimento({
+    const filters = {
       startDate: req.query.startDate || req.query.dataInicio,
       endDate: req.query.endDate || req.query.dataFim,
       placa: req.query.placa,
+      combustivel: req.query.combustivel,
       centro: req.query.centro,
       fornecedor: req.query.fornecedor,
       empresa: req.query.empresa,
@@ -513,7 +515,8 @@ financeiroRouter.get("/frota/abastecimentos", async (req, res, next) => {
       modelo: req.query.modelo,
       marca: req.query.marca,
       ano: req.query.ano,
-    });
+    };
+    const abastecimento = await getFuelAnalysis(filters);
     res.json({ abastecimento });
   } catch (error) {
     next(error);
