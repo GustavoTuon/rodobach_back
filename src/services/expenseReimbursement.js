@@ -4,6 +4,7 @@ export const reimbursementSchema = z.object({
   status:z.enum(['nao_aplicavel','a_cobrar','cobrado','recebido']),
   customer:z.string().trim().max(160).default(''),
   document:z.string().trim().max(100).default(''),
+  erpDocument:z.object({company:z.string().regex(/^\d{1,9}$/),series:z.string().min(1).max(20),code:z.string().regex(/^\d{1,12}$/)}).strict().nullable().optional(),
   receivedDate:z.iso.date().nullable().default(null),
   note:z.string().trim().max(300).default(''),
 }).strict();

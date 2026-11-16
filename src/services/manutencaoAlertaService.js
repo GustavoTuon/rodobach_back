@@ -6,6 +6,7 @@ import { sendWhatsappText } from "../routes/whatsapp.js";
 import { isWhatsappGroup, normalizeWhatsappRecipient } from "./whatsappRecipient.js";
 import { getStatusCargaFrota } from "./statusCargaService.js";
 import { loadMaintenanceOdometers } from "./maintenanceOdometer.js";
+import {syncMaintenanceErp} from './maintenanceErpSync.js';
 export { latestValidFuelOdometer } from "./maintenanceOdometer.js";
 
 const AUTOMACOES = () => tableName("automacao_mensagem_manutencao");
@@ -149,6 +150,7 @@ export async function runMaintenanceAlerts({ dryRun = true, planIds = null, only
   const sent = [];
   try {
     if (!dryRun) {
+      await syncMaintenanceErp();
       const result = await pool.query(`INSERT INTO ${tableName("manutencao_alertas_execucoes")} DEFAULT VALUES RETURNING id`);
       executionId = result.rows[0].id;
     }

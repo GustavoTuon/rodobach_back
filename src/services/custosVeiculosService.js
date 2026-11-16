@@ -2,6 +2,8 @@ import { clientPool } from "../db/clientPool.js";
 import { carregarKmTelemetriaMensal } from "./kmAbastecimento.js";
 import { abastecimentoFinanceiroMatchSql } from "./abastecimentoFinanceiroSql.js";
 import { getTelemetriaResumoPorPlaca } from "./telemetriaResumoService.js";
+import { previousFuelPeriod } from './fuelComparison.js';
+import { getCostOperations } from './costOperationsService.js';
 
 function num(value) {
   const n = Number(value);
@@ -82,7 +84,7 @@ function monthLabel(value) {
 
 // A base financeira e a fonte dos totais. A uniao operacional serve apenas
 // para auditorias comparativas, nunca como parametro das telas.
-export function baseCostCte({ includeOperational = false } = {}) {
+export function baseCostCte({ includeOperational = false, dateBasis = 'due' } = {}) {
   return `
     WITH pagamentos AS (
       SELECT
@@ -199,8 +201,8 @@ export function baseCostCte({ includeOperational = false } = {}) {
         ORDER BY (v.empresavei = pag.empresapag) DESC, v.empresavei
         LIMIT 1
       ) vei_cc ON true
-      WHERE pag.datavencimentopag::date >= $1::date
-        AND pag.datavencimentopag::date <= $2::date
+      WHERE pag.${dateBasis === 'emission' ? 'dataemissaopag' : 'datavencimentopag'}::date >= $1::date
+        AND pag.${dateBasis === 'emission' ? 'dataemissaopag' : 'datavencimentopag'}::date <= $2::date
         AND pag.statuspag IN (1, 2)
         AND COALESCE(prt.valorrateioprt, 0) <> 0
     ),
@@ -939,6 +941,7 @@ function mapLaunch(row) {
     proprietarioCodigo: row.proprietario_codigo,
     veiculoNome: row.veiculo_nome || "",
     naturezaGerencial: row.natureza_gerencial || "nao_classificado",
+    fuelProducts: row.fuel_products,
   };
 }
 
@@ -1919,10 +1922,29 @@ export async function getEvolucaoCustos(filters = {}) {
   const period = resolvePeriod(filters);
   const days = (new Date(period.endDate)-new Date(period.startDate))/86400000;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(period.startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(period.endDate) || !Number.isFinite(days) || days<0 || days>366) throw Object.assign(new Error('Selecione um intervalo de ate 366 dias.'),{status:400});
-  const prior = previousPeriod(period);
+  if ([period.startDate,period.endDate].some(date=>new Date(date).toISOString().slice(0,10)!==date))throw Object.assign(new Error('Informe datas válidas.'),{status:400});
+  if(String(filters.operationsOnly)==='true')return getCostOperations(period,filters);
+  if (String(filters.distanceOnly)==='true') {
+    const placas=[...new Set(String(filters.placas||'').split(',').map(normalizePlate))].filter(placa=>/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa));
+    if(placas.length>500)throw Object.assign(new Error('Selecione até 500 veículos.'),{status:400});
+    return carregarKmTelemetriaMensal(placas,period);
+  }
+  const prior = previousFuelPeriod(period);
   const where = buildWhere(filters,2);
-  const rows = await queryCostRows(`${baseCostCte()} SELECT * FROM custos_status ${where.clause} ${where.clause ? "AND" : "WHERE"} data::date BETWEEN $1::date AND $2::date ORDER BY data DESC,id`,[prior.startDate,period.endDate,...where.values]);
+  const rows = await queryCostRows(`${baseCostCte({dateBasis:'emission'})}
+    SELECT cs.*, CASE WHEN tipo_custo='Abastecimento' THEN ARRAY(
+      SELECT DISTINCT COALESCE(produto.nomepro,'Não identificado')
+      FROM financeiro.pagar pag
+      JOIN frotas.abastecimentos aba ON ${abastecimentoFinanceiroMatchSql()}
+      LEFT JOIN LATERAL (SELECT p.nomepro FROM estoque.produtos p WHERE p.codigopro=aba.combustivelaba
+        ORDER BY (p.empresapro=aba.empresaaba) DESC,p.empresapro LIMIT 1) produto ON true
+      WHERE pag.empresapag=cs.empresa AND pag.seriepag=cs.serie
+        AND pag.duplicatapag=cs.duplicatapag AND pag.parcelapag::text=cs.parcelapag::text
+        AND pag.fornecedorpag=cs.fornecedor_codigo
+        AND UPPER(TRIM(aba.veiculoaba))=UPPER(TRIM(cs.placa_resolvida))
+    ) ELSE NULL END AS fuel_products
+    FROM custos_status cs ${where.clause} ${where.clause ? "AND" : "WHERE"} data::date BETWEEN $1::date AND $2::date ORDER BY data DESC,id`,[prior.startDate,period.endDate,...where.values]);
   const placas=[...new Set(rows.map(row=>normalizePlate(row.placa_resolvida)).filter(placa=>/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)))];
-  const distance=await carregarKmTelemetriaMensal(placas,period).catch(()=>({available:false,monthly:[]}));
-  return {period, prior, launches:rows.map(mapLaunch),distance};
+  const distance=String(filters.includeDistance)==='false'?{available:false,monthly:[]}:await carregarKmTelemetriaMensal(placas,period).catch(()=>({available:false,monthly:[]}));
+  return {period, prior, launches:rows.map(mapLaunch),distance, dateBasis:'emission',generatedAt:new Date().toISOString()};
 }

@@ -12,6 +12,7 @@ import { requirePermission } from "../middleware/permissions.js";
 import { expenseTelemetryOdometer } from "../services/expenseTelemetryOdometer.js";
 import { expenseTires, resolveExpenseTire } from "../services/expenseTires.js";
 import {unloadingTrips,unloadingTrip,unloadingCtes,resolveUnloading} from '../services/expenseUnloading.js';
+import {reimbursementDocuments} from '../services/expenseReimbursementDocuments.js';
 import { validateBody } from "../middleware/validate.js";
 import { expenseAccess, isExpenseDriver, requireExpensePlate } from "../services/expenseDriverAccess.js";
 
@@ -27,8 +28,18 @@ const canReview = (req, res, next) => isExpenseDriver(req.user)
 const canRead = requirePermission(["manutencao-plantao", "conferencia-manutencao", "pagamento-despesas", "lancamento-despesas", "reembolso-despesas"]);
 const hasAction = (req, key) => !isExpenseDriver(req.user) && (req.user.admin === true || req.user.permissions?.[key] === true);
 const canPay = (req,res,next) => hasAction(req,"pagamento-despesas") ? next() : res.status(403).json({error:"Sem permissão para registrar pagamentos."});
+manutencaoPlantaoRouter.get('/manutencao-plantao/reembolsos/:id/documentos',canRead,async(req,res,next)=>{
+  try {
+    if(!hasAction(req,'reembolso-despesas')) return res.status(403).json({error:'Sem permissão para registrar reembolsos.'});
+    if(!z.uuid().safeParse(req.params.id).success || !/^\d{0,12}$/.test(req.query.number || '')) return res.status(400).json({error:'Informe um número de documento válido.'});
+    const {rows}=await pool.query(`SELECT placa,data_despesa::text AS date FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL`,[req.params.id]);
+    if(!rows[0]) return res.status(404).json({error:'Despesa não encontrada.'});
+    res.set('Cache-Control','no-store').json({ctes:await reimbursementDocuments(rows[0].placa,rows[0].date,req.query.number || '')});
+  }catch(error){next(error);}
+});
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
+  acknowledgeRecentDuplicate:z.boolean().optional(),
   paymentDetails:z.object({holderName:z.string().trim().min(1).max(160),pixKey:z.string().trim().min(1).max(160)}).strict().nullable().optional(),
   documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
   tireFireNumber: z.string().trim().max(80).optional(),
@@ -64,6 +75,20 @@ const schema = z.object({
   supplierCode: z.union([z.string().max(30), z.number()]).nullable().optional(),
   supplierCompany: z.union([z.string().max(30), z.number()]).nullable().optional(),
 }).strict();
+manutencaoPlantaoRouter.post('/manutencao-plantao/duplicidades',canRead,async(req,res,next)=>{
+  try {
+    const parsed=schema.pick({plate:true,amount:true,supplier:true}).extend({excludeId:z.uuid().nullable().optional()}).safeParse(req.body);
+    if(!parsed.success)return res.status(400).json({error:'Informe placa, valor e fornecedor válidos.'});
+    const {plate,amount,supplier,excludeId}=parsed.data;
+    await requireExpensePlate(req.user,plate);
+    const {rows}=await pool.query(`SELECT id,placa,valor,fornecedor,servico,documento,data_despesa,criado_em
+      FROM ${TABLE()} WHERE excluido_em IS NULL AND placa=$1 AND valor=$2
+      AND lower(regexp_replace(trim(fornecedor),'\\s+',' ','g'))=lower(regexp_replace(trim($3::text),'\\s+',' ','g'))
+      AND criado_em >= NOW()-INTERVAL '3 days' AND criado_em <= NOW()
+      AND ($4::uuid IS NULL OR id<>$4) ORDER BY criado_em DESC LIMIT 20`,[plate,amount,supplier,excludeId||null]);
+    res.set('Cache-Control','no-store').json({matches:rows.map(row=>({id:row.id,plate:row.placa,amount:Number(row.valor),supplier:row.fornecedor,service:row.servico,document:row.documento,expenseDate:row.data_despesa,createdAt:row.criado_em}))});
+  }catch(error){next(error);}
+});
 function record(row) {
   return {reimbursement:row.reembolso || {status:row.descarga?.reimbursement ? "a_cobrar" : "nao_aplicavel",customer:row.descarga?.cte?.customerName || "",document:"",receivedDate:null,note:""},paymentDetails:row.dados_pagamento || null,documentType:row.tipo_documento || null,tireFireNumber:row.numero_fogo || "",trip:row.viagem_despesa || null,expenseTime: row.hora_despesa || null, authorProfile: row.perfil_autor || null, receiptReason: row.justificativa_sem_nota || "", fuelType: row.combustivel_tipo || "", customerName: row.cliente_nota || "", odometerDate: row.hodometro_telemetria_em || null, source: row.origem || "colaborador", liters: row.litros == null ? null : Number(row.litros), odometer: row.hodometro == null ? null : Number(row.hodometro),
     arlaLiters: row.arla_litros == null ? null : Number(row.arla_litros),
@@ -89,8 +114,8 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, asyn
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/documentos-erp", requirePermission(["lancamento-despesas","conferencia-manutencao"]), async (req,res,next) => {
   if (!hasAction(req,"lancamento-despesas") && !hasAction(req,"conferencia-manutencao")) return res.status(403).json({error:"Sem permissão para consultar documentos de lançamento."});
-  const query=z.string().trim().min(2).max(80).safeParse(req.query.q);
-  if (!query.success) return res.status(400).json({error:"Informe de 2 a 80 caracteres para buscar."});
+  const query=z.object({q:z.string().trim().max(80).default(''),plate:z.string().trim().transform(value=>value.toUpperCase().replace(/[^A-Z0-9]/g,'')).pipe(z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/)),series:z.string().trim().max(20).default('')}).safeParse(req.query);
+  if (!query.success) return res.status(400).json({error:"Informe a placa da despesa e filtros válidos para buscar."});
   try {res.set("Cache-Control","no-store").json(await searchExpenseErpDocuments(query.data));} catch(error) {next(error);}
 });
 export async function plantaoPlates() {
@@ -279,11 +304,11 @@ async function mutate(req, res, next, action) {
       const odometer = body.odometer === undefined ? before?.hodometro : body.odometer;
       if (source === "motorista" && body.service === "Abastecimento" && (!(Number(liters) > 0) || odometer == null)) return await reject(400,"Informe os litros e o hodômetro do abastecimento.");
       if (source === "motorista" && body.service === "Outros" && !body.note) return await reject(400,"Descreva a despesa para a conferência.");
-      const duplicate = await client.query(`SELECT id FROM ${TABLE()} WHERE excluido_em IS NULL AND ($1::uuid IS NULL OR id <> $1) AND (
+      const duplicate = await client.query(`SELECT id,(criado_em >= NOW()-INTERVAL '3 days' AND criado_em <= NOW() AND placa=$2 AND valor=$3 AND lower(trim(fornecedor))=lower(trim($6))) AS recent_match FROM ${TABLE()} WHERE excluido_em IS NULL AND ($1::uuid IS NULL OR id <> $1) AND (
         (placa=$2 AND valor=$3 AND data_despesa=$4::date AND servico=$5 AND lower(trim(fornecedor))=lower(trim($6)) AND (servico<>'Descarga' OR descarga @> $8::jsonb))
         OR ($7 <> '' AND $6 <> '' AND lower(trim(fornecedor))=lower(trim($6)) AND regexp_replace(upper(documento), '[^A-Z0-9]', '', 'g')=regexp_replace(upper($7), '[^A-Z0-9]', '', 'g'))
       ) LIMIT 1`,[before?.id || null,body.plate,body.amount,body.expenseDate,body.service,body.supplier,body.document,body.unloading ? JSON.stringify({trip:body.unloading.trip,cte:body.unloading.cte}) : null]);
-      if (duplicate.rows.length) return await reject(409,"Possível duplicidade: já existe um lançamento com a mesma placa, data, valor, serviço e fornecedor, ou com o mesmo comprovante e fornecedor. Confira o registro existente.");
+      if (duplicate.rows.length && !(body.acknowledgeRecentDuplicate && duplicate.rows.every(row=>row.recent_match))) return await reject(409,"Possível duplicidade: já existe um lançamento com a mesma placa, data, valor, serviço e fornecedor, ou com o mesmo comprovante e fornecedor. Confira o registro existente.");
       const fuelAmount = body.fuelAmount === undefined ? before?.valor_combustivel : body.fuelAmount;
       if (body.service === "Abastecimento" && fuelAmount != null && Number(fuelAmount) > body.amount) return await reject(400,"O valor do combustível não pode superar o total da despesa.");
       const arlaLiters=body.arlaLiters === undefined ? before?.arla_litros : body.arlaLiters;
@@ -340,6 +365,12 @@ async function mutate(req, res, next, action) {
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),documento_erp=$4,lancado=$5,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login,body.erpDocument ?? before.documento_erp,body.posted ?? before.lancado])).rows[0];
     }
     if (action === "status" && body.reimbursement) {
+      if(body.reimbursement.erpDocument) {
+        const [document]=await reimbursementDocuments(before.placa,before.data_despesa,'',body.reimbursement.erpDocument);
+        if(!document) return await reject(400,'CT-e complementar não encontrado para esta placa e período. Consulte novamente.');
+        body.reimbursement.document=`CT-e ${document.number} · Série ${document.series} · Empresa ${document.company}`;
+        body.reimbursement.customer=document.customerName;
+      }
       const error = validateReimbursement(body.reimbursement, today());
       if (error) return await reject(400,error);
       after = (await client.query(`UPDATE ${TABLE()} SET reembolso=$2::jsonb WHERE id=$1 RETURNING *`,

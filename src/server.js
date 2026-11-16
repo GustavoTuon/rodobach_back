@@ -1,4 +1,5 @@
 import { startAnttMonitor } from "./services/anttMonitor.js";
+import {driverAdvancesRouter} from './routes/driverAdvances.js';
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -13,6 +14,7 @@ import { requireAuth } from "./middleware/auth.js";
 import { requireRoutePermission } from "./middleware/permissions.js";
 import { requireAdmin } from "./middleware/requireAdmin.js";
 import { enforceReadOnly } from "./middleware/readOnly.js";
+import {startMaintenanceErpSync} from './services/maintenanceErpSync.js';
 import { errorHandler } from "./middleware/errorHandler.js";
 import { auditMutation } from "./services/auditService.js";
 import { logger, loggerOptions } from "./logger.js";
@@ -21,6 +23,7 @@ import { financeiroRouter } from "./routes/financeiro.js";
 import { freteRouter } from "./routes/frete.js";
 import { localidadesRouter } from "./routes/localidades.js";
 import { usuariosRouter } from "./routes/usuarios.js";
+import {colaboradoresRouter} from './routes/colaboradores.js';
 import {notasRouter} from './routes/notas.js';
 import { viagensRouter } from "./routes/viagens.js";
 import { cargasViagensV2Router } from "./routes/cargasViagensV2.js";
@@ -69,6 +72,7 @@ app.use(cors({
   },
 }));
 app.use("/api/manutencao-plantao", express.json({ limit: "6mb" }));
+app.use("/api/frota/colaboradores", express.json({ limit: "5mb" }));
 app.use(express.json({ limit: "2mb" }));
 app.use("/api/auth/login", rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -155,11 +159,13 @@ app.use("/api", comprasRouter);
 app.use("/api", freteRouter);
 app.use("/api", localidadesRouter);
 app.use("/api", financeiroRouter);
+app.use('/api',driverAdvancesRouter);
 app.use("/api", viagensRouter);
 app.use("/api", cargasViagensV2Router);
 app.use("/api", precoCargaErpV2Router);
 app.use("/api", usuariosRouter);
 app.use('/api',notasRouter);
+app.use('/api',colaboradoresRouter);
 app.use("/api", pneusRouter);
 app.use("/api", manutencaoRouter);
 app.use("/api", manutencaoPlantaoRouter);
@@ -188,6 +194,7 @@ export function startServer() {
   return app.listen(config.port, config.host, () => {
     startAnttMonitor();
     logger.info({ port: config.port }, "Rodobach API iniciada");
+    startMaintenanceErpSync();
     if (!config.readOnly && process.env.KM_DIARIO_ENABLED !== 'false') startDailyOdometerCollector();
     if (config.runSchedulers && !config.readOnly) {
       startEmptyVehicleAlertScheduler();
