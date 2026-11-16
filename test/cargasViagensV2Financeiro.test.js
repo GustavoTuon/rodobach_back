@@ -3,6 +3,16 @@ import assert from "node:assert/strict";
 
 import { aggregateFinancialStatuses } from "../src/routes/cargasViagensV2.js";
 
+test('bonificação não inventa CT-e, títulos ou recebimentos e preserva pendências de outras cargas', () => {
+  const bonus = {status:'bonificacao',ctes:0,titulos:0,valorTotal:0,valorAberto:0};
+  const only = aggregateFinancialStatuses([bonus],1);
+  assert.equal(only.status,'bonificacao');assert.equal(only.ctes,0);assert.equal(only.titulos,0);assert.equal(only.valorTotal,0);
+  const mixed = aggregateFinancialStatuses([bonus,{status:'em_aberto',titulos:1,valorTotal:200,valorAberto:200}],2);
+  assert.equal(mixed.status,'em_aberto');assert.equal(mixed.valorAberto,200);
+  assert.equal(aggregateFinancialStatuses([bonus],2).status,'sem_titulo');
+  assert.equal(aggregateFinancialStatuses([bonus,{status:'quitado',titulos:1,valorTotal:200,valorAberto:0}],2).status,'quitado');
+});
+
 test("distingue carga sem CT-e de CT-e sem faturamento", () => {
   assert.equal(aggregateFinancialStatuses([], 0).status, "sem_cte");
   assert.equal(aggregateFinancialStatuses([], 1).status, "sem_titulo");

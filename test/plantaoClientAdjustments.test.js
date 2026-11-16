@@ -20,7 +20,7 @@ test('borracharia valida pneu montado e salva identidade oficial e número no hi
   const writes=[];let row={id:'55926d25-6e7d-4c22-a36d-747c0402c18a',placa:'ABC1234',valor:100,servico:'Borracharia',revisao:1};
   t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
     writes.push({sql,params});
-    if(sql.includes('SELECT id FROM')) return {rows:[]};
+    if(sql.includes('AS recent_match')) return {rows:[]};
     if(sql.includes('SET descarga=')) row={...row,numero_fogo:params[3],pneu_vinculado:JSON.parse(params[6])};
     return {rows:[row]};
   }}));
@@ -43,9 +43,10 @@ test('despesas exigem fornecedor e classificação; NFS exige número; viagem é
   t.mock.method(clientPool,'query',async sql=>({rows:sql.includes('controleviagens') ? [{company:'1',number:'880',plate:'ABC1234'}] : []}));
   const writes=[];
   const row={id:'55926d25-6e7d-4c22-a36d-747c0402c18a',placa:'ABC1234',valor:100,servico:'Borracharia',revisao:1};
+  let recentDuplicate=null;
   const client={release(){},async query(sql,params){
     writes.push({sql,params});
-    if(sql.includes('SELECT id FROM')) return {rows:[]};
+    if(sql.includes('AS recent_match')) return {rows:recentDuplicate===null?[]:[{id:row.id,recent_match:recentDuplicate}]};
     if(sql.includes('SET descarga=')) return {rows:[{...row,tipo_documento:params[2],numero_fogo:params[3],viagem_despesa:JSON.parse(params[4])}]};
     return {rows:[row]};
   }};
@@ -62,4 +63,9 @@ test('despesas exigem fornecedor e classificação; NFS exige número; viagem é
   const linked=await send({...body,documentType:'nf_servico',document:'123',trip:{company:'1',number:'880'}});
   assert.equal(linked.status,201);assert.equal(linked.body.record.trip.number,'880');assert.equal(linked.body.record.documentType,'nf_servico');
   assert.equal((await send({...body,trip:{company:'x',number:'880'}})).status,400);
+  recentDuplicate=true;
+  assert.equal((await send(body)).status,409);
+  assert.equal((await send({...body,acknowledgeRecentDuplicate:true})).status,201);
+  recentDuplicate=false;
+  assert.equal((await send({...body,acknowledgeRecentDuplicate:true})).status,409);
 });

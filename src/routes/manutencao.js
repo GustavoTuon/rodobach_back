@@ -1,3 +1,4 @@
+import {searchExpenseSuppliers} from '../services/expenseSuppliers.js';
 import {maintenanceMutation, getMaintenanceAudit} from "../services/maintenanceAudit.js";
 import {registerMaintenance} from "../services/maintenanceRegistration.js";
 import express from "express";
@@ -12,17 +13,7 @@ export const manutencaoRouter = express.Router();
 
 manutencaoRouter.get("/manutencao/fornecedores", async (req, res, next) => {
   try {
-    const q = String(req.query.q || "").trim().slice(0, 120);
-    const { rows } = await clientPool.query(`
-      SELECT empresafor AS empresa, codigofor AS codigo,
-        COALESCE(NULLIF(TRIM(fantasiafor), ''), TRIM(nomefor)) AS nome
-      FROM gerais.fornecedores
-      WHERE NULLIF(TRIM(COALESCE(NULLIF(TRIM(fantasiafor), ''), nomefor)), '') IS NOT NULL
-        AND ($1 = '' OR nomefor ILIKE $2 OR fantasiafor ILIKE $2 OR codigofor::text = $1)
-      ORDER BY nome, empresafor, codigofor
-      LIMIT 30
-    `, [q, `%${q.replace(/[\\%_]/g, "\\$&")}%`]);
-    res.json({ fornecedores: rows });
+    res.set('Cache-Control','no-store').json(await searchExpenseSuppliers(req.query.q));
   } catch (error) { next(error); }
 });
 

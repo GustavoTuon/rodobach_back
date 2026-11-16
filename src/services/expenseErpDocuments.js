@@ -1,7 +1,7 @@
 import {clientPool} from '../db/clientPool.js';
 
 // Same accounts-payable source used by the financial screen; no ERP writes.
-export async function searchExpenseErpDocuments(query) {
+export async function searchExpenseErpDocuments({q='',plate,series=''}) {
   const {rows} = await clientPool.query(`
     SELECT pag.empresapag::text AS company, pag.seriepag::text AS series,
       pag.duplicatapag::text AS number, pag.parcelapag::text AS installment,
@@ -14,12 +14,14 @@ export async function searchExpenseErpDocuments(query) {
       WHERE codigofor=pag.fornecedorpag
       ORDER BY (empresafor=pag.empresapag) DESC,empresafor LIMIT 1
     ) forn ON TRUE
-    WHERE pag.duplicatapag::text ILIKE '%' || $1 || '%'
+    WHERE regexp_replace(upper(pag.veiculopag::text),'[^A-Z0-9]','','g')=$2
+      AND ($3::text='' OR upper(trim(pag.seriepag::text))=upper($3))
+      AND (pag.duplicatapag::text ILIKE '%' || $1 || '%'
       OR pag.documentopag::text ILIKE '%' || $1 || '%'
       OR forn.nomefor ILIKE '%' || $1 || '%'
       OR forn.fantasiafor ILIKE '%' || $1 || '%'
-      OR pag.veiculopag::text ILIKE '%' || $1 || '%'
+      OR pag.veiculopag::text ILIKE '%' || $1 || '%')
     ORDER BY pag.dataemissaopag DESC NULLS LAST,pag.empresapag,pag.seriepag,pag.duplicatapag,pag.parcelapag
-    LIMIT 31`,[query]);
+    LIMIT 31`,[q.replace(/[\\%_]/g,'\\$&'),plate,series]);
   return {documents:rows.slice(0,30),hasMore:rows.length>30};
 }

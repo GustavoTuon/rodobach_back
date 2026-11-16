@@ -155,8 +155,8 @@ test("busca financeira exige permissão e usa consulta parametrizada",async t=>{
  const user={id:44,permissions:{'lancamento-despesas':true}};
  assert.equal((await request(app(user)).get('/manutencao-plantao/documentos-erp?q=x')).status,400);
  assert.equal(query.mock.callCount(),0);
- const response=await request(app(user)).get('/manutencao-plantao/documentos-erp').query({q:"123'"});
- assert.equal(response.status,200);assert.deepEqual(query.mock.calls[0].arguments[1],["123'"]);
+ const response=await request(app(user)).get('/manutencao-plantao/documentos-erp').query({q:"123'",plate:"ABC-1234",series:"A"});
+ assert.equal(response.status,200);assert.deepEqual(query.mock.calls[0].arguments[1],["123'","ABC1234","A"]);
 });
 
 test("conferência salva vínculo e reversão preserva controles com auditoria",async t=>{
@@ -178,4 +178,29 @@ test("conferência salva vínculo e reversão preserva controles com auditoria",
  assert.equal(response.status,200);assert.equal(response.body.record.checked,false);assert.equal(response.body.record.paid,true);assert.equal(response.body.record.posted,true);assert.equal(response.body.record.erpDocument,'123');
  const audit=writes.filter(x=>x.sql.includes('INSERT INTO')&&x.sql.includes('historico')).at(-1);
  assert.equal(audit.params[1],'uncheck');assert.ok(JSON.parse(audit.params[4]).conferido_em);assert.equal(JSON.parse(audit.params[5]).conferido_em,null);
+});
+
+test('reembolso busca complementar com placa e data da despesa e exige permissao propria',async t=>{
+ const local=t.mock.method(pool,'query',async()=>({rows:[{placa:'ABC1234',date:'2026-11-14'}]}));
+ const erp=t.mock.method(clientPool,'query',async()=>({rows:[{company:'1',series:'1',code:'12',number:'12'}]}));
+ const url=`/manutencao-plantao/reembolsos/${id}/documentos?number=12`;
+ assert.equal((await request(app(reviewer)).get(url)).status,403);
+ assert.equal(local.mock.callCount(),0);
+ const user={id:44,permissions:{'reembolso-despesas':true}};
+ const response=await request(app(user)).get(url);
+ assert.equal(response.status,200);
+ assert.equal(response.body.ctes[0].number,'12');
+ assert.deepEqual(erp.mock.calls[0].arguments[1],['ABC1234','2026-11-14','12',null,null,null]);
+ assert.equal((await request(app(user)).get(url.replace('number=12','number=invalid'))).status,400);
+});
+
+test('reembolso rejeita vinculo de outro veiculo ou periodo antes de salvar',async t=>{
+ const row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,data_despesa:'2026-11-14'};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql){writes.push(sql);return {rows:[row]};}}));
+ t.mock.method(clientPool,'query',async()=>({rows:[]}));
+ const response=await request(app({id:44,permissions:{'reembolso-despesas':true}})).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send({version:1,reimbursement:{status:'cobrado',customer:'Cliente',document:'CT-e 12',erpDocument:{company:'1',series:'1',code:'12'}}});
+ assert.equal(response.status,400);
+ assert.ok(writes.includes('ROLLBACK'));
+ assert.equal(writes.some(sql=>sql.includes('SET reembolso=')),false);
 });

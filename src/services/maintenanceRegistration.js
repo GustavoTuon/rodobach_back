@@ -20,11 +20,11 @@ export function canAdvanceMaintenance(previous, service) {
 }
 
 // All records and deadlines commit together. No notifications are sent here.
-export async function registerMaintenance(pool, service, userId, userLogin) {
-  const client = await pool.connect();
+export async function registerMaintenance(pool, service, userId, userLogin, {client: transactionClient, includeFilters = true} = {}) {
+  const client = transactionClient || await pool.connect();
   const history = tableName('historico_manutencao_veiculo'), plansTable = tableName('automacao_mensagem_manutencao');
   try {
-    await client.query('BEGIN');
+    if (!transactionClient) await client.query('BEGIN');
     await setMaintenanceActor(client, {id: userId, login: userLogin});
     const {rows: plans} = await client.query(`SELECT * FROM ${plansTable}
       WHERE regexp_replace(upper(placa), '[^A-Z0-9]', '', 'g') = $1 ORDER BY id FOR UPDATE`, [service.placa]);
@@ -53,17 +53,17 @@ export async function registerMaintenance(pool, service, userId, userLogin) {
     const record = await insert(source?.id || null, service.tipo_movimento, service.descricao, service.observacao);
     if (source && canAdvanceMaintenance(reference(source), service)) await advance(source);
     const updated = [];
-    for (const plan of includedFilterPlans(plans, service)) {
+    for (const plan of includeFilters ? includedFilterPlans(plans, service) : []) {
       if (!canAdvanceMaintenance(reference(plan), service)) continue;
       await insert(plan.id, 'filtro_combustivel', `${plan.titulo} — incluído na troca de óleo completa`,
         `Filtros substituídos na troca completa. Registro de origem: ${record.id}. ${service.observacao || ''}`.trim());
       await advance(plan);
       updated.push({id: plan.id, titulo: plan.titulo, km_proximo_envio: Number(service.km_servico) + Number(plan.intervalo_km)});
     }
-    await client.query('COMMIT');
+    if (!transactionClient) await client.query('COMMIT');
     return {registro: record, planos_intermediarios_atualizados: updated};
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {});
     throw error;
-  } finally {client.release();}
+  } finally {if (!transactionClient) client.release();}
 }

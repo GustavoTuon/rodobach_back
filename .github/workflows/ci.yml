@@ -14,6 +14,20 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: rodobach_test
+          POSTGRES_USER: rodobach_test
+          POSTGRES_PASSWORD: rodobach_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rodobach_test -d rodobach_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
