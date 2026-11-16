@@ -14,10 +14,10 @@ test('manifestos inclui cidades e UFs e explicita endpoints ausentes',()=>{
   const multiple=format(input([{...row,origem:'SANGÃO-SC',destino:'BRUMADO-BA / SOBRADO-PB'}]),now,()=>({}))[0].json.text;
   assert.match(multiple,/SANGÃO-SC x BRUMADO-BA \/ SOBRADO-PB/);
 });
-test('manifestos gera mensagem aprovada para os dois contatos e preserva quebra de linha',()=>{
+test('manifestos gera mensagem aprovada para os três contatos e preserva quebra de linha',()=>{
   const messages=format(input([row]),now,()=>({}));
-  assert.deepEqual(messages.map(item=>item.json.number),['5548999503759','5548996466096']);
-  assert.equal(messages[0].json.text,messages[1].json.text);
+  assert.deepEqual(messages.map(item=>item.json.number),['5548999503759','5548996466096','554896740082']);
+  assert.ok(messages.every(item=>item.json.text===messages[0].json.text));
   assert.match(messages[0].json.text,/^Boa tarde!\n\*Rodobach \| Manifestos em aberto\*\n26\/10\/2026\n\n1 manifesto\(s\) em aberto no ERP\./);
   assert.match(messages[0].json.text,/• \*1836 · ABC1234\* · 16\/10\/2026/);
   assert.ok(!messages[0].json.text.includes('\\n'));

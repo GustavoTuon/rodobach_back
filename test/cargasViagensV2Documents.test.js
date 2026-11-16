@@ -27,15 +27,15 @@ test("save preserves series/company and legacy documents through the API", async
     query: async (sql, params) => {
       if (sql.includes("SELECT id,status")) return {rowCount:1,rows:[{id:1,status:"em_transito"}]};
       if (sql.includes("INSERT INTO")) inserted.push(params);
+      if (sql.includes("WHERE c.id=$1")) return {rows:[{id:1,documentos:inserted.map((p,index)=>({
+        id:index+1,tipo_documento:p[1],numero_documento:p[2],chave_documento:p[3],empresa_documento:p[8],serie_documento:p[9],
+      }))}]};
       return {rows:[],rowCount:0};
     },
     release() {},
   };
   t.mock.method(pool, "connect", async () => fake);
-  t.mock.method(pool, "query", async () => ({rows:[{id:1,documentos:inserted.map((p, index) => ({
-    id:index+1,tipo_documento:p[1],numero_documento:p[2],chave_documento:p[3],
-    empresa_documento:p[8],serie_documento:p[9],
-  }))}]}));
+  t.mock.method(pool, "query", async () => {throw new Error("Document read must use the transaction connection");});
   t.mock.method(clientPool, "query", async () => ({rows:[]}));
   const app = express();
   app.use(express.json());
