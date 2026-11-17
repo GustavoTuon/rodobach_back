@@ -1,6 +1,7 @@
 import {clientPool} from '../db/clientPool.js';
-import {buildFleetRevenue,revenuePeriod} from './fleetRevenueTargets.js';
+import {buildFleetRevenue,revenuePeriod,buildDreRevenueDaily} from './fleetRevenueTargets.js';
 import {baseCostCte} from './custosVeiculosService.js';
+import {getDreEmpresarial} from './dreEmpresarialService.js';
 import {applyProfitTargets} from './fleetProfitModel.js';
 const cache=new Map(),pending=new Map();
 export async function loadFleetRevenue(month,now=new Date(),options={}) {
@@ -10,6 +11,10 @@ export async function loadFleetRevenue(month,now=new Date(),options={}) {
   if(cache.has(key) && Date.now()-cache.get(key).time<60000)return cache.get(key).data;
   if(pending.has(key))return pending.get(key);
   const task=(async()=>{
+    // Reuse the DRE calculation, including its allocation, date and audit rules.
+    // Fetch before opening a transaction so another pool connection cannot leave it idle.
+    const dre=period.cutoff ? await getDreEmpresarial({startDate:`${period.year}-01-01`,endDate:period.cutoff},{positiveFinancialOnly:true}) : {rows:[]};
+    const daily=buildDreRevenueDaily(dre.rows);
     const client=await clientPool.connect();
     try {
       await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -34,13 +39,6 @@ export async function loadFleetRevenue(month,now=new Date(),options={}) {
         for(const trailer of vehicle.trailers)if(links.some(link=>link.trailer===trailer&&link.principal!==vehicle.plate))throw new Error('Implemento vinculado a mais de um veículo. Revise o cadastro antes de calcular metas.');
         vehicle.costPlates=[vehicle.plate,...vehicle.trailers];
       }
-      const {rows:daily}=await client.query(`SELECT upper(trim(con.veiculocon)) AS plate,
-        con.dataemissaocon::date::text AS day,SUM(con.valorfretecon)::numeric AS revenue
-        FROM logistica.conhecimentos con
-        WHERE con.statuscon=2 AND con.dataemissaocon >= $1::date
-          AND con.dataemissaocon < $2::date + INTERVAL '1 day'
-          AND upper(trim(con.veiculocon))=ANY($3::text[])
-        GROUP BY 1,2 ORDER BY 1,2`,[`${period.year}-01-01`,period.cutoff || `${period.month}-01`,vehicles.map(row=>row.plate)]);
       const {rows:costs}=await client.query(`${baseCostCte()}
         SELECT upper(trim(placa)) AS plate,to_char(vencimento,'YYYY-MM') AS month,
           conta_nome AS account,sum(valor)::numeric AS cost
