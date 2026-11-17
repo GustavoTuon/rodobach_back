@@ -261,7 +261,7 @@ export async function getDreEmpresarial({
   tipo = "todos",
   status = "todos",
   search,
-} = {}) {
+} = {}, {positiveFinancialOnly = false} = {}) {
   const resolved = resolvePeriod({ period, startDate, endDate, mesAno });
   const validDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
   if ((mesAno && !/^\d{4}-(0[1-9]|1[0-2])$/.test(String(mesAno))) || (!mesAno && Boolean(startDate) !== Boolean(endDate)) || !validDate(resolved.startDate) || !validDate(resolved.endDate) || resolved.startDate > resolved.endDate || Date.parse(resolved.endDate) - Date.parse(resolved.startDate) > 366 * 86400000) {
@@ -692,7 +692,7 @@ export async function getDreEmpresarial({
     ),
     base AS (
       SELECT * FROM receita
-      UNION ALL SELECT * FROM receita_cte_sem_titulo
+      ${positiveFinancialOnly ? '' : 'UNION ALL SELECT * FROM receita_cte_sem_titulo'}
       UNION ALL SELECT * FROM pagar
       UNION ALL SELECT * FROM movimentacao
     )
@@ -710,6 +710,7 @@ export async function getDreEmpresarial({
       LIMIT 1
     ) vei_meta ON true
     WHERE (p.conta IS NULL OR b.conta_codigo = p.conta)
+      ${positiveFinancialOnly ? 'AND b.valor > 0' : ''}
       AND (p.placa IS NULL OR UPPER(TRIM(b.placa::text)) = p.placa)
       AND (p.cliente IS NULL OR b.cliente_codigo = p.cliente)
       AND (
@@ -733,7 +734,7 @@ export async function getDreEmpresarial({
     ORDER BY b.data_base DESC, b.categoria_dre, b.valor
   `;
 
-  const result = { rows: await dreCache.get(JSON.stringify(params), async () => (await clientPool.query(query, params)).rows) };
+  const result = { rows: await dreCache.get(JSON.stringify([params,positiveFinancialOnly]), async () => (await clientPool.query(query, params)).rows) };
   const rows = result.rows.map((row) => {
     const categoria = row.categoria_dre;
     const valor = r2(row.valor);

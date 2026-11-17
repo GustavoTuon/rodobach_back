@@ -1,4 +1,17 @@
 const round=value=>Math.round((Number(value)+Number.EPSILON)*100)/100;
+// Same positive financial rows used by the DRE plate detail. Amounts are already
+// rounded per allocation by the DRE; aggregate in cents to preserve that total.
+export function buildDreRevenueDaily(rows) {
+  const totals=new Map();
+  for(const row of rows){
+    if(!row.placa||!row.data||Number(row.valor)<=0||!Number.isFinite(Number(row.valor))||row.origem==='cte_sem_titulo')continue;
+    const key=`${row.placa}:${row.data}`;
+    const current=totals.get(key)||{plate:row.placa,day:row.data,cents:0};
+    current.cents+=Math.round(Number(row.valor)*100);
+    totals.set(key,current);
+  }
+  return [...totals.values()].map(({plate,day,cents})=>({plate,day,revenue:cents/100}));
+}
 export const saoPauloDay=(now=new Date())=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
 export const daysInMonth=month=>new Date(Date.UTC(Number(month.slice(0,4)),Number(month.slice(5,7)),0)).getUTCDate();
 export function revenuePeriod(month,now=new Date()) {
@@ -64,9 +77,9 @@ export function buildFleetRevenue(vehicles,daily,period) {
   return {period,items,summary:{vehicles:items.length,actual:round(items.reduce((sum,item)=>sum+item.actual,0)),
     target:round(items.reduce((sum,item)=>sum+(item.target||0),0)),withTarget:items.filter(item=>item.target!==null).length,
     above:items.filter(item=>item.status==='acima').length,below:items.filter(item=>item.status==='abaixo').length},
-    method:{source:'CT-es emitidos (status 2), valor do frete por data de emissão. Mesma base do Resultado por Veículo.',
+    method:{source:'Mesma receita do detalhe por placa da DRE: lançamentos financeiros positivos, com os mesmos rateios, datas e critérios. Inclui títulos em aberto e recebidos; não representa apenas dinheiro recebido. CT-es sem título ficam fora, na auditoria da DRE.',
       target:'Percentil 75 dos meses completos anteriores ao mês selecionado, no mesmo ano, arredondado para cima em R$ 1.000. Meses sem receita entram como zero após o início da base.',
-      start:'Com data de aquisição: primeiro mês completo da propriedade. Sem data: mês do primeiro CT-e observado no ano (aproximação).',
+      start:'Com data de aquisição: primeiro mês completo da propriedade. Sem data: mês da primeira receita financeira da DRE observada no ano (aproximação).',
       pace:'Meta proporcional aos dias corridos encerrados. Verde: 100% ou mais; amarelo: de 90% a menos de 100%; vermelho: abaixo de 90%. Menos de 3 meses: referência provisória, sem avaliação.',
       scope:'Veículos próprios ativos de transporte (caminhão/cavalo). Exclui terceiros, reboques e veículos de apoio. Classificação atual do cadastro.',
       note:'Referência histórica de faturamento, não meta de lucro. Não considera custos nem sazonalidade; projeção linear não é garantia de fechamento.'}};
