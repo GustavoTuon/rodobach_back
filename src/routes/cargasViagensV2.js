@@ -1,4 +1,5 @@
 import { createAsyncCache } from "../services/asyncCache.js";
+import { extraCatalogName } from '../services/itineraryExtraCatalog.js';
 import { listResponsaveis, resolveResponsavel } from '../services/cargaResponsavel.js';
 import { parseVolumes, validateCargaVolumes } from "../services/cargaVolumes.js";
 import { searchTripDocuments, documentType } from "../services/viagemDocumentoErp.js";
@@ -661,6 +662,21 @@ cargasViagensV2Router.get("/cargas-viagens-v2/resumo", async (req, res, next) =>
   } catch (error) { next(error); }
 });
 
+cargasViagensV2Router.get('/cargas-viagens-v2/volumes-extras', async (_req,res,next) => {
+  try {
+    const {rows}=await pool.query(`SELECT id::text, description FROM ${tableName('itinerary_extra_catalog')} ORDER BY description`);
+    res.json(rows);
+  } catch(error) { next(error); }
+});
+cargasViagensV2Router.post('/cargas-viagens-v2/volumes-extras', async (req,res,next) => {
+  try {
+    const {description,key}=extraCatalogName(req.body.description);
+    const {rows}=await pool.query(`INSERT INTO ${tableName('itinerary_extra_catalog')} AS catalog (description,normalized_name)
+      VALUES ($1,$2) ON CONFLICT (normalized_name) DO UPDATE SET normalized_name=EXCLUDED.normalized_name
+      RETURNING id::text, description`,[description,key]);
+    res.json(rows[0]);
+  } catch(error) { next(error); }
+});
 cargasViagensV2Router.get('/cargas-viagens-v2/responsaveis', async (req,res,next) => {
   try { res.json(await listResponsaveis(req.query.q)); } catch(error) { next(error); }
 });
