@@ -312,3 +312,35 @@ uma transação. Tarifas futuras são selecionadas somente a partir da vigência
 considerando America/Sao_Paulo. A calculadora e os alertas consultam a mesma tabela;
 não existe mais reserva de coeficientes manual no frontend ou na tabela legada.
 Na indisponibilidade do banco, o cálculo fica indisponível, sem assumir valores antigos.
+# Diagnóstico de indisponibilidade do ERP no servidor
+
+Quando `/api/notas` e `/api/notas/tarefas` respondem 200, mas
+`/api/notas/frota` falha com `EHOSTUNREACH`, o backend está sem rota até o
+banco configurado em `CLIENT_DB_HOST`/`CLIENT_DB_PORT`. O endpoint
+`/api/health` verifica somente o banco da aplicação; um resultado positivo
+nele não confirma a conexão com o ERP.
+
+No terminal **do container do backend** no Easypanel, execute:
+
+```sh
+node scripts/check-erp.mjs
+```
+
+O diagnóstico faz apenas leituras e não imprime credenciais nem dados da frota.
+Ele verifica TCP, conexão PostgreSQL e leitura das tabelas de veículos e engates.
+`EHOSTUNREACH`/`ENETUNREACH` requerem revisar a rota/VPN entre o container e o
+banco; `ETIMEDOUT` requer verificar rota, firewall e disponibilidade do destino;
+`ECONNREFUSED` indica verificar o serviço/porta do PostgreSQL. Confira se o
+endereço definido em `CLIENT_DB_HOST` é acessível **a partir do servidor**.
+Se TCP funciona e PostgreSQL falha, examine as credenciais, TLS e permissões
+da conexão ERP. Não copie o arquivo `.env` local para produção.
+
+Enquanto a rede é corrigida, `MAINTENANCE_ERP_SYNC_ENABLED=false` desativa
+somente a sincronização automática de OS; não restabelece a consulta da frota.
+A sincronização consulta o ERP antes de abrir a transação da aplicação, evitando
+manter uma transação ociosa durante a espera pela rede.
+
+O Dockerfile configura `TRUST_PROXY_HOPS=1` para um proxy reverso do Easypanel.
+Mantenha a porta do container acessível apenas pelo proxy. Em deployments sem
+proxy, use `TRUST_PROXY_HOPS=0`; em outra topologia, configure o número real de
+proxies confiáveis. Variáveis definidas no painel prevalecem sobre o Dockerfile.

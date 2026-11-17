@@ -51,6 +51,7 @@ import { startDailyOdometerCollector } from "./services/dailyOdometer.js";
 import { comprasRouter, comprasPublicRouter } from './routes/compras.js';
 
 export const app = express();
+app.set("trust proxy", config.trustProxyHops);
 
 app.disable("x-powered-by");
 app.use(pinoHttp({ logger, serializers: loggerOptions.serializers, genReqId: () => randomUUID() }));

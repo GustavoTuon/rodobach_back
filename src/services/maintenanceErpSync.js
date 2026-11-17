@@ -38,13 +38,17 @@ export async function loadExternalOrders(erp = clientPool) {
 
 export async function syncMaintenanceErp({db = pool, load = loadExternalOrders, readOnly = config.readOnly} = {}) {
   if (readOnly) return {ignorado: true};
+  // Never keep an application transaction idle while waiting for the ERP network.
+  const orders = await load();
   const client = await db.connect();
+  let connectionError;
+  const onError = error => { connectionError = error; };
+  client.on?.('error', onError);
   const ledger = tableName('manutencao_os_erp'), state = tableName('manutencao_os_erp_estado');
   try {
     await client.query('BEGIN');
     const lock = await client.query('SELECT pg_try_advisory_xact_lock(78482933) AS acquired');
     if (!lock.rows[0].acquired) { await client.query('ROLLBACK'); return {ignorado: true}; }
-    const orders = await load();
     const initialized = (await client.query(`SELECT id FROM ${state} WHERE id=1`)).rowCount > 0;
     if (!initialized) {
       await client.query(`INSERT INTO ${ledger}(chave,estado) SELECT unnest($1::text[]),'historico'`, [orders.map(o => o.chave)]);
@@ -91,7 +95,10 @@ export async function syncMaintenanceErp({db = pool, load = loadExternalOrders, 
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
-  } finally {client.release();}
+  } finally {
+    client.release(connectionError);
+    client.removeListener?.('error', onError);
+  }
 }
 
 let timer;
