@@ -36,6 +36,10 @@ test('ERP import baselines, retries incomplete OS, deduplicates and updates dead
       (2,'ABC1D23','Troca de filtro intermediário',true,'km',20000,120000);`);
     const db = {connect: async () => ({release(){}, query(sql, params) {
       if (['BEGIN','COMMIT','ROLLBACK'].includes(sql)) return Promise.resolve({rows:[]});
+      // This test owns an isolated schema, so it must not compete with a live sync.
+      if (sql === 'SELECT pg_try_advisory_xact_lock(78482933) AS acquired') {
+        return client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', [schema]);
+      }
       return client.query(sql,params);
     }})};
     const order = {chave:'old',numero:1,km:130000,data:'2026-01-02',servicos:[{descricao:'Troca de óleo',placa:'ABC-1D23'}]};

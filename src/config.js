@@ -9,6 +9,10 @@ for (const key of required) {
 }
 
 const isProduction = process.env.NODE_ENV === "production";
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 8) {
+  throw new Error("TRUST_PROXY_HOPS must be an integer between 0 and 8");
+}
 if (!process.env.JWT_SECRET && isProduction) throw new Error("JWT_SECRET is required in production");
 if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
   throw new Error("JWT_SECRET must have at least 32 characters");
@@ -17,6 +21,7 @@ if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
 export const config = {
   env: process.env.NODE_ENV || "development",
   isProduction,
+  trustProxyHops,
   port: Number(process.env.PORT || 3333),
   host: process.env.HOST || (isProduction ? "0.0.0.0" : "127.0.0.1"),
   readOnly: process.env.READ_ONLY_MODE === "true",
