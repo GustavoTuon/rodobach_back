@@ -61,15 +61,14 @@ test('tarefas exigem permissão e respeitam somente leitura',async t=>{
 test('conclusão altera apenas a placa e versão selecionadas do usuário',async t=>{
  t.mock.method(pool,'query',async(sql,params)=>{
   assert.match(sql,/usuario_id=\$1 AND id=\$2 AND placa=\$3 AND revisao=\$5/);
-  assert.deepEqual(params,[42,id,'ABC1234',true,1]);
+  assert.deepEqual(params,[42,id,'ABC1234',true,1,null]);
   return {rows:[{id,placa:'ABC1234',titulo:'Adesivo',concluida:true,revisao:2}]};
  });
  const result=await request(app()).patch(`/notas/tarefas/${id}/ABC1234`).send({done:true,version:1});
  assert.equal(result.status,200);assert.equal(result.body.task.done,true);
 });
-test('conclusão concorrente retorna conflito e lista é pessoal',async t=>{
+test('conclusão concorrente retorna conflito',async t=>{
  t.mock.method(pool,'query',async(sql,params)=>{assert.match(sql,/usuario_id=\$1/);assert.equal(params[0],42);return {rows:[]};});
- assert.equal((await request(app()).get('/notas/tarefas')).status,200);
  assert.equal((await request(app()).patch(`/notas/tarefas/${id}/ABC1234`).send({done:true,version:1})).status,409);
 });
 test('notas são filtradas pela placa exata sem perder busca por texto',async t=>{
@@ -95,4 +94,56 @@ test('admin consulta sem concessão; usuário comum só após liberação indivi
  assert.equal((await request(app({id:1,admin:true,permissions:{}})).get('/notas')).status,200);
  assert.equal((await request(app({id:42,admin:false,permissions:{'bloco-notas':false}})).get('/notas')).status,403);
  assert.equal((await request(app({id:42,admin:false,permissions:{'bloco-notas':true}})).get('/notas')).status,200);
+});
+
+test('tarefas são visíveis para outros usuários e somente o autor pode editar',async t=>{
+ t.mock.method(pool,'query',async sql=>{
+  assert.doesNotMatch(sql,/WHERE usuario_id/);
+  return {rows:[{...row,concluida:false}]};
+ });
+ for(const user of [{id:77},{id:42},{id:42,readOnly:true}]){
+  const result=await request(app({...user,permissions:{'bloco-notas':true}})).get('/notas/tarefas');
+  assert.equal(result.status,200);assert.equal(result.body.tasks[0].authorId,42);
+  assert.equal(result.body.tasks[0].canEdit,user.id===42&&!user.readOnly);
+ }
+});
+test('edição da descrição preserva conclusão e limita placa, autor e revisão',async t=>{
+ const query=t.mock.method(pool,'query',async(sql,params)=>{
+  assert.match(sql,/usuario_id=\$1 AND id=\$2 AND placa=\$3 AND revisao=\$5/);
+  assert.match(sql,/concluida=COALESCE/);
+  assert.deepEqual(params,[42,id,'ABC1234',null,1,'Revisar freios']);
+  return {rows:[{...row,titulo:'Revisar freios',concluida:true,revisao:2}]};
+ });
+ const result=await request(app()).patch(`/notas/tarefas/${id}/ABC1234`).send({title:' Revisar freios ',version:1});
+ assert.equal(result.status,200);assert.equal(result.body.task.title,'Revisar freios');assert.equal(result.body.task.done,true);
+ for(const changes of [{title:''},{title:' '.repeat(10)},{title:'x'.repeat(201)},{},{title:'Ok',usuario_id:77}]){
+  assert.equal((await request(app()).patch(`/notas/tarefas/${id}/ABC1234`).send({...changes,version:1})).status,400);
+ }
+ assert.equal(query.mock.callCount(),1);
+});
+test('edição de tarefa não permite outro autor nem acesso de consulta',async t=>{
+ const query=t.mock.method(pool,'query',async(sql,params)=>{assert.match(sql,/usuario_id=\$1/);assert.equal(params[0],77);return {rows:[]};});
+ assert.equal((await request(app({id:77,permissions:{'bloco-notas':true}})).patch(`/notas/tarefas/${id}/ABC1234`).send({title:'Alterada',version:1})).status,409);
+ assert.equal((await request(app({id:42,readOnly:true,permissions:{'bloco-notas':true}})).patch(`/notas/tarefas/${id}/ABC1234`).send({title:'Alterada',version:1})).status,403);
+ assert.equal(query.mock.callCount(),1);
+});
+
+test('delete task requires owner, plate and current version',async t=>{
+ const query=t.mock.method(pool,'query',async(sql,params)=>{
+  assert.match(sql,/DELETE FROM .* WHERE usuario_id=\$1 AND id=\$2 AND placa=\$3 AND revisao=\$4 RETURNING id/);
+  assert.deepEqual(params,[42,id,'ABC1234',1]);return {rows:[{id}]};
+ });
+ const result=await request(app()).delete(`/notas/tarefas/${id}/ABC1234`).send({version:1});
+ assert.equal(result.status,200);assert.equal(result.body.ok,true);assert.equal(query.mock.callCount(),1);
+});
+test('delete rejects invalid data, missing permission and read-only access',async t=>{
+ const query=t.mock.method(pool,'query',async()=>{throw Error('Unexpected database call');});
+ for(const body of [{},{version:0},{version:1,usuario_id:77}])assert.equal((await request(app()).delete(`/notas/tarefas/${id}/ABC1234`).send(body)).status,400);
+ assert.equal((await request(app()).delete('/notas/tarefas/invalid/ABC1234').send({version:1})).status,400);
+ for(const user of [{id:42,permissions:{}},{id:42,permissions:{'bloco-notas':true},readOnly:true}])assert.equal((await request(app(user)).delete(`/notas/tarefas/${id}/ABC1234`).send({version:1})).status,403);
+ assert.equal(query.mock.callCount(),0);
+});
+test('delete conflicts when task belongs to another author or version changed',async t=>{
+ t.mock.method(pool,'query',async(sql,params)=>{assert.equal(params[0],77);assert.equal(params[3],1);return {rows:[]};});
+ assert.equal((await request(app({id:77,permissions:{'bloco-notas':true}})).delete(`/notas/tarefas/${id}/ABC1234`).send({version:1})).status,409);
 });

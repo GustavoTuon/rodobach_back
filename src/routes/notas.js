@@ -16,10 +16,10 @@ notasRouter.use('/notas',requirePermission('bloco-notas'),enforceReadOnly,(req,r
 notasRouter.get('/notas/placas',async(req,res,next)=>{
  try {const {rows}=await clientPool.query(`SELECT DISTINCT upper(trim(placavei)) AS plate FROM frotas.veiculos WHERE situacaovei::text='1' AND NULLIF(trim(placavei),'') IS NOT NULL ORDER BY 1`);res.json({plates:rows.map(row=>row.plate)});}catch(error){next(error);}
 });
-// Tasks remain personal; saved notes are readable by everyone granted notes access.
+// Tasks and saved notes are readable by everyone granted notes access; only authors edit.
 const taskTable=()=>tableName('bloco_notas_tarefas');
 const plateSchema=z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/);
-const taskRecord=row=>({id:row.id,plate:row.placa,title:row.titulo,done:row.concluida,version:row.revisao,updatedAt:row.atualizado_em});
+const taskRecord=(row,user)=>({authorId:row.usuario_id,canEdit:row.usuario_id===user.id&&!user.readOnly,id:row.id,plate:row.placa,title:row.titulo,done:row.concluida,version:row.revisao,updatedAt:row.atualizado_em});
 async function fleet(){
  const [vehicles,links]=await Promise.all([
   clientPool.query(`SELECT DISTINCT ON (upper(trim(placavei))) upper(trim(placavei)) AS plate, COALESCE(NULLIF(trim(modelovei),''),NULLIF(trim(marcamodelorenavamvei),''),NULLIF(trim(nomevei),''),'') AS model,tipovei,tipoveiculoctevei,numeroeixosvei FROM frotas.veiculos WHERE situacaovei::text='1' AND tipopropriedadevei::text='P' AND NULLIF(trim(placavei),'') IS NOT NULL ORDER BY 1`),
@@ -39,7 +39,7 @@ async function fleet(){
 }
 notasRouter.get('/notas/frota',async(req,res,next)=>{try{res.json({vehicles:await fleet()});}catch(error){next(error);}});
 notasRouter.get('/notas/tarefas',async(req,res,next)=>{
- try{const {rows}=await pool.query(`SELECT * FROM ${taskTable()} WHERE usuario_id=$1 ORDER BY criado_em DESC,id,placa`,[req.user.id]);res.json({tasks:rows.map(taskRecord)});}catch(error){next(error);}
+ try{const {rows}=await pool.query(`SELECT * FROM ${taskTable()} ORDER BY criado_em DESC,id,placa,usuario_id`);res.json({tasks:rows.map(row=>taskRecord(row,req.user))});}catch(error){next(error);}
 });
 notasRouter.post('/notas/tarefas',async(req,res,next)=>{
  const parsed=z.object({id:z.uuid(),title:z.string().trim().min(1).max(200),plates:z.array(plateSchema).min(1).max(1000)}).strict().safeParse(req.body);
@@ -51,14 +51,23 @@ notasRouter.post('/notas/tarefas',async(req,res,next)=>{
   await pool.query(`INSERT INTO ${taskTable()} (id,usuario_id,placa,titulo) SELECT $1,$2,unnest($3::varchar[]),$4 ON CONFLICT (usuario_id,id,placa) DO NOTHING`,[body.id,req.user.id,plates,body.title]);
   const {rows}=await pool.query(`SELECT * FROM ${taskTable()} WHERE usuario_id=$1 AND id=$2 ORDER BY placa`,[req.user.id,body.id]);
   if(rows.length!==plates.length||rows.some(r=>r.titulo!==body.title||!plates.includes(r.placa)))return res.status(409).json({error:'Esta tarefa já foi lançada com outros dados. Atualize a lista.'});
-  res.json({tasks:rows.map(taskRecord)});
+  res.json({tasks:rows.map(row=>taskRecord(row,req.user))});
  }catch(error){next(error);}
 });
 notasRouter.patch('/notas/tarefas/:id/:plate',async(req,res,next)=>{
- const parsed=z.object({done:z.boolean(),version:z.number().int().positive()}).strict().safeParse(req.body);
+ const parsed=z.object({done:z.boolean().optional(),title:z.string().trim().min(1).max(200).optional(),version:z.number().int().positive()}).strict().refine(body=>body.done!==undefined||body.title!==undefined).safeParse(req.body);
  if(!parsed.success||!z.uuid().safeParse(req.params.id).success||!plateSchema.safeParse(req.params.plate).success)return res.status(400).json({error:'Tarefa inválida.'});
- try{const {rows}=await pool.query(`UPDATE ${taskTable()} SET concluida=$4,revisao=revisao+1,atualizado_em=now() WHERE usuario_id=$1 AND id=$2 AND placa=$3 AND revisao=$5 RETURNING *`,[req.user.id,req.params.id,req.params.plate,parsed.data.done,parsed.data.version]);
- if(!rows.length)return res.status(409).json({error:'Tarefa alterada em outro aparelho. Atualize e tente novamente.'});res.json({task:taskRecord(rows[0])});
+ try{const {rows}=await pool.query(`UPDATE ${taskTable()} SET concluida=COALESCE($4,concluida),titulo=COALESCE($6,titulo),revisao=revisao+1,atualizado_em=now() WHERE usuario_id=$1 AND id=$2 AND placa=$3 AND revisao=$5 RETURNING *`,[req.user.id,req.params.id,req.params.plate,parsed.data.done??null,parsed.data.version,parsed.data.title??null]);
+ if(!rows.length)return res.status(409).json({error:'Tarefa alterada em outro aparelho. Atualize e tente novamente.'});res.json({task:taskRecord(rows[0],req.user)});
+ }catch(error){next(error);}
+});
+notasRouter.delete('/notas/tarefas/:id/:plate',async(req,res,next)=>{
+ const parsed=z.object({version:z.number().int().positive()}).strict().safeParse(req.body);
+ if(!parsed.success||!z.uuid().safeParse(req.params.id).success||!plateSchema.safeParse(req.params.plate).success)return res.status(400).json({error:'Tarefa inválida.'});
+ try{
+  const {rows}=await pool.query(`DELETE FROM ${taskTable()} WHERE usuario_id=$1 AND id=$2 AND placa=$3 AND revisao=$4 RETURNING id`,[req.user.id,req.params.id,req.params.plate,parsed.data.version]);
+  if(!rows.length)return res.status(409).json({error:'Tarefa alterada, removida ou sem permissão para excluir. Atualize e tente novamente.'});
+  res.json({ok:true});
  }catch(error){next(error);}
 });
 notasRouter.get('/notas',async(req,res,next)=>{
