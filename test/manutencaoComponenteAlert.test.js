@@ -7,10 +7,13 @@ test("alerta de componente respeita condição crítica e atenção", () => {
   assert.equal(componentAlertType({ id: 2, condicao: "ATENCAO" }, 100000).type, "antecipado");
 });
 
-test("alerta de componente usa faixa de 10% do intervalo por KM", () => {
+test("alerta de componente usa faixas de 2000, 1000 e 500 KM", () => {
   const item = { id: 3, km_servico: 100000, proximo_km: 200000 };
   assert.equal(componentAlertType(item, 189999), null);
-  assert.equal(componentAlertType(item, 190000).type, "antecipado");
+  assert.equal(componentAlertType(item, 190000), null);
+  assert.equal(componentAlertType(item, 198000).stage, 2000);
+  assert.equal(componentAlertType(item, 199000).stage, 1000);
+  assert.equal(componentAlertType(item, 199500).stage, 500);
   assert.equal(componentAlertType(item, 200001).type, "vencido");
 });
 

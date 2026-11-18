@@ -1,5 +1,19 @@
 # Rodobach Backend
 
+## Avisos de manutenção por quilometragem
+
+Planos e componentes por quilometragem avisam nas faixas de até 2.000 km
+(🟡), 1.000 km (🟠) e 500 km (🔴), além do marco atingido ou excedido (🚨).
+Cada consulta considera somente a faixa atual; não envia faixas anteriores
+caso o veículo tenha ultrapassado mais de uma entre as leituras.
+Cada faixa tem uma referência independente por marco e destinatário, mantendo
+a proteção contra repetição e tentativas inconclusivas. A referência histórica
+do aviso de 1.000 km e a de vencimento são preservadas. Alertas por data e
+condição de componentes mantêm seus critérios anteriores.
+
+Não exige migração. Publicar o backend para aplicar a regra à chamada do n8n;
+o horário de execução e os destinatários permanecem na configuração existente.
+
 ## Pneu vinculado na despesa de borracharia
 
 O lançamento permite escolher entre os pneus montados na placa (ERP e
