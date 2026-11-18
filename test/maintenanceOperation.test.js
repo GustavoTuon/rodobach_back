@@ -33,7 +33,7 @@ test('date alerts accept actual PostgreSQL Date objects and respect Brasília ca
 test('kilometre alerts preserve exact service threshold and do not infer movement from missing telemetry', () => {
   const item = {tipo_controle: 'km', km_proximo_envio: 300000};
   assert.equal(alertType(item, null), null);
-  assert.equal(alertType(item, 298999), null);
+  assert.equal(alertType(item, 297999), null);
   assert.equal(alertType(item, 299000).type, 'antecipado');
   assert.equal(alertType(item, 303292).type, 'vencido');
   assert.equal(item.km_proximo_envio, 300000);

@@ -40,6 +40,26 @@ function recommendedAction(item, overdue) {
   return message.replace(/atingiu o marco/giu, "está próximo do marco");
 }
 
+function kilometreAlert(target, currentKm, reference) {
+  if (!Number.isFinite(currentKm) || !Number.isFinite(target) || target <= 0) return null;
+  const remaining = target - currentKm;
+  if (remaining <= 0) return {type: "vencido", remaining, reference};
+  const stage = [500, 1000, 2000].find(limit => remaining <= limit);
+  if (!stage) return null;
+  // Preserve the historical 1,000 km key; other stages have independent deduplication.
+  return {type: "antecipado", remaining, stage,
+    reference: stage === 1000 ? reference : `${reference}|aviso:${stage}`};
+}
+
+function alertHeading(event, component = false) {
+  const title = component ? "MANUTENÇÃO POR POSIÇÃO" : "MANUTENÇÃO";
+  if (event.type === "vencido") return `🚨 *${title} — MARCO ATINGIDO OU VENCIDO*`;
+  if (event.stage === 500) return `🔴 *${title} — ATÉ 500 KM*`;
+  if (event.stage === 1000) return `🟠 *${title} — ATÉ 1.000 KM*`;
+  if (event.stage === 2000) return `🟡 *${title} — ATÉ 2.000 KM*`;
+  return `🟡 *${title} PRÓXIMA*`;
+}
+
 export function alertType(item, currentKm, now = new Date()) {
   if (item.tipo_controle === "data") {
     const days = daysUntilMaintenance(item.data_proximo_envio, now);
@@ -49,11 +69,7 @@ export function alertType(item, currentKm, now = new Date()) {
     return null;
   }
   const target = Number(item.km_proximo_envio);
-  if (!Number.isFinite(currentKm) || !Number.isFinite(target) || target <= 0) return null;
-  const remaining = target - currentKm;
-  if (remaining <= 0) return { type: "vencido", remaining, reference: String(target) };
-  if (remaining <= 1000) return { type: "antecipado", remaining, reference: String(target) };
-  return null;
+  return kilometreAlert(target, currentKm, String(target));
 }
 
 export function componentAlertType(item, currentKm, now = new Date()) {
@@ -61,11 +77,9 @@ export function componentAlertType(item, currentKm, now = new Date()) {
   if (item.condicao === "ATENCAO") return { type: "antecipado", reference: `condicao-${item.id}-ATENCAO`, detail: "Requer atenção" };
   const targetKm = Number(item.proximo_km);
   if (Number.isFinite(targetKm) && targetKm > 0 && Number.isFinite(currentKm)) {
-    const remaining = targetKm - currentKm;
-    const interval = Math.max(0, targetKm - Number(item.km_servico || 0));
-    const threshold = Math.max(1000, interval * .1);
-    if (remaining <= 0) return { type: "vencido", reference: `km-${targetKm}`, detail: `Limite excedido em ${formatKm(Math.abs(remaining))}` };
-    if (remaining <= threshold) return { type: "antecipado", reference: `km-${targetKm}`, detail: `Faltam ${formatKm(remaining)}` };
+    const event = kilometreAlert(targetKm, currentKm, `km-${targetKm}`);
+    if (event) return {...event, detail: event.remaining === 0 ? "Marco atingido"
+      : event.type === "vencido" ? `Limite excedido em ${formatKm(Math.abs(event.remaining))}` : `Faltam ${formatKm(event.remaining)}`};
   }
   if (item.proxima_data) {
     const days = daysUntilMaintenance(item.proxima_data, now);
@@ -79,7 +93,7 @@ export function componentAlertType(item, currentKm, now = new Date()) {
 function buildComponentAlertMessage(item, event, currentKm) {
   const side = item.lado === "E" ? "esquerdo" : item.lado === "D" ? "direito" : item.lado;
   return [
-    event.type === "vencido" ? "🔴 *MANUTENÇÃO POR POSIÇÃO VENCIDA*" : "🟡 *MANUTENÇÃO POR POSIÇÃO PRÓXIMA*",
+    alertHeading(event, true),
     "",
     `🚚 *Veículo:* ${item.conjunto_placa || item.placa}`,
     item.placa !== item.conjunto_placa ? `📦 *Implemento:* ${item.placa}` : null,
@@ -103,9 +117,9 @@ export function buildMaintenanceAlertMessage(item, status, event, currentKm) {
   const remaining = Math.abs(Number(event.remaining || 0));
   const deadlineStatus = isDate
     ? (overdue ? `Vencida há ${remaining} dia(s)` : `Vence em ${remaining} dia(s)`)
-    : (overdue ? `Marco excedido em ${formatKm(remaining)}` : `Faltam ${formatKm(remaining)}`);
+    : (overdue ? (remaining === 0 ? "Marco atingido" : `Marco excedido em ${formatKm(remaining)}`) : `Faltam ${formatKm(remaining)}`);
   return [
-    overdue ? "🔴 *MANUTENÇÃO VENCIDA*" : "🟡 *MANUTENÇÃO PRÓXIMA*",
+    alertHeading(event),
     "",
     `🚛 *Placa:* ${item.placa}`,
     `🔧 *Serviço:* ${item.titulo}`,
