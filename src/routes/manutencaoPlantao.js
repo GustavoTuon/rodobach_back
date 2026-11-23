@@ -236,6 +236,7 @@ async function mutate(req, res, next, action) {
   let expenseTrip = null;
   try {
     const body = req.body;
+    if (action === "correct_amount" && (!canManage(req) || req.user.readOnly)) return res.status(403).json({error:"Somente administradores podem corrigir valores."});
     if (body.reimbursementExpected !== undefined && action !== "create") return res.status(400).json({error:"Altere o reembolso pelo controle da despesa."});
     if (body.reimbursementExpected !== undefined && body.service === "Descarga") return res.status(400).json({error:"Informe o reembolso no vínculo da descarga."});
     const controls = [["erpDocuments","lancamento-despesas"],["erpDocument","lancamento-despesas"],["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
@@ -269,7 +270,7 @@ async function mutate(req, res, next, action) {
       before = (await client.query(`SELECT * FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL FOR UPDATE`,[req.params.id])).rows[0];
       if (!before) return await reject(404,"Lançamento não encontrado.");
       if (["edit","delete"].includes(action) && !canManage(req) && String(before.usuario_id) !== String(req.user.id)) return await reject(403,"Você só pode alterar seus próprios lançamentos.");
-      if ((before.conferido_em || before.pago) && !["check", "uncheck", "status"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
+      if ((before.conferido_em || before.pago) && !["check", "uncheck", "status", "correct_amount"].includes(action)) return await reject(409,"Lançamento conferido ou pago não pode ser editado ou excluído.");
       if (before.revisao !== body.version) return await reject(409,"Este lançamento foi alterado. Atualize a lista antes de continuar.");
     }
     if (body.erpDocuments !== undefined && body.erpDocument !== undefined) return await reject(400,"Envie a lista de documentos sem o campo antigo de vínculo.");
@@ -277,6 +278,10 @@ async function mutate(req, res, next, action) {
     if (action === "edit" && before.placa !== body.plate && expenseErpDocumentsOf(before).length) return await reject(409,"Remova os vínculos ERP antes de trocar a placa da despesa.");
     const documents = body.erpDocuments === undefined ? null : await resolveExpenseErpDocuments(body.erpDocuments,before);
     let after;
+    if (action === "correct_amount") {
+      if (Math.round(Number(before.valor)*100) === Math.round(body.amount*100)) return await reject(400,"Informe um valor diferente do atual.");
+      after = (await client.query(`UPDATE ${TABLE()} SET valor=$2,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,body.amount])).rows[0];
+    }
     if (["create","edit"].includes(action)) {
       const tire = await resolveExpenseTire(body,before);
       if (!body.supplier.trim()) return await reject(400,"Informe o fornecedor, mesmo que não esteja cadastrado.");
@@ -366,7 +371,7 @@ async function mutate(req, res, next, action) {
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=NULL,conferido_login=NULL,conferido_em=NULL,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id])).rows[0];
     } else if (action === "delete") {
       after = (await client.query(`UPDATE ${TABLE()} SET excluido_em=NOW(),excluido_por=$2,motivo_exclusao=$3,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.login,body.reason])).rows[0];
-    } else {
+    } else if (action === "check") {
       if (before.conferido_em) {await client.query("COMMIT"); return res.json({record:record(before)});}
       if (!before.comprovante_foto && (before.justificativa_sem_nota || "").trim().length<10) return await reject(400,"Anexe a nota ou registre a justificativa antes de conferir.");
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),documento_erp=$4,lancado=$5,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login,body.erpDocument ?? before.documento_erp,body.posted ?? before.lancado])).rows[0];
@@ -391,7 +396,7 @@ async function mutate(req, res, next, action) {
       after = (await client.query(`UPDATE ${TABLE()} SET documentos_erp=$2::jsonb,documento_erp=$3 WHERE id=$1 RETURNING *`,
         [after.id,JSON.stringify(documents),documents.map(item=>item.number).join(', ')])).rows[0];
     }
-    await audit(client,req,action,before,after);
+    await audit(client,req,action,before,action === "correct_amount" ? {...after,justificativa_correcao:body.reason} : after);
     await client.query("COMMIT");
     res.status(action === "create" ? 201 : 200).json(action === "delete" ? {ok:true} : {record:record(after)});
   } catch (error) {if (client) await client.query("ROLLBACK").catch(()=>{}); next(error);}
@@ -399,6 +404,7 @@ async function mutate(req, res, next, action) {
 }
 manutencaoPlantaoRouter.post("/manutencao-plantao/lancamentos",canRegister,validateBody(schema),(req,res,next)=>mutate(req,res,next,"create"));
 for (const path of ["lancamentos","conferencia"]) {
+  manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/corrigir-valor`,canRead,validateBody(z.object({version:z.number().int().positive(),amount:schema.shape.amount,reason:z.string().trim().min(5).max(500)}).strict()),(req,res,next)=>mutate(req,res,next,"correct_amount"));
   const permission = canRead;
   manutencaoPlantaoRouter.patch(`/manutencao-plantao/${path}/:id/controle`,canRead,validateBody(z.object({version:z.number().int().positive(),paymentDate:z.iso.date().nullable().optional(),paymentMethod:z.object({code:z.string().min(1).max(30),company:z.string().min(1).max(30)}).strict().optional(),posted:z.boolean().optional(),erpDocument:z.string().trim().max(80).optional(),erpDocuments:expenseErpDocumentsSchema.optional(),reimbursement:reimbursementSchema.optional()}).strict().refine(body => body.erpDocuments !== undefined || body.erpDocument !== undefined || body.posted !== undefined || body.paymentDate !== undefined || body.reimbursement !== undefined).refine(body => !body.paymentMethod || Boolean(body.paymentDate))),(req,res,next)=>mutate(req,res,next,"status"));
   manutencaoPlantaoRouter.put(`/manutencao-plantao/${path}/:id`,permission,validateBody(changeSchema),(req,res,next)=>mutate(req,res,next,"edit"));
