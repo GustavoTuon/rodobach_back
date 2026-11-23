@@ -258,3 +258,26 @@ test('reembolso rejeita vinculo de outro veiculo ou periodo antes de salvar',asy
  assert.ok(writes.includes('ROLLBACK'));
  assert.equal(writes.some(sql=>sql.includes('SET reembolso=')),false);
 });
+
+test('admin corrige valor pago e conferido com auditoria e controle de versao',async t=>{
+ const before={id,placa:'ABC1234',valor:180,revisao:2,pago:true,conferido_em:'2026-11-19T12:00:00Z',conferido_login:'Conferente',documento_erp:'100, 101'};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SET valor=$2'))return {rows:[{...before,valor:params[1],revisao:3}]};
+  return {rows:[before]};
+ }}));
+ const url=`/manutencao-plantao/lancamentos/${id}/corrigir-valor`,body={version:2,amount:200,reason:'Valor digitado incorretamente'};
+ for(const user of [driver,reviewer,{id:1,admin:true,readOnly:true},{id:1,admin:true,expenseProfile:'motorista'}])await request(app(user)).patch(url).send(body).expect(403);
+ assert.equal(writes.length,0);
+ const admin={id:1,login:'Admin',admin:true};
+ for(const invalid of [{...body,reason:' '},{...body,amount:0},{...body,amount:1.234},{...body,paid:false}])await request(app(admin)).patch(url).send(invalid).expect(400);
+ await request(app(admin)).patch(url).send({...body,version:1}).expect(409);
+ await request(app(admin)).patch(url).send({...body,amount:180}).expect(400);
+ const response=await request(app(admin)).patch(url).send(body).expect(200);
+ assert.equal(response.body.record.amount,200);assert.equal(response.body.record.paid,true);assert.equal(response.body.record.checkedBy,'Conferente');assert.equal(response.body.record.erpDocument,'100, 101');
+ const audit=writes.find(x=>x.sql.includes('INSERT INTO')&&x.sql.includes('historico'));
+ assert.equal(audit.params[1],'correct_amount');assert.equal(audit.params[2],1);assert.equal(audit.params[3],'Admin');
+ assert.equal(JSON.parse(audit.params[4]).valor,180);assert.equal(JSON.parse(audit.params[5]).valor,200);assert.equal(JSON.parse(audit.params[5]).justificativa_correcao,body.reason);
+ assert.equal(writes.filter(x=>x.sql.startsWith('UPDATE')).length,1);
+});
