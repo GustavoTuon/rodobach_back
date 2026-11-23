@@ -1,5 +1,21 @@
 # Rodobach Backend
 
+## Vários documentos ERP por despesa
+
+Uma despesa pode vincular até 20 títulos financeiros, como diesel e Arla
+separados no ERP. Cada título é identificado por empresa, série, número,
+parcela e fornecedor, validado novamente no ERP pela placa ao salvar.
+Os valores são obtidos do ERP; a tela mostra a soma e avisa diferenças em
+relação à despesa. A seleção não paga nem altera documentos do ERP.
+
+Antes de publicar o backend e frontend correspondentes, aplique somente a
+migração 094 com `node scripts/apply-expense-erp-documents.mjs --apply`.
+Sem `--apply`, o script apenas verifica a migração. Vínculos antigos continuam
+visíveis como referências antigas, sem inventar valores ou identidades;
+podem ser removidos e selecionados novamente pela busca. Abas antigas devem
+ser atualizadas para editar vínculos múltiplos. A alteração permanece auditada
+e protegida pela revisão da despesa. Trocar a placa exige remover os vínculos.
+
 ## Avisos de manutenção por quilometragem
 
 Planos e componentes por quilometragem avisam nas faixas de até 2.000 km

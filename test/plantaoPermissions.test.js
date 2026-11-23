@@ -162,6 +162,32 @@ test("admin salva e lê as novas permissões; usuário comum não altera permiss
  assert.deepEqual(params.slice(-2),["colaborador",null]);
 });
 
+test('multiple financial links persist together, preserve payment and are audited',async t=>{
+ let row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:false,lancado:false,documento:'NF-99',documento_erp:'',documentos_erp:[]};
+ const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SET pago='))row={...row,lancado:params[2],documento_erp:params[7],revisao:2};
+  if(sql.includes('SET documentos_erp='))row={...row,documentos_erp:JSON.parse(params[1]),documento_erp:params[2]};
+  return {rows:[row]};
+ }}));
+ t.mock.method(clientPool,'query',async(_sql,p)=>({rows:[{company:p[0],series:p[1],number:p[2],installment:p[3],supplierCode:p[4],amount:50,plate:p[5]}]}));
+ const docs=['123','124'].map(number=>({company:'1',series:'A',number,installment:'1',supplierCode:'7'}));
+ const user={id:44,permissions:{'lancamento-despesas':true}};
+ const url=`/manutencao-plantao/lancamentos/${id}/controle`;
+ const response=await request(app(user)).patch(url).send({version:1,posted:true,erpDocuments:docs});
+ assert.equal(response.status,200);assert.equal(response.body.record.erpDocuments.length,2);
+ assert.equal(response.body.record.erpDocument,'123, 124');assert.equal(response.body.record.paid,false);assert.equal(response.body.record.checked,false);
+ const audit=writes.find(x=>x.sql.includes('INSERT INTO')&&x.sql.includes('historico'));
+ assert.equal(JSON.parse(audit.params[5]).documentos_erp.length,2);
+ assert.equal((await request(app(user)).patch(url).send({version:1,erpDocuments:[]})).status,409);
+ assert.equal((await request(app(user)).patch(url).send({version:2,erpDocument:'999'})).status,409);
+ const cleared=await request(app(user)).patch(url).send({version:2,erpDocuments:[]});
+ assert.equal(cleared.status,200);assert.deepEqual(cleared.body.record.erpDocuments,[]);
+ assert.equal(cleared.body.record.erpDocument,'');
+ assert.equal((await request(app(reviewer)).patch(url).send({version:2,erpDocuments:docs})).status,403);
+});
+
 test("documento financeiro é salvo e auditado sem conferir ou pagar",async t=>{
  const row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,pago:false,lancado:false,documento:'NF-99',documento_erp:''};
  const writes=[];
