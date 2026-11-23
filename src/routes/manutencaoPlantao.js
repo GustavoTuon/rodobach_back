@@ -39,6 +39,7 @@ manutencaoPlantaoRouter.get('/manutencao-plantao/reembolsos/:id/documentos',canR
 });
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
+  reimbursementExpected:z.boolean().optional(),
   acknowledgeRecentDuplicate:z.boolean().optional(),
   paymentDetails:z.object({holderName:z.string().trim().min(1).max(160),pixKey:z.string().trim().min(1).max(160)}).strict().nullable().optional(),
   documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
@@ -235,6 +236,8 @@ async function mutate(req, res, next, action) {
   let expenseTrip = null;
   try {
     const body = req.body;
+    if (body.reimbursementExpected !== undefined && action !== "create") return res.status(400).json({error:"Altere o reembolso pelo controle da despesa."});
+    if (body.reimbursementExpected !== undefined && body.service === "Descarga") return res.status(400).json({error:"Informe o reembolso no vínculo da descarga."});
     const controls = [["erpDocument","lancamento-despesas"],["paymentDate","pagamento-despesas"],["paymentMethod","pagamento-despesas"],["paid","pagamento-despesas"],["posted","lancamento-despesas"],["reimbursement","reembolso-despesas"]];
     if (controls.some(([field,key]) => body[field] !== undefined && !hasAction(req,key) && !(action === "check" && ["erpDocument","posted"].includes(field) && hasAction(req,"conferencia-manutencao")))) {
       return res.status(403).json({error:"Você não possui permissão para alterar este controle da despesa."});
@@ -363,6 +366,10 @@ async function mutate(req, res, next, action) {
       if (before.conferido_em) {await client.query("COMMIT"); return res.json({record:record(before)});}
       if (!before.comprovante_foto && (before.justificativa_sem_nota || "").trim().length<10) return await reject(400,"Anexe a nota ou registre a justificativa antes de conferir.");
       after = (await client.query(`UPDATE ${TABLE()} SET conferido_por=$2,conferido_login=$3,conferido_em=NOW(),documento_erp=$4,lancado=$5,revisao=revisao+1 WHERE id=$1 RETURNING *`,[before.id,req.user.id,req.user.login,body.erpDocument ?? before.documento_erp,body.posted ?? before.lancado])).rows[0];
+    }
+    if (action === "create" && body.reimbursementExpected !== undefined) {
+      const reimbursement = {status:body.reimbursementExpected ? "a_cobrar" : "nao_aplicavel",customer:"",document:"",receivedDate:null,note:""};
+      after = (await client.query(`UPDATE ${TABLE()} SET reembolso=$2::jsonb WHERE id=$1 RETURNING *`,[after.id,JSON.stringify(reimbursement)])).rows[0];
     }
     if (action === "status" && body.reimbursement) {
       if(body.reimbursement.erpDocument) {

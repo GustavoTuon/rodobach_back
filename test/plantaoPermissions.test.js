@@ -16,6 +16,34 @@ import { EXTRA_PERMISSION_COLUMNS } from "../src/services/screenPermissions.js";
 const driver={id:42,login:"driver",permissions:{"manutencao-plantao":true}};
 const reviewer={id:43,login:"reviewer",permissions:{"conferencia-manutencao":true}};
 const id="55926d25-6e7d-4c22-a36d-747c0402c18a";
+test('lancador indica reembolso na criacao sem acesso aos controles financeiros',async t=>{
+ const original=config.veiculosDb;
+ config.veiculosDb={host:'127.0.0.1',port:5432,database:'rodobach_test',user:'rodobach_test',password:'rodobach_test',ssl:false};
+ t.after(()=>{config.veiculosDb=original;});
+ t.mock.method(getVeiculosPool(),'query',async()=>({rows:[{placa:'ABC1234'}]}));
+ t.mock.method(clientPool,'query',async()=>({rows:[]}));
+ let row;const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SELECT id,('))return {rows:[]};
+  if(sql.includes('SET reembolso='))row={...row,reembolso:JSON.parse(params[1])};
+  return {rows:[row]};
+ }}));
+ const body={plate:'ABC1234',amount:10,service:'Outros',supplier:'Oficina',documentType:'sem_documento',receiptReason:'Fornecedor nao emitiu a nota.'};
+ for(const expected of [true,false]){
+  row={id,placa:'ABC1234',valor:10,usuario_id:42,revisao:1};
+  const response=await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,reimbursementExpected:expected});
+  assert.equal(response.status,201,JSON.stringify(response.body));
+  assert.equal(response.body.record.reimbursement.status,expected?'a_cobrar':'nao_aplicavel');
+  const audit=writes.filter(x=>x.sql.includes('INSERT INTO')&&x.sql.includes('historico')).at(-1);
+  assert.equal(JSON.parse(audit.params[5]).reembolso.status,response.body.record.reimbursement.status);
+ }
+ const count=writes.length;
+ assert.equal((await request(app(driver)).put(`/manutencao-plantao/lancamentos/${id}`).send({...body,version:1,reimbursementExpected:false})).status,400);
+ assert.equal((await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,reimbursement:{status:'recebido'}})).status,400);
+ assert.equal((await request(app({...driver,readOnly:true})).post('/manutencao-plantao/lancamentos').send({...body,reimbursementExpected:true})).status,403);
+ assert.equal(writes.length,count);
+});
 test("cada ação financeira exige permissão própria, inclusive em payload misto",async t=>{
  const connect=t.mock.method(pool,"connect",async()=>{throw new Error("must not connect");});
  const fields={erpDocument:"123",paymentDate:null,posted:true,reimbursement:{status:"nao_aplicavel",customer:"",document:"",receivedDate:null,note:""}};

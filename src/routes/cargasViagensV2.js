@@ -1,3 +1,4 @@
+import { acompanhamentoRouter, saveForecast, forecastAlert, forecastFilter } from '../services/cargasAcompanhamento.js';
 import { createAsyncCache } from "../services/asyncCache.js";
 import { extraCatalogName } from '../services/itineraryExtraCatalog.js';
 import { listResponsaveis, resolveResponsavel } from '../services/cargaResponsavel.js';
@@ -22,6 +23,7 @@ cargasViagensV2Router.use((req, res, next) => {
   next();
 });
 const historicalFinancial = carga => ({ ...EMPTY_FINANCIAL, status: "quitado", quitacaoHistorica: carga.quitacaoHistorica });
+cargasViagensV2Router.use(acompanhamentoRouter);
 
 const CARGAS = () => tableName("cargas_v2");
 const VIAGENS = () => tableName("viagens_v2");
@@ -156,6 +158,9 @@ function mapCarga(row) {
   const paradas = Array.isArray(row.paradas) ? row.paradas.filter(Boolean) : [];
   return {
     id: Number(row.id),
+    acompanhamento: row.acompanhamento || {},
+    previsao: row.acompanhamento?.previsao || null,
+    alerta: forecastAlert(row, "carga"),
     bonificacao: row.bonificacao === true,
     quitacaoHistorica: row.dados_legados?.quitacao_historica || null,
     legadoId: row.legado_id ? Number(row.legado_id) : null,
@@ -209,6 +214,9 @@ function mapViagem(row) {
   return {
     id: Number(row.id),
     numero: row.numero_viagem,
+    acompanhamento: row.acompanhamento || {},
+    previsao: row.acompanhamento?.previsao || null,
+    alerta: forecastAlert(row, "viagem"),
     data: isoDate(row.data),
     placa: row.placa_veiculo || "",
     tipoPropriedade: row.tipo_propriedade || "",
@@ -720,6 +728,8 @@ cargasViagensV2Router.get("/cargas-viagens-v2/cargas", async (req, res, next) =>
     void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
+    const forecastWhere = forecastFilter("carga",req.query.alerta);
+    if (forecastWhere) where.push(forecastWhere);
     if (req.query.status === "veiculo_vinculado") {
       where.push("vc.viagem_id IS NOT NULL");
     } else if (text(req.query.status)) {
@@ -832,6 +842,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/cargas", async (req, res, next) =
         user.id, user.login],
     );
     const id = rows[0].id;
+    await saveForecast(client,"carga",id,input,user,true);
     await client.query(`UPDATE ${CARGAS()} SET responsavel_erp=$2::jsonb WHERE id=$1`,[id,JSON.stringify(responsavel)]);
     await client.query(`UPDATE ${CARGAS()} SET volumes=$2 WHERE id=$1`,[id,validateCargaVolumes(input)]);
     await client.query(`UPDATE ${CARGAS()} SET codigo_carga='C-'||LPAD(id::text,6,'0') WHERE id=$1`, [id]);
@@ -855,6 +866,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id", async (req, res, next
     client = await pool.connect();
     const user = auditUser(req.user);
     await client.query("BEGIN");
+    await saveForecast(client,"carga",req.params.id,input,user);
     const { rowCount } = await client.query(
       `UPDATE ${CARGAS()} SET data=$2,cliente=$3,cliente_final=$4,tomador_servico=$5,vendedor=$6,cidade_origem=$7,uf_origem=$8,cidade_destino=$9,uf_destino=$10,material=$11,peso_kg=$12,valor_cliente=$13,condicao_pagamento=$14,observacoes=$15,atualizado_por_id=$16,atualizado_por_login=$17,atualizado_em=NOW() WHERE id=$1`,
       [req.params.id, date(input.data), text(input.cliente, ""), text(input.clienteFinal), text(input.tomadorServico), text(input.vendedor),
@@ -884,10 +896,13 @@ cargasViagensV2Router.delete("/cargas-viagens-v2/cargas/:id", async (req, res, n
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const current = await client.query(`SELECT id FROM ${CARGAS()} WHERE id=$1 FOR UPDATE`, [req.params.id]);
+    const current = await client.query(`SELECT id,acompanhamento FROM ${CARGAS()} WHERE id=$1 FOR UPDATE`, [req.params.id]);
     if (!current.rowCount) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Carga nao encontrada." });
+    }
+    if (current.rows[0]?.acompanhamento?.historico?.some(entry=>entry.tipo==='nao_carregada')) {
+      await client.query('ROLLBACK');return res.status(409).json({error:'Esta carga possui histórico de não carregamento. Use Reabrir carga para preservar a justificativa.'});
     }
     const link = await client.query(`SELECT viagem_id FROM ${VINCULOS()} WHERE carga_id=$1`, [req.params.id]);
     if (link.rowCount) {
@@ -906,6 +921,8 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
     void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
+    const forecastWhere = forecastFilter("viagem",req.query.alerta);
+    if (forecastWhere) where.push(forecastWhere);
     if (text(req.query.status)) { values.push(text(req.query.status)); where.push(`v.situacao=$${values.length}`); }
     if (text(req.query.q)) {
       values.push(`%${text(req.query.q)}%`);
@@ -1039,7 +1056,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) 
     }
     await client.query("BEGIN");
     const available = await client.query(
-      `SELECT c.id FROM ${CARGAS()} c LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id WHERE c.id=ANY($1::bigint[]) AND vc.carga_id IS NULL FOR UPDATE OF c`,
+      `SELECT c.id FROM ${CARGAS()} c LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id WHERE c.id=ANY($1::bigint[]) AND vc.carga_id IS NULL AND c.status <> 'nao_carregada' FOR UPDATE OF c`,
       [cargaIds],
     );
     if (available.rowCount !== cargaIds.length) {
@@ -1059,10 +1076,11 @@ cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) 
         Boolean(docs.chavePix), Boolean(docs.cnh), Boolean(docs.consultaMotorista), Boolean(docs.comprovanteResidencia),
         Boolean(docs.numeroMotorista), text(input.rotaMapsUrl), text(input.observacoes), user.id, user.login],
     );
+    await saveForecast(client,"viagem",id,input,user,true);
     for (const cargaId of cargaIds) {
       await client.query(`INSERT INTO ${VINCULOS()} (viagem_id,carga_id) VALUES($1,$2)`, [id, cargaId]);
       await client.query(`UPDATE ${CARGAS()} SET status=CASE
-        WHEN status IN ('entregue','cancelado') THEN status
+        WHEN status IN ('entregue','cancelado','nao_carregada') THEN status
         WHEN bonificacao OR EXISTS (SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=$1
           AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO'))
         THEN 'em_transito' ELSE 'aguardando_cte' END,
@@ -1092,10 +1110,11 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Viagem nao encontrada." });
     }
+    await saveForecast(client,"viagem",viagemId,input,user);
     const allowed = await client.query(
       `SELECT c.id FROM ${CARGAS()} c
        LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id
-       WHERE c.id=ANY($1::bigint[]) AND (vc.viagem_id IS NULL OR vc.viagem_id=$2)
+       WHERE c.id=ANY($1::bigint[]) AND (vc.viagem_id IS NULL OR vc.viagem_id=$2) AND c.status <> 'nao_carregada'
        FOR UPDATE OF c`,
       [cargaIds, viagemId],
     );
@@ -1127,7 +1146,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     for (const cargaId of cargaIds) {
       await client.query(`INSERT INTO ${VINCULOS()} (viagem_id,carga_id) VALUES($1,$2)`, [viagemId, cargaId]);
       await client.query(
-        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status WHEN bonificacao OR EXISTS (
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado','nao_carregada') THEN status WHEN bonificacao OR EXISTS (
           SELECT 1 FROM ${DOCUMENTOS()} d WHERE d.carga_id=$1 AND REGEXP_REPLACE(UPPER(d.tipo_documento),'[^A-Z]','','g') IN ('CTE','ORAMENTO','ORCAMENTO')
         ) THEN 'em_transito' ELSE 'aguardando_cte' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=$1`,
         [cargaId, user.id, user.login],
@@ -1135,7 +1154,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
     }
     if (removedIds.length) {
       await client.query(
-        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW()
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado','nao_carregada') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW()
          WHERE id=ANY($1::bigint[])`,
         [removedIds, user.id, user.login],
       );
@@ -1163,7 +1182,7 @@ cargasViagensV2Router.delete("/cargas-viagens-v2/viagens/:id", async (req, res, 
     const cargaIds = links.rows.map((row) => Number(row.carga_id));
     if (cargaIds.length) {
       await client.query(
-        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=ANY($1::bigint[])`,
+        `UPDATE ${CARGAS()} SET status=CASE WHEN status IN ('entregue','cancelado','nao_carregada') THEN status ELSE 'aguardando_viagem' END,atualizado_por_id=$2,atualizado_por_login=$3,atualizado_em=NOW() WHERE id=ANY($1::bigint[])`,
         [cargaIds, auditUser(req.user).id, auditUser(req.user).login],
       );
     }
@@ -1187,6 +1206,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id/documentos", async (req
     await client.query("BEGIN");
     const carga = await client.query(`SELECT id,status,bonificacao FROM ${CARGAS()} WHERE id=$1 FOR UPDATE`, [req.params.id]);
     if (!carga.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Carga nao encontrada." }); }
+    if (carga.rows[0].status === 'nao_carregada') { await client.query('ROLLBACK'); return res.status(409).json({error:'Reabra a carga antes de vincular documentos.'}); }
     const bonificacao = req.body.bonificacao ?? carga.rows[0].bonificacao ?? false;
     if (bonificacao && documentos.some(isCte)) {
       await client.query('ROLLBACK');
@@ -1206,7 +1226,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/cargas/:id/documentos", async (req
       return isCte(documento) && Boolean(text(documento.numero || documento.numeroDocumento || documento.chave || documento.chaveDocumento));
     });
     const trip = await client.query(`SELECT viagem_id FROM ${VINCULOS()} WHERE carga_id=$1`, [req.params.id]);
-    const nextStatus = ["entregue", "cancelado"].includes(carga.rows[0].status)
+    const nextStatus = ["entregue", "cancelado", "nao_carregada"].includes(carga.rows[0].status)
       ? carga.rows[0].status
       : !trip.rows[0] ? "aguardando_viagem" : hasCte || bonificacao ? "em_transito" : "aguardando_cte";
     await client.query(`UPDATE ${CARGAS()} SET status=$2,atualizado_por_id=$3,atualizado_por_login=$4,bonificacao=$5,atualizado_em=NOW() WHERE id=$1`,
