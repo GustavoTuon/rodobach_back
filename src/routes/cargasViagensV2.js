@@ -1,4 +1,4 @@
-import { acompanhamentoRouter, saveForecast, forecastAlert, forecastFilter } from '../services/cargasAcompanhamento.js';
+import { acompanhamentoRouter, saveForecast, saveTripForecasts, forecastAlert, forecastFilter } from '../services/cargasAcompanhamento.js';
 import { createAsyncCache } from "../services/asyncCache.js";
 import { extraCatalogName } from '../services/itineraryExtraCatalog.js';
 import { listResponsaveis, resolveResponsavel } from '../services/cargaResponsavel.js';
@@ -217,6 +217,8 @@ function mapViagem(row) {
     acompanhamento: row.acompanhamento || {},
     previsao: row.acompanhamento?.previsao || null,
     alerta: forecastAlert(row, "viagem"),
+    previsaoCarregamento: row.acompanhamento?.previsaoCarregamento || null,
+    alertaCarregamento: forecastAlert(row,"carregamento"),
     data: isoDate(row.data),
     placa: row.placa_veiculo || "",
     tipoPropriedade: row.tipo_propriedade || "",
@@ -921,7 +923,7 @@ cargasViagensV2Router.get("/cargas-viagens-v2/viagens", async (req, res, next) =
     void syncDeliveredCargasV2().catch((error) => req.log?.warn({ err: error }, "Falha ao sincronizar entregas V2"));
     const values = [];
     const where = [];
-    const forecastWhere = forecastFilter("viagem",req.query.alerta);
+    const forecastWhere = forecastFilter(req.query.etapa === "carregamento" ? "carregamento" : "viagem",req.query.alerta);
     if (forecastWhere) where.push(forecastWhere);
     if (text(req.query.status)) { values.push(text(req.query.status)); where.push(`v.situacao=$${values.length}`); }
     if (text(req.query.q)) {
@@ -1076,7 +1078,7 @@ cargasViagensV2Router.post("/cargas-viagens-v2/viagens", async (req, res, next) 
         Boolean(docs.chavePix), Boolean(docs.cnh), Boolean(docs.consultaMotorista), Boolean(docs.comprovanteResidencia),
         Boolean(docs.numeroMotorista), text(input.rotaMapsUrl), text(input.observacoes), user.id, user.login],
     );
-    await saveForecast(client,"viagem",id,input,user,true);
+    await saveTripForecasts(client,id,input,user,true);
     for (const cargaId of cargaIds) {
       await client.query(`INSERT INTO ${VINCULOS()} (viagem_id,carga_id) VALUES($1,$2)`, [id, cargaId]);
       await client.query(`UPDATE ${CARGAS()} SET status=CASE
@@ -1110,7 +1112,7 @@ cargasViagensV2Router.put("/cargas-viagens-v2/viagens/:id", async (req, res, nex
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Viagem nao encontrada." });
     }
-    await saveForecast(client,"viagem",viagemId,input,user);
+    await saveTripForecasts(client,viagemId,input,user);
     const allowed = await client.query(
       `SELECT c.id FROM ${CARGAS()} c
        LEFT JOIN ${VINCULOS()} vc ON vc.carga_id=c.id

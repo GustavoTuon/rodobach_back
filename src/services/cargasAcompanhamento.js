@@ -16,10 +16,10 @@ export function validateForecast(value) {
   return value;
 }
 export function forecastAlert(row, kind, now=new Date()) {
-  const active=kind==='carga' ? ['aguardando_viagem','aguardando_cte'].includes(row.status) : !['entregue','cancelado'].includes(row.situacao);
+  const active=kind==='carregamento' ? row.situacao==='aguardando_cte' : kind==='carga' ? ['aguardando_viagem','aguardando_cte'].includes(row.status) : !['entregue','cancelado'].includes(row.situacao);
   if (!active) return null;
-  const forecast=row.acompanhamento?.previsao;
-  const pending=kind==='viagem' ? 'Viagem ainda não entregue' : row.status==='aguardando_viagem' ? 'Vincular viagem' : 'Conferir CT-e';
+  const forecast=row.acompanhamento?.[kind==='carregamento'?'previsaoCarregamento':'previsao'];
+  const pending=kind==='carregamento' ? 'Conferir carregamento e CT-e' : kind==='viagem' ? 'Viagem ainda não entregue' : row.status==='aguardando_viagem' ? 'Vincular viagem' : 'Conferir CT-e';
   if (!forecast) return {nivel:'sem_previsao',pendencia:pending};
   const clock=localClock(now),today=clock.slice(0,10);
   const tomorrow=new Date(Date.parse(`${today}T12:00:00Z`)+86400000).toISOString().slice(0,10);
@@ -29,34 +29,47 @@ export function forecastAlert(row, kind, now=new Date()) {
 export function forecastFilter(kind, level) {
   if (!level) return '';
   if (!['vencida','hoje','amanha','sem_previsao'].includes(level)) fail('Filtro de previsão inválido.');
-  const alias=kind==='carga'?'c':'v', field=`${alias}.acompanhamento->>'previsao'`;
-  const active=kind==='carga'?"c.status IN ('aguardando_viagem','aguardando_cte')":"v.situacao NOT IN ('entregue','cancelado')";
+  const alias=kind==='carga'?'c':'v', field=`${alias}.acompanhamento->>'${kind==='carregamento'?'previsaoCarregamento':'previsao'}'`;
+  const active=kind==='carregamento'?"v.situacao='aguardando_cte'":kind==='carga'?"c.status IN ('aguardando_viagem','aguardando_cte')":"v.situacao NOT IN ('entregue','cancelado')";
   const clock="NOW() AT TIME ZONE 'America/Sao_Paulo'";
   const condition=level==='sem_previsao'?`NULLIF(${field},'') IS NULL`:level==='vencida'?`${field}<TO_CHAR(${clock},'YYYY-MM-DD"T"HH24:MI')`:
     `LEFT(${field},10)=TO_CHAR((${clock})${level==='amanha'?" + INTERVAL '1 day'":''},'YYYY-MM-DD') AND ${field}>=TO_CHAR(${clock},'YYYY-MM-DD"T"HH24:MI')`;
   return `(${active} AND (${condition}))`;
 }
-export async function saveForecast(db, kind, id, input, user, creating=false) {
+export async function saveForecast(db, kind, id, input, user, creating=false, field="previsao") {
   if (input.previsao===undefined) return;
   const previsao=validateForecast(input.previsao);
   const table=tableName(kind==='carga'?'cargas_v2':'viagens_v2');
   const {rows}=await db.query(`SELECT acompanhamento FROM ${table} WHERE id=$1 FOR UPDATE`,[id]);
   if (!rows[0]) fail('Registro não encontrado.',404);
-  const old=rows[0].acompanhamento || {}, previous=old.previsao || null;
+  const old=rows[0].acompanhamento || {}, previous=old[field] || null;
   if (!creating && Object.hasOwn(input,'previsaoAnterior') && (input.previsaoAnterior || null)!==previous) fail('A previsão foi alterada por outra pessoa. Atualize o registro.',409);
   if (previous===previsao) return;
   const motivo=String(input.motivoPrevisao || '').trim();
   if (previous && motivo.length<5) fail('Informe o motivo do reagendamento (ao menos 5 caracteres).');
   if (motivo.length>500) fail('O motivo deve ter até 500 caracteres.');
-  const entry={tipo:'previsao',anterior:previous,previsao,motivo,usuario:user?.login || '',em:new Date().toISOString()};
-  await db.query(`UPDATE ${table} SET acompanhamento=$2::jsonb WHERE id=$1`,[id,JSON.stringify({...old,previsao,historico:[...(old.historico || []),entry]})]);
+  const entry={tipo:'previsao',campo:field,anterior:previous,previsao,motivo,usuario:user?.login || '',em:new Date().toISOString()};
+  await db.query(`UPDATE ${table} SET acompanhamento=$2::jsonb WHERE id=$1`,[id,JSON.stringify({...old,[field]:previsao,historico:[...(old.historico || []),entry]})]);
+}
+
+export async function saveTripForecasts(db,id,input,user,creating=false) {
+  if(input.previsao===undefined && input.previsaoCarregamento===undefined)return;
+  await saveForecast(db,'viagem',id,input,user,creating);
+  if(input.previsaoCarregamento!==undefined) {
+    const loading={previsao:input.previsaoCarregamento,motivoPrevisao:input.motivoCarregamento};
+    if(Object.hasOwn(input,'carregamentoAnterior'))loading.previsaoAnterior=input.carregamentoAnterior;
+    await saveForecast(db,'viagem',id,loading,user,creating,'previsaoCarregamento');
+  }
+  const {rows}=await db.query(`SELECT acompanhamento FROM ${tableName('viagens_v2')} WHERE id=$1 FOR UPDATE`,[id]);
+  const data=rows[0]?.acompanhamento || {};
+  if(data.previsao && data.previsaoCarregamento && data.previsao<data.previsaoCarregamento)fail('A entrega prevista deve ser igual ou posterior ao carregamento.');
 }
 
 export const acompanhamentoRouter=Router();
 acompanhamentoRouter.get('/cargas-viagens-v2/alertas',async(req,res,next)=>{
   try {
     const result={};
-    for(const kind of ['carga','viagem']) {
+    for(const kind of ['carga','viagem','carregamento']) {
       const alias=kind==='carga'?'c':'v',table=tableName(kind==='carga'?'cargas_v2':'viagens_v2');
       const fields=['vencida','hoje','amanha','sem_previsao'].map(level=>`COUNT(*) FILTER(WHERE ${forecastFilter(kind,level)})::int AS ${level}`).join(',');
       const {rows}=await pool.query(`SELECT ${fields} FROM ${table} ${alias}`);
