@@ -65,6 +65,12 @@ test('SQL real isolado: previsoes, conflitos, nao carregamento, reabertura e ale
     assert.equal((await request(app).get('/cargas-viagens-v2/nao-carregadas')).body.length,0);
     const trip=await request(app).post('/cargas-viagens-v2/viagens').send({cargaIds:[id],previsao:'2026-11-26T18:00'}).expect(201);
     assert.equal(trip.body.previsao,'2026-11-26T18:00');
+    const tripUrl=`/cargas-viagens-v2/viagens/${trip.body.id}`;
+    await request(app).put(tripUrl).send({cargaIds:[id],previsaoCarregamento:'2026-11-25T08:00'}).expect(200);
+    assert.equal((await request(app).get(tripUrl)).body.previsaoCarregamento,'2026-11-25T08:00');
+    await request(app).put(tripUrl).send({cargaIds:[id],previsaoCarregamento:'2026-11-28T08:00',motivoCarregamento:'Teste de cronologia'}).expect(400);
+    assert.equal((await request(app).get(tripUrl)).body.previsaoCarregamento,'2026-11-25T08:00');
+
     await request(app).post(`${url}/nao-carregada`).send({motivo:'Cliente desistiu'}).expect(409);
     await request(app).put(`/cargas-viagens-v2/viagens/${trip.body.id}`).send({cargaIds:[id],previsao:'2026-11-27T18:00'}).expect(400);
     await request(app).put(`/cargas-viagens-v2/viagens/${trip.body.id}`).send({cargaIds:[id],previsao:'2026-11-27T18:00',motivoPrevisao:'Atraso na entrega'}).expect(200);

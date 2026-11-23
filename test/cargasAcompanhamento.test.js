@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {forecastAlert,localClock,validateForecast,forecastFilter,saveForecast} from '../src/services/cargasAcompanhamento.js';
+import {forecastAlert,localClock,validateForecast,forecastFilter,saveForecast,saveTripForecasts} from '../src/services/cargasAcompanhamento.js';
 import {acompanhamentoRouter} from '../src/services/cargasAcompanhamento.js';
 import express from 'express';
 import request from 'supertest';
@@ -50,4 +50,23 @@ test('reagendamento exige motivo, detecta conflito e preserva historico',async()
   assert.equal(state.historico[1].anterior,change.previsaoAnterior);
   await assert.rejects(saveForecast(db,'carga',1,{...change,motivoPrevisao:'Outra mudança'},{login:'teste'}),{statusCode:409});
   await saveForecast(db,'carga',1,{},{});assert.equal(state.previsao,change.previsao);
+});
+
+test('carregamento na viagem e opcional, independente e auditado',async()=>{
+ let state={};const db={async query(sql,args){if(sql.startsWith('SELECT'))return {rows:[{acompanhamento:state}]};state=JSON.parse(args[1]);return {rows:[]};}};
+ await saveTripForecasts(db,1,{},{});assert.deepEqual(state,{});
+ await saveTripForecasts(db,1,{previsaoCarregamento:'2026-11-24T08:00'},{login:'teste'});
+ assert.equal(state.previsao,undefined);assert.equal(state.historico[0].campo,'previsaoCarregamento');
+ await saveTripForecasts(db,1,{previsao:'2026-11-25T18:00'},{});
+ await assert.rejects(saveTripForecasts(db,1,{previsaoCarregamento:'2026-11-24T09:00'},{}),/motivo/);
+ await assert.rejects(saveTripForecasts(db,1,{previsaoCarregamento:'2026-11-24T09:00',carregamentoAnterior:null,motivoCarregamento:'Reagendado'},{}),{statusCode:409});
+ await saveTripForecasts(db,1,{previsaoCarregamento:'',motivoCarregamento:'Sem data confirmada'},{});
+ assert.equal(state.previsaoCarregamento,null);assert.equal(state.previsao,'2026-11-25T18:00');
+ await assert.rejects(saveTripForecasts(db,1,{previsaoCarregamento:'2026-11-26T08:00'},{}),/posterior/);
+});
+test('alertas de carregamento usam a data da viagem enquanto aguarda CTe',()=>{
+ const row={situacao:'aguardando_cte',acompanhamento:{previsaoCarregamento:'2026-11-24T08:00',previsao:'2026-11-26T18:00'}};
+ assert.equal(forecastAlert(row,'carregamento',new Date('2026-11-24T12:00Z')).nivel,'vencida');
+ assert.equal(forecastAlert({...row,situacao:'em_transito'},'carregamento'),null);
+ assert.match(forecastFilter('carregamento','vencida'),/previsaoCarregamento/);
 });
