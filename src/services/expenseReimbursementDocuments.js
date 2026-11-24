@@ -1,6 +1,6 @@
 import {clientPool} from '../db/clientPool.js';
 
-export async function reimbursementDocuments(plate, date, number='', identity=null) {
+export async function reimbursementDocuments(plate, date, number='', identity=null, series='') {
   const {rows}=await clientPool.query(`SELECT c.empresacon::text AS company,c.seriecon AS series,
     c.codigocon::text AS code,COALESCE(c.numeroctecon,c.codigocon)::text AS number,
     c.dataemissaocon::date::text AS date,COALESCE(cli.nomecli,'') AS "customerName"
@@ -15,7 +15,8 @@ export async function reimbursementDocuments(plate, date, number='', identity=nu
       AND c.dataemissaocon < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day'
       AND ($3::text='' OR COALESCE(c.numeroctecon,c.codigocon)::text=ltrim($3,'0'))
       AND ($4::text IS NULL OR (c.empresacon::text=$4 AND c.seriecon=$5 AND c.codigocon::text=$6))
+      AND ($7::text='' OR UPPER(TRIM(c.seriecon))=UPPER($7))
     ORDER BY c.dataemissaocon DESC,c.empresacon,c.seriecon,c.codigocon LIMIT 50`,
-    [plate,date,number,identity?.company || null,identity?.series || null,identity?.code || null]);
+    [plate,date,number,identity?.company || null,identity?.series || null,identity?.code || null,series.trim()]);
   return rows;
 }
