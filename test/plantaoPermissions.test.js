@@ -244,7 +244,12 @@ test('reembolso busca complementar com placa e data da despesa e exige permissao
  const response=await request(app(user)).get(url);
  assert.equal(response.status,200);
  assert.equal(response.body.ctes[0].number,'12');
- assert.deepEqual(erp.mock.calls[0].arguments[1],['ABC1234','2026-11-14','12',null,null,null]);
+ assert.deepEqual(erp.mock.calls[0].arguments[1],['ABC1234','2026-11-14','12',null,null,null,'']);
+ await request(app(user)).get(url+'&series=2').expect(200);
+ assert.deepEqual(erp.mock.calls.at(-1).arguments[1],['ABC1234','2026-11-14','12',null,null,null,'2']);
+ await request(app(user)).get(url+'&series='+ 'X'.repeat(21)).expect(400);
+ await request(app(user)).get(url+'&series=1&series=2').expect(400);
+
  assert.equal((await request(app(user)).get(url.replace('number=12','number=invalid'))).status,400);
 });
 
@@ -280,4 +285,24 @@ test('admin corrige valor pago e conferido com auditoria e controle de versao',a
  assert.equal(audit.params[1],'correct_amount');assert.equal(audit.params[2],1);assert.equal(audit.params[3],'Admin');
  assert.equal(JSON.parse(audit.params[4]).valor,180);assert.equal(JSON.parse(audit.params[5]).valor,200);assert.equal(JSON.parse(audit.params[5]).justificativa_correcao,body.reason);
  assert.equal(writes.filter(x=>x.sql.startsWith('UPDATE')).length,1);
+});
+
+test('ERP determina recebimento mesmo quando cliente envia status manual',async t=>{
+ let row={id,usuario_id:99,placa:'ABC1234',valor:100,revisao:1,data_despesa:'2026-11-14',pago:true};
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  if(sql.includes('SET reembolso='))row={...row,reembolso:JSON.parse(params[1])};
+  return {rows:[row]};
+ }}));
+ let paid=false;
+ t.mock.method(clientPool,'query',async sql=>({rows:sql.includes('WITH docs AS')?[{id,paid,date:paid?'2026-11-23':null}]:[{company:'1',series:'1',code:'12',number:'12',customerName:'Cliente ERP'}]}));
+ const user={id:44,permissions:{'reembolso-despesas':true}};
+ const body={version:1,reimbursement:{status:'recebido',customer:'Cliente',document:'CT-e 12',receivedDate:'2026-11-22',erpDocument:{company:'1',series:'1',code:'12'}}};
+ let response=await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send(body).expect(200);
+ assert.equal(response.body.record.reimbursement.status,'cobrado');
+ assert.equal(response.body.record.reimbursement.receivedDate,null);
+ paid=true;body.reimbursement.status='cobrado';body.reimbursement.receivedDate=null;
+ response=await request(app(user)).patch(`/manutencao-plantao/lancamentos/${id}/controle`).send(body).expect(200);
+ assert.equal(response.body.record.reimbursement.status,'recebido');
+ assert.equal(response.body.record.reimbursement.receivedDate,'2026-11-23');
+ assert.equal(response.body.record.paid,true);
 });

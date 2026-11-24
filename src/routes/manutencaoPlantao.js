@@ -1,3 +1,4 @@
+import {reimbursementReceipts,reimbursementList} from '../services/expenseReimbursementReceipts.js';
 import {searchExpenseErpDocuments,expenseErpDocumentsSchema,expenseErpDocumentsOf,resolveExpenseErpDocuments} from '../services/expenseErpDocuments.js';
 import { reimbursementSchema, validateReimbursement } from '../services/expenseReimbursement.js';
 import express from "express";
@@ -31,10 +32,11 @@ const canPay = (req,res,next) => hasAction(req,"pagamento-despesas") ? next() : 
 manutencaoPlantaoRouter.get('/manutencao-plantao/reembolsos/:id/documentos',canRead,async(req,res,next)=>{
   try {
     if(!hasAction(req,'reembolso-despesas')) return res.status(403).json({error:'Sem permissão para registrar reembolsos.'});
-    if(!z.uuid().safeParse(req.params.id).success || !/^\d{0,12}$/.test(req.query.number || '')) return res.status(400).json({error:'Informe um número de documento válido.'});
+    const search=z.object({number:z.string().regex(/^\d{0,12}$/).default(''),series:z.string().trim().max(20).default('')}).safeParse(req.query);
+    if(!z.uuid().safeParse(req.params.id).success || !search.success) return res.status(400).json({error:'Informe um número de documento e uma série válidos.'});
     const {rows}=await pool.query(`SELECT placa,data_despesa::text AS date FROM ${TABLE()} WHERE id=$1 AND excluido_em IS NULL`,[req.params.id]);
     if(!rows[0]) return res.status(404).json({error:'Despesa não encontrada.'});
-    res.set('Cache-Control','no-store').json({ctes:await reimbursementDocuments(rows[0].placa,rows[0].date,req.query.number || '')});
+    res.set('Cache-Control','no-store').json({ctes:await reimbursementDocuments(rows[0].placa,rows[0].date,search.data.number,null,search.data.series)});
   }catch(error){next(error);}
 });
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
@@ -197,11 +199,11 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/placas/:plate/localizacao", can
 manutencaoPlantaoRouter.get("/manutencao-plantao/lancamentos", canRead, async (req, res, next) => {
   try {
     const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`);
-    res.json({records: rows.map(record)});
+    res.json(await reimbursementList(rows.map(record)));
   } catch (error) { next(error); }
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/conferencia", canReview, async (_req, res, next) => {
-  try { const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`); res.json({records: rows.map(record)}); }
+  try { const {rows} = await pool.query(`SELECT ${LIST_COLUMNS} FROM ${TABLE()} WHERE excluido_em IS NULL ORDER BY criado_em DESC`); res.json(await reimbursementList(rows.map(record))); }
   catch (error) { next(error); }
 });
 const canManage = req => !isExpenseDriver(req.user) && req.user.admin === true;
@@ -386,6 +388,7 @@ async function mutate(req, res, next, action) {
         if(!document) return await reject(400,'CT-e complementar não encontrado para esta placa e período. Consulte novamente.');
         body.reimbursement.document=`CT-e ${document.number} · Série ${document.series} · Empresa ${document.company}`;
         body.reimbursement.customer=document.customerName;
+        body.reimbursement=(await reimbursementReceipts([{id:before.id,reimbursement:body.reimbursement}]))[0].reimbursement;
       }
       const error = validateReimbursement(body.reimbursement, today());
       if (error) return await reject(400,error);
