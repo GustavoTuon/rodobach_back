@@ -10,7 +10,7 @@ export async function reimbursementDocuments(plate, date, number='', identity=nu
     WHERE c.statuscon=2 AND c.tipoctecon=1
       AND UPPER(TRIM(c.seriecon)) NOT IN ('O','OC')
       AND NULLIF(TRIM(c.chaveorcamentocon),'') IS NULL
-      AND regexp_replace(upper(c.veiculocon),'[^A-Z0-9]','','g')=$1
+      AND ($1::text='' OR regexp_replace(upper(c.veiculocon),'[^A-Z0-9]','','g')=$1)
       AND c.dataemissaocon >= $2::date - INTERVAL '30 days'
       AND c.dataemissaocon < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day'
       AND ($3::text='' OR COALESCE(c.numeroctecon,c.codigocon)::text=ltrim($3,'0'))

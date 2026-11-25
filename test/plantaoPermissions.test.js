@@ -306,3 +306,25 @@ test('ERP determina recebimento mesmo quando cliente envia status manual',async 
  assert.equal(response.body.record.reimbursement.receivedDate,'2026-11-23');
  assert.equal(response.body.record.paid,true);
 });
+
+test('sem veiculo exige escolha explicita e restringe tipos e perfil',async t=>{
+ let row;const writes=[];
+ t.mock.method(pool,'connect',async()=>({release(){},async query(sql,params){
+  writes.push({sql,params});
+  if(sql.includes('SELECT id,('))return {rows:[]};
+  if(sql.includes('INSERT INTO')&&sql.includes('RETURNING *'))row={id:params[0],placa:params[1],valor:params[2],servico:params[3],usuario_id:42,revisao:1};
+  return {rows:[row]};
+ }}));
+ const erp=t.mock.method(clientPool,'query',async()=>{throw new Error('Nao deve consultar veiculo no ERP');});
+ const body={plate:'',withoutVehicle:true,amount:10,service:'Outros',supplier:'Fornecedor geral',documentType:'sem_documento',receiptReason:'Fornecedor nao emitiu a nota.',note:'Material de escritorio'};
+ for(const service of ['Outros','Mec\u00e2nica','Borracharia']){
+  const result=await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,service}).expect(201);
+  assert.equal(result.body.record.plate,'');assert.equal(result.body.record.withoutVehicle,true);assert.equal(result.body.record.trip,null);
+ }
+ assert.equal(erp.mock.callCount(),0);
+ for(const change of [{withoutVehicle:false},{plate:'ABC1234'},{service:'Abastecimento'},{service:'Descarga'},{trip:{company:'1',number:'880'}},{tireFireNumber:'123'},{odometer:100}]){
+  await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,...change}).expect(400);
+ }
+ await request(app({...driver,expenseProfile:'motorista'})).post('/manutencao-plantao/lancamentos').send(body).expect(403);
+ assert.ok(writes.some(w=>w.sql.includes('historico')&&JSON.parse(w.params[5]).placa===''));
+});

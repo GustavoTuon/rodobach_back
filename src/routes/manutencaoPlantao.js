@@ -42,6 +42,7 @@ manutencaoPlantaoRouter.get('/manutencao-plantao/reembolsos/:id/documentos',canR
 const photoSchema = z.string().max(1500000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/).nullable();
 const schema = z.object({
   reimbursementExpected:z.boolean().optional(),
+  withoutVehicle:z.boolean().optional(),
   acknowledgeRecentDuplicate:z.boolean().optional(),
   paymentDetails:z.object({holderName:z.string().trim().min(1).max(160),pixKey:z.string().trim().min(1).max(160)}).strict().nullable().optional(),
   documentType: z.enum(['sem_documento','nf_produto','nf_servico','cupom_fiscal']).optional(),
@@ -70,7 +71,7 @@ const schema = z.object({
   posted: z.boolean().nullable().optional(),
   expenseDate: z.iso.date().optional(),
   document: z.string().trim().max(80).default(""),
-  plate: z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/),
+  plate: z.union([z.literal(""),z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/)]),
   amount: z.number().positive().max(999999.99).refine(v => Math.abs(v * 100 - Math.round(v * 100)) < 0.00001),
   service: z.enum(["Borracharia", "Mecânica", "Elétrica", "Outros", "Abastecimento", "Manutenção", "Descarga"]),
   note: z.string().trim().max(300).default(""),
@@ -98,7 +99,7 @@ function record(row) {
     arlaAmount: row.arla_valor == null ? null : Number(row.arla_valor),
     fuelAmount: row.valor_combustivel == null ? null : Number(row.valor_combustivel),
     photoKinds: {odometer:Boolean(row.painel_foto || row.tem_painel),pump:Boolean(row.bomba_foto || row.tem_bomba),invoice:Boolean(row.comprovante_foto || row.tem_comprovante)},
-    location: row.local_despesa, hasReceipt: Boolean(row.comprovante_foto || row.tem_comprovante || row.painel_foto || row.tem_painel || row.bomba_foto || row.tem_bomba), id: row.id, plate: row.placa, amount: Number(row.valor), service: row.servico,
+    location: row.local_despesa, hasReceipt: Boolean(row.comprovante_foto || row.tem_comprovante || row.painel_foto || row.tem_painel || row.bomba_foto || row.tem_bomba), id: row.id, plate: row.placa, withoutVehicle: !row.placa, amount: Number(row.valor), service: row.servico,
     note: row.observacao, supplier: row.fornecedor, supplierCode: row.fornecedor_codigo,
     supplierCompany: row.fornecedor_empresa, authorId: row.usuario_id, author: row.usuario_login,
     expenseDate: row.data_despesa instanceof Date ? row.data_despesa.toLocaleDateString("en-CA") : row.data_despesa,
@@ -117,7 +118,7 @@ manutencaoPlantaoRouter.get("/manutencao-plantao/formas-pagamento", canPay, asyn
 });
 manutencaoPlantaoRouter.get("/manutencao-plantao/documentos-erp", requirePermission(["lancamento-despesas","conferencia-manutencao"]), async (req,res,next) => {
   if (!hasAction(req,"lancamento-despesas") && !hasAction(req,"conferencia-manutencao")) return res.status(403).json({error:"Sem permissão para consultar documentos de lançamento."});
-  const query=z.object({q:z.string().trim().max(80).default(''),plate:z.string().trim().transform(value=>value.toUpperCase().replace(/[^A-Z0-9]/g,'')).pipe(z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/)),series:z.string().trim().max(20).default('')}).safeParse(req.query);
+  const query=z.object({q:z.string().trim().max(80).default(''),plate:z.string().trim().transform(value=>value.toUpperCase().replace(/[^A-Z0-9]/g,'')).pipe(z.union([z.literal(''),z.string().regex(/^[A-Z]{3}\d[A-Z0-9]\d{2}$/)])),series:z.string().trim().max(20).default('')}).safeParse(req.query);
   if (!query.success) return res.status(400).json({error:"Informe a placa da despesa e filtros válidos para buscar."});
   try {res.set("Cache-Control","no-store").json(await searchExpenseErpDocuments(query.data));} catch(error) {next(error);}
 });
@@ -221,7 +222,7 @@ async function audit(client, req, event, before, after) {
     VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)`, [after.id,event,req.user.id,req.user.login,before ? JSON.stringify(snapshot(before)) : null,JSON.stringify(snapshot(after))]);
 }
 async function validateRegistration(body) {
-  if (!(await plantaoPlates()).some(item => item.placa === body.plate)) return "Selecione uma placa cadastrada na frota.";
+  if (body.plate && !(await plantaoPlates()).some(item => item.placa === body.plate)) return "Selecione uma placa cadastrada na frota.";
   body.expenseDate ||= today();
   if (body.expenseDate > today()) return "A data da despesa não pode estar no futuro.";
   if (body.supplierCode != null) {
@@ -252,6 +253,11 @@ async function mutate(req, res, next, action) {
       return res.status(400).json({error:"A data do pagamento não pode estar no futuro."});
     }
     if (["create","edit"].includes(action)) {
+      if (body.withoutVehicle === true) {
+        if (isExpenseDriver(req.user)) return res.status(403).json({error:"O perfil motorista deve usar a placa vinculada a ele."});
+        if (body.plate || !["Borracharia","Mecânica","Elétrica","Manutenção","Outros"].includes(body.service)) return res.status(400).json({error:"Sem veículo só está disponível em manutenções e outros, com placa vazia."});
+        if (body.trip || body.unloading || body.tire || body.tireFireNumber || body.odometer != null) return res.status(400).json({error:"Uma despesa sem veículo não pode ter viagem, pneu ou quilometragem."});
+      } else if (!body.plate) return res.status(400).json({error:"Selecione a placa ou marque Despesa sem veículo vinculado."});
       await requireExpensePlate(req.user, body.plate);
       if (body.paid !== undefined || body.posted !== undefined) return res.status(400).json({error:"Atualize os controles na despesa."});
       const error = await validateRegistration(body);
@@ -277,7 +283,7 @@ async function mutate(req, res, next, action) {
     }
     if (body.erpDocuments !== undefined && body.erpDocument !== undefined) return await reject(400,"Envie a lista de documentos sem o campo antigo de vínculo.");
     if (body.erpDocument !== undefined && before?.documentos_erp?.length && body.erpDocument !== before.documento_erp) return await reject(409,"Atualize a página para editar a lista de documentos vinculados.");
-    if (action === "edit" && before.placa !== body.plate && expenseErpDocumentsOf(before).length) return await reject(409,"Remova os vínculos ERP antes de trocar a placa da despesa.");
+    if (action === "edit" && before.placa !== body.plate && (expenseErpDocumentsOf(before).length || before.reembolso?.erpDocument)) return await reject(409,"Remova os vínculos ERP antes de trocar a placa da despesa.");
     const documents = body.erpDocuments === undefined ? null : await resolveExpenseErpDocuments(body.erpDocuments,before);
     let after;
     if (action === "correct_amount") {
@@ -291,7 +297,7 @@ async function mutate(req, res, next, action) {
       if (!documentType) return await reject(400,"Selecione o tipo de documento fiscal ou informe que não há documento.");
       if (documentType === 'nf_servico' && !body.document.trim()) return await reject(400,"Informe o número da nota fiscal de serviço.");
       if (body.tireFireNumber && !['Borracharia','Manutenção'].includes(body.service)) return await reject(400,"O número de fogo só pode ser informado em borracharia ou manutenção.");
-      if (body.trip === undefined && before?.viagem_despesa && body.service !== 'Descarga') expenseTrip = await unloadingTrip(body.plate,before.viagem_despesa.company,before.viagem_despesa.number);
+      if (body.plate && body.trip === undefined && before?.viagem_despesa && body.service !== 'Descarga') expenseTrip = await unloadingTrip(body.plate,before.viagem_despesa.company,before.viagem_despesa.number);
       if (body.service === 'Abastecimento' && !expenseTrip) return await reject(400,"Vincule uma viagem da placa para registrar o abastecimento.");
       const invoice = body.photos?.invoice !== undefined ? body.photos.invoice : body.receipt !== undefined ? body.receipt : before?.comprovante_foto;
       const receiptReason = body.receiptReason === undefined ? before?.justificativa_sem_nota || "" : body.receiptReason;
@@ -302,7 +308,7 @@ async function mutate(req, res, next, action) {
       if (expenseTime && new Date(`${body.expenseDate}T${normalizeTime(expenseTime)}-03:00`) > new Date()) return await reject(400,"O horário da despesa não pode estar no futuro.");
       const preserveKm = before && before.placa === body.plate && previousDay === body.expenseDate
         && normalizeTime(before.hora_despesa) === normalizeTime(expenseTime) && before.hodometro != null;
-      if (!preserveKm && (body.service === "Abastecimento" || body.odometer !== undefined)) {
+      if (body.plate && !preserveKm && (body.service === "Abastecimento" || body.odometer !== undefined)) {
         if (!expenseTime && body.service === "Abastecimento") return await reject(400,"Informe o horário da nota para consultar o KM do abastecimento.");
         if (expenseTime) {
           telemetry = await expenseTelemetryOdometer(body.plate, body.expenseDate, expenseTime);
@@ -315,7 +321,7 @@ async function mutate(req, res, next, action) {
       if (source === "motorista" && !["Abastecimento","Manutenção","Outros","Descarga"].includes(body.service)) return await reject(400,"Selecione um tipo de despesa válido.");
       if (source === "colaborador" && ["Abastecimento","Manutenção","Descarga"].includes(body.service)) return await reject(400,"Use a aba Motorista para este tipo de despesa.");
       const liters = body.liters === undefined ? before?.litros : body.liters;
-      const odometer = body.odometer === undefined ? before?.hodometro : body.odometer;
+      const odometer = body.withoutVehicle ? null : body.odometer === undefined ? before?.hodometro : body.odometer;
       if (source === "motorista" && body.service === "Abastecimento" && (!(Number(liters) > 0) || odometer == null)) return await reject(400,"Informe os litros e o hodômetro do abastecimento.");
       if (source === "motorista" && body.service === "Outros" && !body.note) return await reject(400,"Descreva a despesa para a conferência.");
       const duplicate = await client.query(`SELECT id,(criado_em >= NOW()-INTERVAL '3 days' AND criado_em <= NOW() AND placa=$2 AND valor=$3 AND lower(trim(fornecedor))=lower(trim($6))) AS recent_match FROM ${TABLE()} WHERE excluido_em IS NULL AND ($1::uuid IS NULL OR id <> $1) AND (
@@ -347,13 +353,13 @@ async function mutate(req, res, next, action) {
         body.service === "Abastecimento" ? arlaAmount ?? null : null,
         body.fuelType === undefined ? before?.combustivel_tipo || "" : body.fuelType,
         body.customerName === undefined ? before?.cliente_nota || "" : body.customerName,
-        telemetry ? telemetry.date : before?.hodometro_telemetria_em || null,
+        body.withoutVehicle ? null : telemetry ? telemetry.date : before?.hodometro_telemetria_em || null,
         expenseTime,
         before ? before.perfil_autor : req.user.expenseProfile === "motorista" ? "motorista" : "colaborador",
         invoice ? "" : receiptReason,
       ])).rows[0];
       after = (await client.query(`UPDATE ${TABLE()} SET descarga=$2::jsonb,tipo_documento=$3,numero_fogo=$4,viagem_despesa=$5::jsonb,dados_pagamento=$6::jsonb,pneu_vinculado=$7::jsonb WHERE id=$1 RETURNING *`,
-        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,['Borracharia','Manutenção'].includes(body.service) ? (tire?.code ?? body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null,JSON.stringify(body.paymentDetails === undefined ? before?.dados_pagamento ?? null : body.paymentDetails),JSON.stringify(tire)])).rows[0];
+        [after.id,unloading ? JSON.stringify(unloading) : null,documentType,!body.withoutVehicle && ['Borracharia','Manutenção'].includes(body.service) ? (tire?.code ?? body.tireFireNumber ?? before?.numero_fogo ?? '') : '',expenseTrip ? JSON.stringify(expenseTrip) : null,JSON.stringify(body.paymentDetails === undefined ? before?.dados_pagamento ?? null : body.paymentDetails),JSON.stringify(tire)])).rows[0];
     } else if (action === "status") {
       let method = record(before).paymentMethod;
       if (body.paymentDate) {
