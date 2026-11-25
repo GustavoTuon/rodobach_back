@@ -388,13 +388,16 @@ async function mutate(req, res, next, action) {
       const reimbursement = {status:body.reimbursementExpected ? "a_cobrar" : "nao_aplicavel",customer:"",document:"",receivedDate:null,note:""};
       after = (await client.query(`UPDATE ${TABLE()} SET reembolso=$2::jsonb WHERE id=$1 RETURNING *`,[after.id,JSON.stringify(reimbursement)])).rows[0];
     }
+    let reimbursementSync;
     if (action === "status" && body.reimbursement) {
       if(body.reimbursement.erpDocument) {
         const [document]=await reimbursementDocuments(before.placa,before.data_despesa,'',body.reimbursement.erpDocument);
         if(!document) return await reject(400,'CT-e complementar não encontrado para esta placa e período. Consulte novamente.');
         body.reimbursement.document=`CT-e ${document.number} · Série ${document.series} · Empresa ${document.company}`;
         body.reimbursement.customer=document.customerName;
-        body.reimbursement=(await reimbursementReceipts([{id:before.id,reimbursement:body.reimbursement}]))[0].reimbursement;
+        const projected=(await reimbursementReceipts([{id:before.id,reimbursement:body.reimbursement}]))[0];
+        body.reimbursement=projected.reimbursement;
+        reimbursementSync=projected.reimbursementSync;
       }
       const error = validateReimbursement(body.reimbursement, today());
       if (error) return await reject(400,error);
@@ -407,7 +410,7 @@ async function mutate(req, res, next, action) {
     }
     await audit(client,req,action,before,action === "correct_amount" ? {...after,justificativa_correcao:body.reason} : after);
     await client.query("COMMIT");
-    res.status(action === "create" ? 201 : 200).json(action === "delete" ? {ok:true} : {record:record(after)});
+    res.status(action === "create" ? 201 : 200).json(action === "delete" ? {ok:true} : {record:{...record(after),...(reimbursementSync?{reimbursementSync}:{})}});
   } catch (error) {if (client) await client.query("ROLLBACK").catch(()=>{}); next(error);}
   finally {client?.release();}
 }
