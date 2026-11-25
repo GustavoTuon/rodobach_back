@@ -255,7 +255,7 @@ async function mutate(req, res, next, action) {
     if (["create","edit"].includes(action)) {
       if (body.withoutVehicle === true) {
         if (isExpenseDriver(req.user)) return res.status(403).json({error:"O perfil motorista deve usar a placa vinculada a ele."});
-        if (body.plate || !["Borracharia","Mecânica","Elétrica","Manutenção","Outros"].includes(body.service)) return res.status(400).json({error:"Sem veículo só está disponível em manutenções e outros, com placa vazia."});
+        if (body.plate || body.service !== "Outros") return res.status(400).json({error:"A placa é obrigatória em manutenção, abastecimento e descarga. Somente Outros permite despesa sem veículo."});
         if (body.trip || body.unloading || body.tire || body.tireFireNumber || body.odometer != null) return res.status(400).json({error:"Uma despesa sem veículo não pode ter viagem, pneu ou quilometragem."});
       } else if (!body.plate) return res.status(400).json({error:"Selecione a placa ou marque Despesa sem veículo vinculado."});
       await requireExpensePlate(req.user, body.plate);

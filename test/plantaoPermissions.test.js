@@ -317,12 +317,12 @@ test('sem veiculo exige escolha explicita e restringe tipos e perfil',async t=>{
  }}));
  const erp=t.mock.method(clientPool,'query',async()=>{throw new Error('Nao deve consultar veiculo no ERP');});
  const body={plate:'',withoutVehicle:true,amount:10,service:'Outros',supplier:'Fornecedor geral',documentType:'sem_documento',receiptReason:'Fornecedor nao emitiu a nota.',note:'Material de escritorio'};
- for(const service of ['Outros','Mec\u00e2nica','Borracharia']){
+ for(const service of ['Outros']){
   const result=await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,service}).expect(201);
   assert.equal(result.body.record.plate,'');assert.equal(result.body.record.withoutVehicle,true);assert.equal(result.body.record.trip,null);
  }
  assert.equal(erp.mock.callCount(),0);
- for(const change of [{withoutVehicle:false},{plate:'ABC1234'},{service:'Abastecimento'},{service:'Descarga'},{trip:{company:'1',number:'880'}},{tireFireNumber:'123'},{odometer:100}]){
+ for(const change of [{withoutVehicle:false},{plate:'ABC1234'},{service:'Abastecimento'},{service:'Descarga'},...['Manutenção','Mecânica','Elétrica','Borracharia'].map(service=>({service})),{trip:{company:'1',number:'880'}},{tireFireNumber:'123'},{odometer:100}]){
   await request(app(driver)).post('/manutencao-plantao/lancamentos').send({...body,...change}).expect(400);
  }
  await request(app({...driver,expenseProfile:'motorista'})).post('/manutencao-plantao/lancamentos').send(body).expect(403);

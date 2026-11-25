@@ -60,6 +60,13 @@ test('sem veiculo persiste, edita, lista e audita sem placa ficticia', {skip:pro
     const unassigned={...body,plate:'',withoutVehicle:true,service:'Outros',amount:77,document:'NO-VEHICLE',note:'Material de escritorio',trip:null};
     const noVehicle=await request(driverApp).post(path).send(unassigned).expect(201);
     const noVehicleId=noVehicle.body.record.id;
+    for(const service of ['Borracharia','Mecânica','Elétrica','Manutenção']) {
+      await request(driverApp).post(path).send({...unassigned,service}).expect(400);
+      await request(driverApp).put(`${path}/${noVehicleId}`).send({...unassigned,service,version:1}).expect(400);
+    }
+    const maintenance=await request(driverApp).post(path).send({...unassigned,withoutVehicle:false,plate:'ABC1234',service:'Mecânica',document:'MAINT-PLATE',amount:88}).expect(201);
+    assert.equal(maintenance.body.record.plate,'ABC1234');assert.equal(maintenance.body.record.trip,null);
+
     assert.equal(noVehicle.body.record.withoutVehicle,true);
     assert.equal(noVehicle.body.record.plate,'');assert.equal(noVehicle.body.record.trip,null);
     const storedNoVehicle=(await request(driverApp).get(path)).body.records.find(r=>r.id===noVehicleId);
