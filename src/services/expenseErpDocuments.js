@@ -36,7 +36,7 @@ const documentSelect=`
 
 export async function searchExpenseErpDocuments({q='',plate,series=''}) {
   const {rows} = await clientPool.query(`${documentSelect}
-    WHERE regexp_replace(upper(vehicle.plate),'[^A-Z0-9]','','g')=$2
+    WHERE COALESCE(regexp_replace(upper(vehicle.plate),'[^A-Z0-9]','','g'),'')=$2
       AND ($3::text='' OR upper(trim(pag.seriepag::text))=upper($3))
       AND (pag.duplicatapag::text ILIKE '%' || $1 || '%'
       OR pag.documentopag::text ILIKE '%' || $1 || '%'
@@ -67,7 +67,7 @@ export async function resolveExpenseErpDocuments(documents, before) {
     const {rows}=await clientPool.query(`${documentSelect}
       WHERE pag.empresapag::text=$1 AND pag.seriepag::text=$2 AND pag.duplicatapag::text=$3
         AND pag.parcelapag::text=$4 AND pag.fornecedorpag::text=$5
-        AND regexp_replace(upper(vehicle.plate),'[^A-Z0-9]','','g')=$6`,
+        AND COALESCE(regexp_replace(upper(vehicle.plate),'[^A-Z0-9]','','g'),'')=$6`,
     [item.company,item.series,item.number,item.installment,item.supplierCode,before.placa]);
     if(rows.length!==1)throw invalid(`Documento ${item.number} não encontrado de forma única para esta placa. Busque novamente.`);
     const amount=Number(rows[0].amount);

@@ -55,6 +55,9 @@ test('expense document plate fallback preserves the full invoice identity', {
     assert.equal((await search()).documents.length,1,'existing financial plate remains supported');
     payablePlate=null;
     assert.equal((await search()).documents.length,0,'missing plate does not bypass filtering');
+    assert.equal((await search({plate:''})).documents.length,1,'without vehicle selects only unassigned documents');
+    payablePlate='ABC1234';
+    assert.equal((await search({plate:''})).documents.length,0,'without vehicle never includes another vehicle');
   } finally {
     clientPool.query=original;
     await clientPool.end();
